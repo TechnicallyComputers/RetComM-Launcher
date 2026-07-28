@@ -1,0 +1,32 @@
+{
+  "id": "metal-warriors-snes",
+  "name": "Metal Warriors",
+  "kind": "recomp",
+  "platform": "snes",
+  "description": "SNES recomp of Metal Warriors.",
+  "homepage": "https://github.com/mstan/MetalWarriorsSNESRecomp",
+  "rom_identity": {
+    "crc32": ["f2ab92d4"]
+  },
+  "rom_extensions": [".sfc", ".smc", ".fig", ".swc"],
+  "release": {
+    "github": "mstan/MetalWarriorsSNESRecomp",
+    "asset_glob": {
+      "linux": "*linux*",
+      "windows": "*windows*",
+      "macos": "*macos*"
+    }
+  },
+  "install_dir_name": "MetalWarriorsSNESRecomp",
+  "launch": {
+    "linux": "MetalWarriorsSNESRecomp",
+    "windows": "MetalWarriorsSNESRecomp.exe",
+    "macos": "MetalWarriorsSNESRecomp"
+  },
+  "romm": {
+    "platforms": ["snes"]
+  },
+  "saves": {
+    "sram_glob": ["*.srm", "saves/*.srm"]
+  }
+}

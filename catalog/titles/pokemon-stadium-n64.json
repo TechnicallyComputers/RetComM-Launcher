@@ -1,0 +1,34 @@
+{
+  "id": "pokemon-stadium-n64",
+  "name": "Pokémon Stadium",
+  "kind": "recomp",
+  "platform": "n64",
+  "description": "N64 recomp of Pokémon Stadium.",
+  "homepage": "https://github.com/mstan/PokemonStadiumRecomp",
+  "rom_identity": {
+    "crc32": [],
+    "sha1": []
+  },
+  "rom_extensions": [".z64", ".n64", ".v64"],
+  "release": {
+    "github": "mstan/PokemonStadiumRecomp",
+    "asset_glob": {
+      "linux": "*linux*",
+      "windows": "*windows*",
+      "macos": "*macos*"
+    }
+  },
+  "install_dir_name": "PokemonStadiumRecomp",
+  "launch": {
+    "linux": "PokemonStadiumRecomp",
+    "windows": "PokemonStadiumRecomp.exe",
+    "macos": "PokemonStadiumRecomp"
+  },
+  "romm": {
+    "platforms": ["n64"]
+  },
+  "saves": {
+    "sram_glob": ["*.srm", "saves/*"]
+  },
+  "notes": "Fill rom_identity from the game's known hashes when pinning."
+}

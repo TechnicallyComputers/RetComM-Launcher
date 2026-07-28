@@ -1,0 +1,32 @@
+{
+  "id": "bomberman-party-edition-psx",
+  "name": "Bomberman Party Edition",
+  "kind": "recomp",
+  "platform": "psx",
+  "description": "PlayStation recomp of Bomberman Party Edition.",
+  "homepage": "https://github.com/mstan/BombermanPartyEditionRecomp",
+  "rom_identity": {
+    "disc_serials": []
+  },
+  "rom_extensions": [".cue", ".chd", ".iso", ".bin", ".exe"],
+  "release": {
+    "github": "mstan/BombermanPartyEditionRecomp",
+    "asset_glob": {
+      "linux": "*linux*",
+      "windows": "*windows*",
+      "macos": "*macos*"
+    }
+  },
+  "install_dir_name": "BombermanPartyEditionRecomp",
+  "launch": {
+    "linux": "Bomberman_Party_Edition_Recompiled",
+    "windows": "Bomberman_Party_Edition_Recompiled.exe",
+    "macos": "Bomberman_Party_Edition_Recompiled"
+  },
+  "romm": {
+    "platforms": ["psx", "ps1"]
+  },
+  "saves": {
+    "memcard_glob": ["*.mcd", "*.mcr", "saves/*.mcd"]
+  }
+}

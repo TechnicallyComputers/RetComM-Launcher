@@ -1,0 +1,33 @@
+{
+  "id": "megaman-x-snes",
+  "name": "Mega Man X",
+  "kind": "recomp",
+  "platform": "snes",
+  "description": "SNES recomp of Mega Man X.",
+  "rom_identity": {
+    "crc32": [],
+    "sha1": []
+  },
+  "rom_extensions": [".sfc", ".smc", ".fig", ".swc"],
+  "release": {
+    "github": "",
+    "asset_glob": {
+      "linux": "*linux*",
+      "windows": "*windows*",
+      "macos": "*macos*"
+    }
+  },
+  "install_dir_name": "MegaManXSNESRecomp",
+  "launch": {
+    "linux": "MegaManXSNESRecomp",
+    "windows": "MegaManXSNESRecomp.exe",
+    "macos": "MegaManXSNESRecomp"
+  },
+  "romm": {
+    "platforms": ["snes"]
+  },
+  "saves": {
+    "sram_glob": ["*.srm", "saves/*.srm"]
+  },
+  "notes": "Fill rom_identity + release.github from the shipping repo when pinning."
+}

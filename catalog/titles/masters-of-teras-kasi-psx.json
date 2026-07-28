@@ -1,0 +1,33 @@
+{
+  "id": "masters-of-teras-kasi-psx",
+  "name": "Masters of Teras Kasi",
+  "kind": "recomp",
+  "platform": "psx",
+  "description": "PlayStation recomp of Masters of Teras Kasi.",
+  "homepage": "https://github.com/mstan/MastersOfTerasKasiRecomp",
+  "rom_identity": {
+    "disc_serials": []
+  },
+  "rom_extensions": [".cue", ".chd", ".iso", ".bin", ".exe"],
+  "release": {
+    "github": "mstan/MastersOfTerasKasiRecomp",
+    "asset_glob": {
+      "linux": "*linux*",
+      "windows": "*windows*",
+      "macos": "*macos*"
+    }
+  },
+  "install_dir_name": "MastersOfTerasKasiRecomp",
+  "launch": {
+    "linux": "Masters_of_Teras_Kasi_Recompiled",
+    "windows": "Masters_of_Teras_Kasi_Recompiled.exe",
+    "macos": "Masters_of_Teras_Kasi_Recompiled"
+  },
+  "romm": {
+    "platforms": ["psx", "ps1"]
+  },
+  "saves": {
+    "memcard_glob": ["*.mcd", "*.mcr", "saves/*.mcd"]
+  },
+  "notes": "Disc identity uses serial/verdict via the game host; add disc_serials when locked."
+}

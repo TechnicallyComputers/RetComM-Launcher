@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "name": "Retcomm supported titles",
+  "titles": [
+    "metal-warriors-snes",
+    "megaman-x-snes",
+    "super-mario-world-coop-snes",
+    "masters-of-teras-kasi-psx",
+    "bomberman-party-edition-psx",
+    "pokemon-stadium-n64"
+  ]
+}

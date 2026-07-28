@@ -1,0 +1,13 @@
+{
+  "library_root": "/mnt/crucial4tb/Emulation/roms",
+  "platform_folders": {
+    "snes": ["snes"],
+    "n64": ["n64"],
+    "psx": ["ps", "ps1"]
+  },
+  "exclude_dirs": ["torrents", "emulators"],
+  "romm": {
+    "base_url": "https://your-romm.example",
+    "api_token": ""
+  }
+}
