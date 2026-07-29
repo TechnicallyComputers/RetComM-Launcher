@@ -3,6 +3,10 @@
 # Title catalog is maintained under ~/.local/share/retcomm/catalog (fetched on use).
 set -euo pipefail
 HERE="$(dirname "$(readlink -f "$0")")"
+# Hub font lookup and other relocatable paths use APPDIR. The type-2 runtime
+# normally sets this; export it ourselves so extracted AppDir / AppRun launches
+# and odd launchers still resolve usr/share/retcomm/fonts and usr/bin/fonts.
+export APPDIR="${APPDIR:-${HERE}}"
 export PATH="${HERE}/usr/bin:${PATH}"
 # Prefer bundled libs when present.
 if [[ -d "${HERE}/usr/lib" ]]; then

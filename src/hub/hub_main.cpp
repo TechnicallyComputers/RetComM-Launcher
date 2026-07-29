@@ -91,8 +91,20 @@ void load_hub_fonts() {
     if (!regular.empty()) {
         loaded = io.Fonts->AddFontFromFileTTF(regular.string().c_str(), kBody, &cfg, kRanges) !=
                  nullptr;
+        if (loaded) {
+            std::fprintf(stderr, "retcomm-hub: loaded UI font %s\n", regular.string().c_str());
+        } else {
+            std::fprintf(stderr, "retcomm-hub: failed to load UI font %s\n",
+                         regular.string().c_str());
+        }
     }
     if (!loaded) {
+        const char* appdir = std::getenv("APPDIR");
+        const char* base = SDL_GetBasePath();
+        std::fprintf(stderr,
+                     "retcomm-hub: using ImGui default font (LatoLatin-Regular.ttf not found; "
+                     "APPDIR=%s SDL_GetBasePath=%s)\n",
+                     appdir ? appdir : "(null)", base ? base : "(null)");
         cfg.SizePixels = kBody;
         io.Fonts->AddFontDefault(&cfg);
     }

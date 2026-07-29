@@ -102,31 +102,65 @@ if [[ ! -f "${APPIMAGE_OUT}" ]]; then
   exit 1
 fi
 
-# Verify fonts survived packaging (extract without FUSE).
+# Verify fonts survived packaging. Prefer --appimage-extract; if that fails
+# (no FUSE / display auth), unsquash at the type-2 squashfs offset. Hard-fail
+# when fonts are missing or the image cannot be inspected.
 VERIFY_DIR="${OUT_DIR}/.appimage-font-check"
 rm -rf "${VERIFY_DIR}"
 mkdir -p "${VERIFY_DIR}"
 (
   cd "${VERIFY_DIR}"
-  if "${APPIMAGE_OUT}" --appimage-extract >/dev/null 2>&1; then
-    :
-  elif "${APPIMAGE_OUT}" --appimage-extract-and-run true >/dev/null 2>&1; then
-    # Older runtimes: fall back to unsquash if available
-    if command -v unsquashfs >/dev/null 2>&1; then
-      unsquashfs -d squashfs-root "${APPIMAGE_OUT}" >/dev/null
-    fi
+  ROOT_DIR=""
+  if "${APPIMAGE_OUT}" --appimage-extract >/dev/null 2>&1 && [[ -d squashfs-root ]]; then
+    ROOT_DIR=squashfs-root
+  elif command -v unsquashfs >/dev/null 2>&1; then
+    # Type-2 AppImage: ELF runtime + squashfs. Find the last little-endian
+    # "hsqs" magic (false positives can appear earlier in the ELF).
+    OFFSET="$(python3 - "${APPIMAGE_OUT}" <<'PY'
+import struct, sys
+path = sys.argv[1]
+data = open(path, "rb").read()
+if data[:4] != b"\x7fELF":
+    sys.exit("not ELF")
+end = 0
+if data[4] == 2:  # ELFCLASS64
+    e_phoff = struct.unpack_from("<Q", data, 32)[0]
+    e_phentsize = struct.unpack_from("<H", data, 54)[0]
+    e_phnum = struct.unpack_from("<H", data, 56)[0]
+    for i in range(e_phnum):
+        off = e_phoff + i * e_phentsize
+        # Elf64_Phdr: type, flags, offset, vaddr, paddr, filesz, ...
+        p_offset, _vaddr, _paddr, p_filesz = struct.unpack_from("<QQQQ", data, off + 8)
+        end = max(end, p_offset + p_filesz)
+cands = [i for i in range(len(data) - 3) if data[i : i + 4] == b"hsqs"]
+if not cands:
+    sys.exit("no hsqs magic")
+after = [i for i in cands if i + 64 >= end]
+print(after[-1] if after else cands[-1])
+PY
+)"
+    echo "unsquashfs offset=${OFFSET}"
+    unsquashfs -o "${OFFSET}" -d squashfs-root "${APPIMAGE_OUT}" >/dev/null
+    ROOT_DIR=squashfs-root
   fi
-  if [[ -d squashfs-root ]]; then
-    if [[ ! -f squashfs-root/usr/share/retcomm/fonts/LatoLatin-Regular.ttf &&
-          ! -f squashfs-root/usr/bin/fonts/LatoLatin-Regular.ttf ]]; then
-      echo "error: AppImage is missing hub fonts (LatoLatin-Regular.ttf)" >&2
-      find squashfs-root/usr -name '*.ttf' 2>/dev/null || true
-      exit 1
-    fi
-    echo "fonts ok in AppImage"
-  else
-    echo "warning: could not extract AppImage to verify fonts; AppDir staging was checked" >&2
+
+  if [[ -z "${ROOT_DIR}" || ! -d "${ROOT_DIR}" ]]; then
+    echo "error: could not extract AppImage to verify hub fonts" >&2
+    echo "  need working --appimage-extract or unsquashfs" >&2
+    exit 1
   fi
+  if [[ ! -f "${ROOT_DIR}/usr/share/retcomm/fonts/LatoLatin-Regular.ttf" &&
+        ! -f "${ROOT_DIR}/usr/bin/fonts/LatoLatin-Regular.ttf" ]]; then
+    echo "error: AppImage is missing hub fonts (LatoLatin-Regular.ttf)" >&2
+    find "${ROOT_DIR}/usr" -name '*.ttf' 2>/dev/null || true
+    exit 1
+  fi
+  # AppRun must export APPDIR so hub font lookup works when the runtime does not.
+  if ! grep -q 'export APPDIR=' "${ROOT_DIR}/AppRun"; then
+    echo "error: AppRun does not export APPDIR (hub fonts may fail at runtime)" >&2
+    exit 1
+  fi
+  echo "fonts ok in AppImage"
 )
 rm -rf "${VERIFY_DIR}"
 
