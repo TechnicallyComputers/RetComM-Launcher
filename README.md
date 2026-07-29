@@ -59,9 +59,18 @@ and publishes a GitHub Release with the zips/AppImage.
 |---|---|
 | `RetComM-Launcher-<ver>-linux-x86_64.AppImage` | Linux |
 | `RetComM-Launcher-<ver>-linux-x86_64.zip` | Linux (self-update) |
-| `RetComM-Launcher-<ver>-windows-x64.zip` | Windows |
-| `RetComM-Launcher-<ver>-macos-arm64.zip` | macOS Apple Silicon (`.app`) |
-| `RetComM-Launcher-<ver>-macos-x86_64.zip` | macOS Intel (`.app`) |
+| `RetComM-Launcher-<ver>-windows-x64-setup.exe` | Windows installer (Start Menu / desktop; self-updates via zip) |
+| `RetComM-Launcher-<ver>-windows-portable.exe` | Windows single-file portable (self-updates in place) |
+| `RetComM-Launcher-<ver>-windows-x64.zip` | Windows folder / installer update payload |
+| `RetComM-Launcher-<ver>-macos-arm64.dmg` | macOS Apple Silicon (drag into Applications) |
+| `RetComM-Launcher-<ver>-macos-x86_64.dmg` | macOS Intel (drag into Applications) |
+| `RetComM-Launcher-<ver>-macos-arm64.zip` | macOS Apple Silicon (`.app` zip / self-update) |
+| `RetComM-Launcher-<ver>-macos-x86_64.zip` | macOS Intel (`.app` zip / self-update) |
+
+Windows portable launches the hub with no args; use
+`RetComM-Launcher-*-windows-portable.exe cli <command>` for the CLI (same idea as the
+Linux AppImage `cli` dispatch). Installer and portable each self-update from their
+matching release asset via **Update RetComM** in the hub.
 
 Packaging scripts live under `packaging/`; the generic icon is `assets/retcomm.svg`
 (rasterized by `packaging/make-icons.sh`).
@@ -79,7 +88,7 @@ Packaging scripts live under `packaging/`; the generic icon is `assets/retcomm.s
 # Configure a RomM/ES-style library (see config.example.json)
 mkdir -p ~/.config/retcomm
 cp config.example.json ~/.config/retcomm/config.json
-# edit library_root / bios_root / platform_folders as needed
+# edit library_root / bios_root / saves_root / platform_folders as needed
 
 ./build/retcomm config
 ./build/retcomm scan
@@ -143,7 +152,7 @@ src/                    CLI + core libraries
 include/retcomm/        public headers
 third_party/            nlohmann/json + stb
 assets/                 app icon (SVG / PNG)
-packaging/              AppImage, macOS .app, Windows zip helpers
+packaging/              AppImage, macOS .app/DMG, Windows zip helpers
 .github/workflows/      Release CI
 ```
 

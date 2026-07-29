@@ -507,8 +507,33 @@ RommSaveSyncResult sync_assets_with_romm(const Paths& paths, const AppConfig& cf
     if (!resolve_rom_id(cfg, title, on_progress, &rom_id, &how, &err))
         return fail(std::string("RomM ") + label + ": " + err);
 
+    // Native saves prefer the shared library tree; savestates stay install-local.
+    fs::path library_saves;
+    if (kind == SyncKind::Saves && !cfg.saves_root.empty()) {
+        library_saves = cfg.saves_dir_for_platform(title.platform, true);
+        if (library_saves.empty())
+            return fail("cannot create saves folder under " + cfg.saves_root.string());
+    }
+
     progress(on_progress, std::string("RomM ") + label + ": collecting local files…");
-    auto local = collect_local_assets(game_root, title, kind);
+    std::vector<LocalSave> local;
+    if (kind == SyncKind::Saves && !library_saves.empty()) {
+        local = collect_local_assets(library_saves, title, kind);
+        // Also pick up legacy install / preserved saves for upload/migration.
+        auto install_saves = collect_local_assets(game_root / "saves", title, kind);
+        for (auto& s : install_saves) {
+            bool exists = false;
+            for (const auto& e : local) {
+                if (lower_copy(e.file_name) == lower_copy(s.file_name)) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) local.push_back(std::move(s));
+        }
+    } else {
+        local = collect_local_assets(game_root, title, kind);
+    }
     const fs::path preserved = plan.install_root / "preserved";
     if (fs::is_directory(preserved, ec)) {
         auto more = collect_local_assets(preserved, title, kind);
@@ -541,8 +566,9 @@ RommSaveSyncResult sync_assets_with_romm(const Paths& paths, const AppConfig& cf
     result.rom_id = rom_id;
 
     std::unordered_set<int> handled_remote;
-    const fs::path dest_dir =
-        game_root / ((kind == SyncKind::Saves) ? "saves" : "states");
+    const fs::path dest_dir = (kind == SyncKind::Saves && !library_saves.empty())
+                                  ? library_saves
+                                  : (game_root / ((kind == SyncKind::Saves) ? "saves" : "states"));
 
     for (const auto& loc : local) {
         progress(on_progress, std::string("RomM ") + label + ": " + loc.file_name + "…");
@@ -760,28 +786,42 @@ int managed_save_sort_key(const ManagedSave& s) {
     return 0;
 }
 
-// Point saves/save.<ext> at preferred so fixed-path hosts (snesrecomp) share the
-// same bytes. Prefer a relative symlink; fall back to a hard link, then copy.
-bool activate_cart_default_slot(const fs::path& preferred, std::string* note) {
+// Point slot_dir/save.<ext> at preferred so fixed-path hosts (snesrecomp) share
+// the same bytes. Works across directories (library → install bridge).
+bool activate_cart_default_slot(const fs::path& preferred, const fs::path& slot_dir,
+                                std::string* note) {
     std::error_code ec;
     if (!fs::is_regular_file(preferred, ec) && !fs::is_symlink(preferred, ec)) return false;
-    const fs::path saves_dir = preferred.parent_path();
+    if (slot_dir.empty()) return false;
+    fs::create_directories(slot_dir, ec);
     const std::string ext = preferred.extension().string();
     if (ext.empty()) return false;
-    const fs::path dest = saves_dir / ("save" + ext);
+    const fs::path dest = slot_dir / ("save" + ext);
 
     if (fs::equivalent(preferred, dest, ec)) {
         if (note) *note = dest.filename().string() + " already active";
         return true;
     }
-    if (lower_copy(preferred.filename().string()) == lower_copy(dest.filename().string())) {
+    if (lower_copy(preferred.filename().string()) == lower_copy(dest.filename().string()) &&
+        preferred.parent_path() == slot_dir) {
         if (note) *note = preferred.filename().string();
         return true;
     }
 
     fs::remove(dest, ec);
     ec.clear();
-    fs::create_symlink(preferred.filename(), dest, ec);
+    if (preferred.parent_path() == slot_dir) {
+        fs::create_symlink(preferred.filename(), dest, ec);
+        if (!ec) {
+            if (note) *note = dest.filename().string() + " → " + preferred.filename().string();
+            return true;
+        }
+        ec.clear();
+    }
+    const fs::path abs = fs::weakly_canonical(preferred, ec);
+    const fs::path target = (!ec && !abs.empty()) ? abs : fs::absolute(preferred);
+    ec.clear();
+    fs::create_symlink(target, dest, ec);
     if (!ec) {
         if (note) *note = dest.filename().string() + " → " + preferred.filename().string();
         return true;
@@ -801,62 +841,81 @@ bool activate_cart_default_slot(const fs::path& preferred, std::string* note) {
     return false;
 }
 
-fs::path resolve_preferred_under_saves(const fs::path& game_root, const fs::path& preferred_save) {
-    if (preferred_save.empty() || game_root.empty()) return {};
+fs::path title_saves_dir(const Paths& paths, const AppConfig& cfg, const Title& title,
+                         bool create) {
+    if (!cfg.saves_root.empty()) {
+        const fs::path lib = cfg.saves_dir_for_platform(title.platform, create);
+        if (!lib.empty()) return lib;
+    }
+    const fs::path game_root = resolve_game_root(paths, title);
+    if (game_root.empty()) return {};
+    const fs::path dir = game_root / "saves";
+    if (create) {
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        if (ec) return {};
+    }
+    return dir;
+}
+
+fs::path resolve_preferred_under_saves(const fs::path& saves_dir, const fs::path& preferred_save) {
+    if (preferred_save.empty() || saves_dir.empty()) return {};
     std::error_code ec;
     fs::path p = preferred_save;
     if (!p.is_absolute()) {
-        // Accept "saves/Foo.sav" or bare "Foo.sav".
-        const std::string s = preferred_save.generic_string();
-        if (s.rfind("saves/", 0) == 0 || s.rfind("saves\\", 0) == 0)
-            p = game_root / preferred_save;
-        else
-            p = game_root / "saves" / preferred_save.filename();
+        p = saves_dir / preferred_save.filename();
     }
     if (fs::is_regular_file(p, ec) || fs::is_symlink(p, ec)) return p;
     return {};
 }
 
-} // namespace
-
-std::vector<ManagedSave> list_managed_saves(const Paths& paths, const Title& title) {
-    std::vector<ManagedSave> out;
-    const fs::path game_root = resolve_game_root(paths, title);
-    if (game_root.empty()) return out;
-
-    const auto exts = native_exts_for_title(title);
+void append_managed_from_dir(std::vector<ManagedSave>& out, const fs::path& saves_dir,
+                             const Title& title,
+                             const std::unordered_set<std::string>& exts) {
     std::error_code ec;
-    const fs::path saves_dir = game_root / "saves";
-    if (!fs::is_directory(saves_dir, ec)) return out;
-
+    if (!fs::is_directory(saves_dir, ec)) return;
     for (auto it = fs::directory_iterator(saves_dir, ec);
          !ec && it != fs::directory_iterator(); it.increment(ec)) {
-        // Include symlinks to regular files (active default slots).
         if (!it->is_regular_file(ec) && !it->is_symlink(ec)) continue;
         const fs::path path = it->path();
         const std::string rel = "saves/" + path.filename().generic_string();
-        if (!path_matches_native_glob(rel, title, exts)) continue;
-        // Skip dangling symlinks.
+        if (!path_matches_native_glob(rel, title, exts) &&
+            !path_matches_native_glob(path.filename().generic_string(), title, exts))
+            continue;
         if (it->is_symlink(ec) && !fs::exists(path, ec)) continue;
-        // Hide activation aliases (save.sav → Foo.sav) so the dropdown lists
-        // each logical save once — the real RomM / imported file name.
         if (it->is_symlink(ec)) {
-            const fs::path target = fs::read_symlink(path, ec);
-            if (!ec && !target.empty() && target.is_relative() &&
-                target.filename() == target &&
-                fs::exists(saves_dir / target, ec)) {
-                const std::string stem = lower_copy(path.stem().string());
-                if (stem == "save" || stem == "card1" || stem == "card2") continue;
+            const std::string stem = lower_copy(path.stem().string());
+            if (stem == "save" || stem == "card1" || stem == "card2") continue;
+        }
+        bool dup = false;
+        for (const auto& e : out) {
+            if (lower_copy(e.label) == lower_copy(path.filename().string())) {
+                dup = true;
+                break;
             }
         }
-
+        if (dup) continue;
         ManagedSave m;
         m.id = rel;
         m.label = path.filename().string();
         m.host_path = path;
         out.push_back(std::move(m));
     }
+}
 
+} // namespace
+
+std::vector<ManagedSave> list_managed_saves(const Paths& paths, const AppConfig& cfg,
+                                            const Title& title) {
+    std::vector<ManagedSave> out;
+    const auto exts = native_exts_for_title(title);
+    const fs::path primary = title_saves_dir(paths, cfg, title, false);
+    append_managed_from_dir(out, primary, title, exts);
+    if (!cfg.saves_root.empty()) {
+        const fs::path game_root = resolve_game_root(paths, title);
+        if (!game_root.empty())
+            append_managed_from_dir(out, game_root / "saves", title, exts);
+    }
     std::sort(out.begin(), out.end(), [](const ManagedSave& a, const ManagedSave& b) {
         const int ka = managed_save_sort_key(a);
         const int kb = managed_save_sort_key(b);
@@ -866,14 +925,35 @@ std::vector<ManagedSave> list_managed_saves(const Paths& paths, const Title& tit
     return out;
 }
 
-fs::path resolve_managed_save(const Paths& paths, const Title& title, const std::string& save_id) {
+fs::path resolve_managed_save(const Paths& paths, const AppConfig& cfg, const Title& title,
+                              const std::string& save_id) {
     if (save_id.empty()) return {};
-    const fs::path game_root = resolve_game_root(paths, title);
-    return resolve_preferred_under_saves(game_root, save_id);
+    const fs::path primary = title_saves_dir(paths, cfg, title, false);
+    fs::path hit = resolve_preferred_under_saves(primary, save_id);
+    if (!hit.empty()) return hit;
+    if (!cfg.saves_root.empty()) {
+        const fs::path game_root = resolve_game_root(paths, title);
+        if (!game_root.empty())
+            return resolve_preferred_under_saves(game_root / "saves", save_id);
+    }
+    return {};
 }
 
-RecompSaveBindResult bind_recomp_save_paths(const Paths& paths, const Title& title,
-                                            bool use_wine, const fs::path& preferred_save) {
+fs::path resolve_save_arg(const fs::path& saves_dir, const fs::path& arg) {
+    if (arg.empty() || saves_dir.empty()) return {};
+    std::error_code ec;
+    if (arg.is_absolute()) {
+        if (fs::is_regular_file(arg, ec) || fs::is_symlink(arg, ec)) return arg;
+        return resolve_preferred_under_saves(saves_dir, arg);
+    }
+    return resolve_preferred_under_saves(saves_dir, arg);
+}
+
+RecompSaveBindResult bind_recomp_save_paths(const Paths& paths, const AppConfig& cfg,
+                                            const Title& title, bool use_wine,
+                                            const fs::path& preferred_save,
+                                            const fs::path& preferred_save_card2,
+                                            bool card2_blank) {
     RecompSaveBindResult r;
     const fs::path game_root = resolve_game_root(paths, title);
     if (game_root.empty()) {
@@ -882,15 +962,19 @@ RecompSaveBindResult bind_recomp_save_paths(const Paths& paths, const Title& tit
     }
 
     std::error_code ec;
-    const fs::path saves_dir = game_root / "saves";
-    fs::create_directories(saves_dir, ec);
-    if (ec) {
-        r.message = "save bind: cannot create " + saves_dir.string();
+    const fs::path saves_dir = title_saves_dir(paths, cfg, title, true);
+    if (saves_dir.empty()) {
+        r.message = "save bind: cannot create saves directory";
         return r;
     }
     r.saves_dir = saves_dir;
 
-    const fs::path preferred = resolve_preferred_under_saves(game_root, preferred_save);
+    // Hosts that only look under cwd/saves get a bridge into the library tree.
+    const fs::path install_saves = game_root / "saves";
+    fs::create_directories(install_saves, ec);
+
+    fs::path preferred = resolve_save_arg(saves_dir, preferred_save);
+    fs::path preferred_card2 = resolve_save_arg(saves_dir, preferred_save_card2);
 
     std::vector<fs::path> memcards;
     std::vector<fs::path> batteries;
@@ -913,13 +997,16 @@ RecompSaveBindResult bind_recomp_save_paths(const Paths& paths, const Title& tit
         if (!preferred.empty() && is_battery_ext(lower_copy(preferred.extension().string()))) {
             r.active_save = preferred;
             std::string act;
-            if (activate_cart_default_slot(preferred, &act))
+            // Bridge into install saves/ for fixed-path hosts; also keep a
+            // library-local save.* alias when preferred lives there.
+            if (activate_cart_default_slot(preferred, install_saves, &act))
                 notes << "active save " << preferred.filename().string()
                       << (act.empty() ? "" : (" (" + act + ")")) << "; ";
             else
                 notes << "active save " << preferred.filename().string() << "; ";
+            if (preferred.parent_path() == saves_dir)
+                activate_cart_default_slot(preferred, saves_dir, nullptr);
         } else if (!batteries.empty()) {
-            // No picker selection: seed empty default slots from a synced file.
             auto seed_default = [&](const char* dest_name) {
                 const fs::path dest = saves_dir / dest_name;
                 if (fs::is_regular_file(dest, ec) || fs::is_symlink(dest, ec)) {
@@ -934,9 +1021,11 @@ RecompSaveBindResult bind_recomp_save_paths(const Paths& paths, const Title& tit
                 }
                 if (src.empty()) return;
                 fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
-                if (!ec)
+                if (!ec) {
                     notes << "seeded " << dest_name << " from " << src.filename().string()
                           << "; ";
+                    activate_cart_default_slot(dest, install_saves, nullptr);
+                }
             };
             seed_default("save.srm");
             seed_default("save.sav");
@@ -964,19 +1053,16 @@ RecompSaveBindResult bind_recomp_save_paths(const Paths& paths, const Title& tit
 
         auto still_valid = [&](const std::string& p) -> fs::path {
             if (p.empty()) return {};
-            // Strip Wine Z: prefix for host existence checks.
             std::string host = p;
             if (host.rfind("Z:", 0) == 0 || host.rfind("z:", 0) == 0) host = host.substr(2);
             fs::path fp(host);
             if (!fs::is_regular_file(fp, ec) && !fs::is_symlink(fp, ec)) return {};
-            // Prefer cards that live under our saves_dir.
             const auto canon = fs::weakly_canonical(fp, ec);
             const auto saves_canon = fs::weakly_canonical(saves_dir, ec);
             if (!ec && !saves_canon.empty() && !canon.empty()) {
                 const std::string a = canon.generic_string();
                 const std::string b = saves_canon.generic_string();
                 if (a.rfind(b, 0) != 0) {
-                    // Outside sync folder — still usable, but prefer sync picks when available.
                     if (!memcards.empty()) return {};
                 }
             }
@@ -987,7 +1073,14 @@ RecompSaveBindResult bind_recomp_save_paths(const Paths& paths, const Title& tit
         if (!preferred.empty() && is_memcard_ext(lower_copy(preferred.extension().string())))
             card1 = preferred;
         if (card1.empty()) card1 = still_valid(prev_card1);
-        fs::path card2 = still_valid(prev_card2);
+
+        fs::path card2;
+        if (card2_blank) {
+            card2 = saves_dir / "card2.mcd";
+        } else if (!preferred_card2.empty() &&
+                   is_memcard_ext(lower_copy(preferred_card2.extension().string()))) {
+            card2 = preferred_card2;
+        }
 
         if (card1.empty()) {
             if (!memcards.empty())
@@ -996,10 +1089,14 @@ RecompSaveBindResult bind_recomp_save_paths(const Paths& paths, const Title& tit
                 card1 = saves_dir / "card1.mcd";
         }
         if (card2.empty()) {
-            for (const auto& m : memcards) {
-                if (m == card1) continue;
-                card2 = m;
-                break;
+            // No explicit card2 preference — keep prior valid card2, else auto-pick.
+            card2 = still_valid(prev_card2);
+            if (card2.empty()) {
+                for (const auto& m : memcards) {
+                    if (m == card1) continue;
+                    card2 = m;
+                    break;
+                }
             }
             if (card2.empty()) card2 = saves_dir / "card2.mcd";
         }
@@ -1033,7 +1130,7 @@ RecompSaveBindResult bind_recomp_save_paths(const Paths& paths, const Title& tit
             return r;
         }
         notes << "settings.toml [memcard] → " << saves_dir.string() << " (card1="
-              << card1.filename().string() << ")";
+              << card1.filename().string() << ", card2=" << card2.filename().string() << ")";
     } else if (notes.str().empty()) {
         notes << "saves dir ready: " << saves_dir.string();
     }
@@ -1043,6 +1140,10 @@ RecompSaveBindResult bind_recomp_save_paths(const Paths& paths, const Title& tit
     return r;
 }
 
+bool title_uses_memcards(const Title& title) {
+    return is_disc_platform(title.platform) || !title.saves_memcard_glob.empty();
+}
+
 RommSaveSyncResult sync_saves_with_romm(const Paths& paths, const AppConfig& cfg,
                                         const Title& title, RommProgressFn on_progress) {
     auto result = sync_assets_with_romm(paths, cfg, title, SyncKind::Saves, on_progress);
@@ -1050,18 +1151,25 @@ RommSaveSyncResult sync_saves_with_romm(const Paths& paths, const AppConfig& cfg
         const auto plan = inspect_install(paths, title);
         const bool wine = plan.record && plan.record->runtime == "wine";
         fs::path preferred;
+        fs::path preferred_card2;
+        bool card2_blank = false;
         {
             const auto st = load_app_state(paths.state_path);
             const std::string save_id = preferred_save_for(st, title.id);
-            if (!save_id.empty()) preferred = resolve_managed_save(paths, title, save_id);
+            if (!save_id.empty()) preferred = resolve_managed_save(paths, cfg, title, save_id);
+            const std::string card2_id = preferred_save_card2_for(st, title.id);
+            if (card2_id == kBlankMemcardId)
+                card2_blank = true;
+            else if (!card2_id.empty())
+                preferred_card2 = resolve_managed_save(paths, cfg, title, card2_id);
         }
-        auto bind = bind_recomp_save_paths(paths, title, wine, preferred);
+        auto bind = bind_recomp_save_paths(paths, cfg, title, wine, preferred, preferred_card2,
+                                           card2_blank);
         if (!bind.message.empty()) {
             result.message += "\n";
             result.message += bind.message;
         }
         if (!bind.ok && result.message.find("save bind:") == std::string::npos) {
-            // Non-fatal: sync itself succeeded.
             result.message += "\nwarning: could not bind recomp save paths";
         }
     }

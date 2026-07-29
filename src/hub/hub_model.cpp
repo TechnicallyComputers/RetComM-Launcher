@@ -132,37 +132,57 @@ void HubModel::refresh_rows(bool check_updates) {
         }
 
         if (row.installed) {
-            const auto saves = list_managed_saves(paths, t);
+            const auto saves = list_managed_saves(paths, cfg, t);
             row.save_ids.reserve(saves.size());
             row.save_labels.reserve(saves.size());
             for (const auto& s : saves) {
                 row.save_ids.push_back(s.id);
                 row.save_labels.push_back(s.label);
             }
-            row.preferred_save = preferred_save_for(app_state, t.id);
-            row.preferred_save_index = -1;
-            if (!row.preferred_save.empty()) {
+            row.dual_memcard = title_uses_memcards(t);
+
+            auto resolve_index = [&](std::string& id) -> int {
+                if (id.empty() || id == kBlankMemcardId) return -1;
                 for (size_t i = 0; i < row.save_ids.size(); ++i) {
-                    if (row.save_ids[i] == row.preferred_save) {
-                        row.preferred_save_index = static_cast<int>(i);
-                        break;
+                    if (row.save_ids[i] == id) return static_cast<int>(i);
+                }
+                const std::string want = fs::path(id).filename().string();
+                for (size_t i = 0; i < row.save_labels.size(); ++i) {
+                    if (row.save_labels[i] == want) {
+                        id = row.save_ids[i];
+                        return static_cast<int>(i);
                     }
                 }
-                // Prefer bare filename match if id form drifted.
-                if (row.preferred_save_index < 0) {
-                    const std::string want = fs::path(row.preferred_save).filename().string();
-                    for (size_t i = 0; i < row.save_labels.size(); ++i) {
-                        if (row.save_labels[i] == want) {
-                            row.preferred_save_index = static_cast<int>(i);
-                            row.preferred_save = row.save_ids[i];
-                            break;
-                        }
-                    }
-                }
-            }
+                return -1;
+            };
+
+            row.preferred_save = preferred_save_for(app_state, t.id);
+            row.preferred_save_index = resolve_index(row.preferred_save);
             if (row.preferred_save_index < 0 && !row.save_ids.empty()) {
                 row.preferred_save_index = 0;
                 row.preferred_save = row.save_ids[0];
+            }
+
+            if (row.dual_memcard) {
+                row.preferred_save_card2 = preferred_save_card2_for(app_state, t.id);
+                if (row.preferred_save_card2 == kBlankMemcardId) {
+                    row.preferred_save_card2_index = -1;
+                } else if (row.preferred_save_card2.empty()) {
+                    // No preference yet: default to a different file than card1, else blank.
+                    row.preferred_save_card2_index = -1;
+                    for (size_t i = 0; i < row.save_ids.size(); ++i) {
+                        if (static_cast<int>(i) == row.preferred_save_index) continue;
+                        row.preferred_save_card2_index = static_cast<int>(i);
+                        row.preferred_save_card2 = row.save_ids[i];
+                        break;
+                    }
+                    if (row.preferred_save_card2_index < 0)
+                        row.preferred_save_card2 = kBlankMemcardId;
+                } else {
+                    row.preferred_save_card2_index = resolve_index(row.preferred_save_card2);
+                    if (row.preferred_save_card2_index < 0)
+                        row.preferred_save_card2 = kBlankMemcardId;
+                }
             }
         }
 
@@ -275,11 +295,20 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     app_state = load_app_state(paths.state_path);
                     const std::string save_id = preferred_save_for(app_state, title_id);
                     if (!save_id.empty()) {
-                        opts.save_path = resolve_managed_save(paths, *t, save_id);
+                        opts.save_path = resolve_managed_save(paths, cfg, *t, save_id);
                         if (opts.save_path.empty()) opts.save_path = save_id;
                     } else {
-                        const auto saves = list_managed_saves(paths, *t);
+                        const auto saves = list_managed_saves(paths, cfg, *t);
                         if (!saves.empty()) opts.save_path = saves.front().host_path;
+                    }
+                    if (title_uses_memcards(*t)) {
+                        const std::string card2_id = preferred_save_card2_for(app_state, title_id);
+                        if (card2_id == kBlankMemcardId) {
+                            opts.save_path_card2_blank = true;
+                        } else if (!card2_id.empty()) {
+                            opts.save_path_card2 =
+                                resolve_managed_save(paths, cfg, *t, card2_id);
+                        }
                     }
                 }
                 auto r = launch_title(paths, *t, opts);
@@ -629,6 +658,7 @@ void HubModel::open_settings() {
     cfg = load_app_config(paths.config_path);
     copy_buf(settings.library_root, sizeof(settings.library_root), cfg.library_root.string());
     copy_buf(settings.bios_root, sizeof(settings.bios_root), cfg.bios_root.string());
+    copy_buf(settings.saves_root, sizeof(settings.saves_root), cfg.saves_root.string());
     copy_buf(settings.exclude_dirs, sizeof(settings.exclude_dirs), join_csv(cfg.exclude_dirs));
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
 
@@ -661,6 +691,7 @@ void HubModel::open_setup() {
     cfg = load_app_config(paths.config_path);
     copy_buf(settings.library_root, sizeof(settings.library_root), cfg.library_root.string());
     copy_buf(settings.bios_root, sizeof(settings.bios_root), cfg.bios_root.string());
+    copy_buf(settings.saves_root, sizeof(settings.saves_root), cfg.saves_root.string());
     copy_buf(settings.exclude_dirs, sizeof(settings.exclude_dirs), join_csv(cfg.exclude_dirs));
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
     settings.platform_folders.clear();
@@ -692,6 +723,10 @@ void HubModel::apply_pending_folder_pick() {
         copy_buf(settings.bios_root, sizeof(settings.bios_root), path);
         settings.dirty = true;
         set_status("BIOS folder selected");
+    } else if (target == FolderPickTarget::SavesRoot) {
+        copy_buf(settings.saves_root, sizeof(settings.saves_root), path);
+        settings.dirty = true;
+        set_status("Saves folder selected");
     }
 }
 
@@ -707,6 +742,7 @@ bool HubModel::save_settings(std::string* error) {
     AppConfig next = cfg;
     next.library_root = settings.library_root;
     next.bios_root = settings.bios_root;
+    next.saves_root = settings.saves_root;
     next.exclude_dirs = split_csv(settings.exclude_dirs);
     next.prefer_local_boxart = settings.prefer_local_boxart;
 
@@ -793,6 +829,31 @@ bool HubModel::set_title_preferred_save(const std::string& title_id, const std::
             if (row.save_ids[i] == save_id) {
                 row.preferred_save_index = static_cast<int>(i);
                 break;
+            }
+        }
+        break;
+    }
+    return true;
+}
+
+bool HubModel::set_title_preferred_save_card2(const std::string& title_id,
+                                              const std::string& save_id, std::string* error) {
+    app_state = load_app_state(paths.state_path);
+    const std::string id = save_id.empty() ? kBlankMemcardId : save_id;
+    set_preferred_save_card2(app_state, title_id, id);
+    if (!save_app_state(paths.state_path, app_state, error)) return false;
+
+    std::lock_guard<std::mutex> lock(mu);
+    for (auto& row : rows) {
+        if (row.id != title_id) continue;
+        row.preferred_save_card2 = id;
+        row.preferred_save_card2_index = -1;
+        if (id != kBlankMemcardId) {
+            for (size_t i = 0; i < row.save_ids.size(); ++i) {
+                if (row.save_ids[i] == id) {
+                    row.preferred_save_card2_index = static_cast<int>(i);
+                    break;
+                }
             }
         }
         break;

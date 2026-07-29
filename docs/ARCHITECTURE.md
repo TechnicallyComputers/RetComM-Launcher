@@ -79,6 +79,16 @@ sizes/filenames from catalog `bios_identity` (including
 (`PPSSPP`, `Mupen64plus`, …), and binds preferred BIOS dumps to titles.
 `launch` passes `--bios` and stages `bios.cfg` when a binding exists.
 
+## Game saves
+
+Config `saves_root` (optional, prompted in first-time setup / Library Settings)
+is a shared native-save library. When set, RomM save sync and the hub save
+picker use `saves_root/<platform folder>/`. Launch binds cart `--save-path` /
+PSX `settings.toml` `[memcard]` to those files, and bridges
+`apps/<title>/current/saves/save.*` with symlinks for hosts that only look
+under the install cwd. When unset, behavior stays install-local
+`…/current/saves/`. Savestate sync remains install-local either way.
+
 ## RomM (optional)
 
 Companion-app style: base URL + API token in config. List platforms/ROMs and

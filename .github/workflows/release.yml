@@ -151,14 +151,22 @@ jobs:
           cmake --build build --config Release -j
           cmake --install build --config Release
 
-      - name: Package zip
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { throw "ISCC.exe not found after innosetup install" }
+          Write-Host "ISCC: $iscc"
+
+      - name: Package zip + portable + installer
         shell: pwsh
         run: |
           # CMake install ships TARGET_RUNTIME_DLLS into out/bin. Also pass the
           # MSVC Release dir where vcpkg applocal copies SDL3/libcurl during build.
           $releaseDir = Join-Path $env:GITHUB_WORKSPACE "build\Release"
-          Write-Host "out/bin DLLs:"
-          Get-ChildItem (Join-Path $env:GITHUB_WORKSPACE "out\bin") -Filter "*.dll" -ErrorAction SilentlyContinue |
+          Write-Host "out/bin:"
+          Get-ChildItem (Join-Path $env:GITHUB_WORKSPACE "out\bin") -ErrorAction SilentlyContinue |
             ForEach-Object { Write-Host "  $($_.Name)" }
           Write-Host "build/Release DLLs:"
           Get-ChildItem $releaseDir -Filter "*.dll" -ErrorAction SilentlyContinue |
@@ -167,13 +175,26 @@ jobs:
             -Prefix (Join-Path $env:GITHUB_WORKSPACE "out") `
             -Version "${{ needs.version.outputs.version }}" `
             -VcpkgBin $releaseDir `
-            -Arch x64
+            -Arch x64 `
+            -InnoSetup "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           Get-ChildItem dist
+          $need = @(
+            "RetComM-Launcher-${{ needs.version.outputs.version }}-windows-x64.zip",
+            "RetComM-Launcher-${{ needs.version.outputs.version }}-windows-portable.exe",
+            "RetComM-Launcher-${{ needs.version.outputs.version }}-windows-x64-setup.exe"
+          )
+          foreach ($n in $need) {
+            $p = Join-Path dist $n
+            if (-not (Test-Path $p)) { throw "Missing release artifact: $n" }
+          }
 
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
-          path: dist/RetComM-Launcher-*-windows-x64.zip
+          path: |
+            dist/RetComM-Launcher-*-windows-x64.zip
+            dist/RetComM-Launcher-*-windows-portable.exe
+            dist/RetComM-Launcher-*-windows-x64-setup.exe
 
   macos:
     needs: version
@@ -212,7 +233,7 @@ jobs:
           file out/bin/retcomm-hub
           otool -L out/bin/retcomm-hub | head
 
-      - name: Package .app zip
+      - name: Package .app zip + DMG
         run: |
           ./packaging/macos/build-app.sh "$PWD/out" "${{ needs.version.outputs.version }}" "${{ matrix.arch }}"
           ls -lah dist/
@@ -220,7 +241,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: macos-${{ matrix.arch }}
-          path: dist/RetComM-Launcher-*-macos-${{ matrix.arch }}.zip
+          path: |
+            dist/RetComM-Launcher-*-macos-${{ matrix.arch }}.zip
+            dist/RetComM-Launcher-*-macos-${{ matrix.arch }}.dmg
 
   publish:
     needs: [version, linux, windows, macos]
@@ -237,7 +260,7 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p dist
-          find artifacts -type f \( -name '*.AppImage' -o -name '*.zip' \) -exec cp -v {} dist/ \;
+          find artifacts -type f \( -name '*.AppImage' -o -name '*.zip' -o -name '*.exe' -o -name '*.dmg' \) -exec cp -v {} dist/ \;
           ls -lah dist/
           test -n "$(ls -A dist)" || { echo "No release artifacts found" >&2; exit 1; }
 

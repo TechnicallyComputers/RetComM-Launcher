@@ -70,11 +70,14 @@ struct TitleRow {
     bool romm_ready = false; // base_url + api_token configured
     bool busy = false;
 
-    // Managed native saves (install saves/) — labels for UI; ids are "saves/<file>".
+    // Managed native saves (library saves_root or install saves/) — ids "saves/<file>".
     std::vector<std::string> save_ids;
     std::vector<std::string> save_labels;
-    std::string preferred_save; // save id; empty = none / auto
+    bool dual_memcard = false; // disc / memcard_glob titles → two dropdowns
+    std::string preferred_save; // cart battery or memcard 1 id
     int preferred_save_index = -1;
+    std::string preferred_save_card2; // memcard 2 id; "__blank__" = empty card
+    int preferred_save_card2_index = -1; // -1 = Blank card
 };
 
 struct PlatformFolderEdit {
@@ -85,6 +88,7 @@ struct PlatformFolderEdit {
 struct SettingsDraft {
     char library_root[1024]{};
     char bios_root[1024]{};
+    char saves_root[1024]{};
     char exclude_dirs[1024]{}; // comma-separated
     bool prefer_local_boxart = false;
     std::vector<PlatformFolderEdit> platform_folders;
@@ -103,6 +107,7 @@ enum class FolderPickTarget : int {
     None = 0,
     LibraryRoot,
     BiosRoot,
+    SavesRoot,
 };
 
 struct HubModel {
@@ -153,8 +158,12 @@ struct HubModel {
     bool save_romm_settings(std::string* error = nullptr);
 
     // Persist preferred managed save for a title (empty clears).
+    // Cart: battery file. Disc: memcard 1.
     bool set_title_preferred_save(const std::string& title_id, const std::string& save_id,
                                   std::string* error = nullptr);
+    // Disc memcard 2. Pass kBlankMemcardId / empty for a blank card2.mcd.
+    bool set_title_preferred_save_card2(const std::string& title_id, const std::string& save_id,
+                                        std::string* error = nullptr);
 
     // Apply a completed folder pick into settings drafts (call from UI thread).
     void apply_pending_folder_pick();

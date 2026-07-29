@@ -10,6 +10,14 @@ namespace {
 
 using nlohmann::json;
 
+void load_string_map(const json& j, const char* key,
+                     std::unordered_map<std::string, std::string>& out) {
+    if (!j.contains(key) || !j.at(key).is_object()) return;
+    for (auto it = j.at(key).begin(); it != j.at(key).end(); ++it) {
+        if (it.value().is_string()) out[it.key()] = it.value().get<std::string>();
+    }
+}
+
 } // namespace
 
 AppState load_app_state(const fs::path& path) {
@@ -20,14 +28,9 @@ AppState load_app_state(const fs::path& path) {
         json j;
         in >> j;
         st.schema_version = j.value("schema_version", 1);
-        if (j.contains("preferred_save") && j.at("preferred_save").is_object()) {
-            for (auto it = j.at("preferred_save").begin(); it != j.at("preferred_save").end();
-                 ++it) {
-                if (it.value().is_string())
-                    st.preferred_save[it.key()] = it.value().get<std::string>();
-            }
-        }
-        // Alternate nested form: titles.<id>.preferred_save
+        load_string_map(j, "preferred_save", st.preferred_save);
+        load_string_map(j, "preferred_save_card2", st.preferred_save_card2);
+        // Alternate nested form: titles.<id>.preferred_save / preferred_save_card2
         if (j.contains("titles") && j.at("titles").is_object()) {
             for (auto it = j.at("titles").begin(); it != j.at("titles").end(); ++it) {
                 if (!it.value().is_object()) continue;
@@ -35,6 +38,12 @@ AppState load_app_state(const fs::path& path) {
                 if (tj.contains("preferred_save") && tj.at("preferred_save").is_string()) {
                     if (!st.preferred_save.count(it.key()))
                         st.preferred_save[it.key()] = tj.at("preferred_save").get<std::string>();
+                }
+                if (tj.contains("preferred_save_card2") &&
+                    tj.at("preferred_save_card2").is_string()) {
+                    if (!st.preferred_save_card2.count(it.key()))
+                        st.preferred_save_card2[it.key()] =
+                            tj.at("preferred_save_card2").get<std::string>();
                 }
             }
         }
@@ -52,6 +61,11 @@ bool save_app_state(const fs::path& path, const AppState& state, std::string* er
     j["preferred_save"] = json::object();
     for (const auto& [id, save] : state.preferred_save) {
         if (!id.empty() && !save.empty()) j["preferred_save"][id] = save;
+    }
+    j["preferred_save_card2"] = json::object();
+    for (const auto& [id, save] : state.preferred_save_card2) {
+        // Persist explicit blank as empty string only when key was set — we erase blanks.
+        if (!id.empty() && !save.empty()) j["preferred_save_card2"][id] = save;
     }
 
     const fs::path tmp = path.string() + ".tmp";
@@ -83,6 +97,21 @@ void set_preferred_save(AppState& state, const std::string& title_id, const std:
         state.preferred_save.erase(title_id);
     else
         state.preferred_save[title_id] = save_id;
+}
+
+std::string preferred_save_card2_for(const AppState& state, const std::string& title_id) {
+    const auto it = state.preferred_save_card2.find(title_id);
+    if (it == state.preferred_save_card2.end()) return {};
+    return it->second;
+}
+
+void set_preferred_save_card2(AppState& state, const std::string& title_id,
+                              const std::string& save_id) {
+    if (title_id.empty()) return;
+    if (save_id.empty())
+        state.preferred_save_card2.erase(title_id);
+    else
+        state.preferred_save_card2[title_id] = save_id;
 }
 
 } // namespace retcomm

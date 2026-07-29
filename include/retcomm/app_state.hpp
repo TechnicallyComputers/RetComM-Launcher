@@ -13,8 +13,11 @@ namespace fs = std::filesystem;
 // Hub-wide prefs in data_dir/state.json (preferred save slot per title, etc.).
 struct AppState {
     int schema_version = 1;
-    // title_id → release-relative save id, e.g. "saves/Pokemon - Emerald Version (U).sav"
+    // title_id → managed save id, e.g. "saves/Pokemon - Emerald Version (U).sav"
+    // Cart: the battery file. Disc: memcard slot 1 (card1).
     std::unordered_map<std::string, std::string> preferred_save;
+    // Disc / dual-memcard titles: memcard slot 2 (card2). Empty = blank card2.mcd.
+    std::unordered_map<std::string, std::string> preferred_save_card2;
 };
 
 AppState load_app_state(const fs::path& path);
@@ -22,5 +25,9 @@ bool save_app_state(const fs::path& path, const AppState& state, std::string* er
 
 std::string preferred_save_for(const AppState& state, const std::string& title_id);
 void set_preferred_save(AppState& state, const std::string& title_id, const std::string& save_id);
+
+std::string preferred_save_card2_for(const AppState& state, const std::string& title_id);
+void set_preferred_save_card2(AppState& state, const std::string& title_id,
+                              const std::string& save_id);
 
 } // namespace retcomm

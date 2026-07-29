@@ -2,10 +2,11 @@
 #include "hub/hub_model.hpp"
 #include "hub/hub_theme.hpp"
 
+#include "retcomm/catalog_sync.hpp"
 #include "retcomm/config.hpp"
 #include "retcomm/paths.hpp"
+#include "retcomm/romm_saves.hpp"
 #include "retcomm/self_update.hpp"
-#include "retcomm/catalog_sync.hpp"
 
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
@@ -299,10 +300,53 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
         if (ImGui::Button("Update", ImVec2(btn_w, 0))) hub.start_job(HubJob::Update, row.id);
 
         ImGui::Dummy(ImVec2(0, 6));
-        ImGui::TextColored(th.text_muted, "Save file");
         if (row.save_labels.empty()) {
+            ImGui::TextColored(th.text_muted, "Save file");
             ImGui::TextColored(th.text_muted, "None yet — Sync Game Saves from RomM");
+        } else if (row.dual_memcard) {
+            auto draw_memcard_combo = [&](const char* label, const char* combo_id, int index,
+                                          bool is_card2) {
+                ImGui::TextColored(th.text_muted, "%s", label);
+                const char* preview = "(Blank card)";
+                if (index >= 0 && index < static_cast<int>(row.save_labels.size()))
+                    preview = row.save_labels[static_cast<size_t>(index)].c_str();
+                ImGui::SetNextItemWidth(-1);
+                if (ImGui::BeginCombo(combo_id, preview)) {
+                    if (is_card2) {
+                        const bool blank_sel = index < 0;
+                        if (ImGui::Selectable("(Blank card)", blank_sel)) {
+                            std::string err;
+                            if (!hub.set_title_preferred_save_card2(
+                                    row.id, retcomm::kBlankMemcardId, &err))
+                                hub.append_log("Could not save preference: " + err);
+                        }
+                        if (blank_sel) ImGui::SetItemDefaultFocus();
+                    }
+                    for (size_t i = 0; i < row.save_labels.size(); ++i) {
+                        const bool selected = static_cast<int>(i) == index;
+                        if (ImGui::Selectable(row.save_labels[i].c_str(), selected)) {
+                            std::string err;
+                            const bool ok =
+                                is_card2
+                                    ? hub.set_title_preferred_save_card2(row.id, row.save_ids[i],
+                                                                         &err)
+                                    : hub.set_title_preferred_save(row.id, row.save_ids[i], &err);
+                            if (!ok) hub.append_log("Could not save preference: " + err);
+                        }
+                        if (selected) ImGui::SetItemDefaultFocus();
+                    }
+                    ImGui::EndCombo();
+                }
+            };
+            draw_memcard_combo("Memcard 1", "##memcard1", row.preferred_save_index, false);
+            ImGui::Dummy(ImVec2(0, 4));
+            draw_memcard_combo("Memcard 2", "##memcard2", row.preferred_save_card2_index, true);
+            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+            ImGui::TextWrapped(
+                "Play writes these into settings.toml [memcard] card1 / card2.");
+            ImGui::PopStyleColor();
         } else {
+            ImGui::TextColored(th.text_muted, "Save file");
             const char* preview =
                 (row.preferred_save_index >= 0 &&
                  row.preferred_save_index < static_cast<int>(row.save_labels.size()))
@@ -322,8 +366,7 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
                 ImGui::EndCombo();
             }
             ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-            ImGui::TextWrapped(
-                "Play uses this managed save (cart: --save-path; disc: memcard slot).");
+            ImGui::TextWrapped("Play uses this managed save via --save-path.");
             ImGui::PopStyleColor();
         }
 
@@ -450,6 +493,17 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
                                sizeof(hub.settings.bios_root), hub, window,
                                FolderPickTarget::BiosRoot, th))
         hub.settings.dirty = true;
+
+    ImGui::Dummy(ImVec2(0, 6));
+    if (path_field_with_browse("Game saves root", "##saves_root", hub.settings.saves_root,
+                               sizeof(hub.settings.saves_root), hub, window,
+                               FolderPickTarget::SavesRoot, th))
+        hub.settings.dirty = true;
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextWrapped(
+        "Native SRAM / memcard files (RomM sync + launch). Per-platform folders under this "
+        "root (e.g. …/saves/snes). Leave empty to keep saves inside each install.");
+    ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0, 6));
     ImGui::TextColored(th.text_muted, "Exclude dirs (comma-separated basenames)");
@@ -608,8 +662,9 @@ void draw_setup_wizard(HubModel& hub, const Theme& th, SDL_Window* window) {
 
     ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 520.f);
     ImGui::TextWrapped(
-        "Set your ROM library and BIOS folders. RetComM scans these paths to match "
-        "supported titles. You can change them later under Library settings.");
+        "Set your ROM library, BIOS, and game-saves folders. RetComM scans these paths to "
+        "match supported titles and keep saves outside each install. You can change them "
+        "later under Library Settings.");
     ImGui::PopTextWrapPos();
     ImGui::Dummy(ImVec2(0, 12));
 
@@ -628,6 +683,17 @@ void draw_setup_wizard(HubModel& hub, const Theme& th, SDL_Window* window) {
         hub.settings.dirty = true;
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
     ImGui::TextWrapped("Optional — system BIOS / firmware dumps (e.g. …/bios).");
+    ImGui::PopStyleColor();
+
+    ImGui::Dummy(ImVec2(0, 10));
+    if (path_field_with_browse("Game saves root", "##setup_saves_root", hub.settings.saves_root,
+                               sizeof(hub.settings.saves_root), hub, window,
+                               FolderPickTarget::SavesRoot, th))
+        hub.settings.dirty = true;
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextWrapped(
+        "Recommended — shared SRAM / memcard library (e.g. …/saves). RomM sync and launches "
+        "use per-platform folders under this root.");
     ImGui::PopStyleColor();
 
     const bool library_ok = hub.settings.library_root[0] != '\0';

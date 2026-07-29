@@ -35,8 +35,12 @@ struct SelfUpdateResult {
 };
 
 // Check TechnicallyComputers/RetComM-Launcher (or RETCOMM_GITHUB_SLUG) for a
-// newer release, download the host-OS asset, and schedule an in-place replace of
-// the running binaries after this process exits.
+// newer release, download the host-OS asset for this install channel, and
+// schedule an in-place replace after this process exits.
+//
+// Windows channels (channel.json / RETCOMM_INSTALL_CHANNEL):
+//   installer|zip  → *-windows-x64.zip (exes + DLLs next to the hub)
+//   portable       → *-windows-portable.exe (replaces the stub)
 SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions& opts = {});
 
 } // namespace retcomm

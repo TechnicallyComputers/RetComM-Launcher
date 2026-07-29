@@ -61,10 +61,31 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_L
     target_link_libraries(retcomm_core PUBLIC stdc++fs)
 endif()
 
-add_executable(retcomm src/main.cpp)
+set(RETCOMM_WIN_RC "")
+if(WIN32 AND EXISTS "${CMAKE_SOURCE_DIR}/assets/retcomm.ico")
+    string(REPLACE "\\" "/" RETCOMM_ICO_PATH "${CMAKE_SOURCE_DIR}/assets/retcomm.ico")
+    configure_file("${CMAKE_SOURCE_DIR}/packaging/windows/retcomm.rc.in"
+                   "${CMAKE_BINARY_DIR}/retcomm.rc" @ONLY)
+    set(RETCOMM_WIN_RC "${CMAKE_BINARY_DIR}/retcomm.rc")
+endif()
+
+add_executable(retcomm src/main.cpp ${RETCOMM_WIN_RC})
 target_link_libraries(retcomm PRIVATE retcomm_core)
 if(UNIX AND NOT APPLE)
     set_target_properties(retcomm PROPERTIES INSTALL_RPATH "$ORIGIN/../lib;$ORIGIN")
+endif()
+
+# Windows portable stub (payload appended at package time).
+if(WIN32)
+    add_executable(retcomm-portable WIN32
+        src/portable/win_portable_main.cpp
+        ${RETCOMM_WIN_RC}
+    )
+    target_compile_definitions(retcomm-portable PRIVATE
+        "RETCOMM_VERSION=\"${RETCOMM_VERSION}\""
+    )
+    target_link_libraries(retcomm-portable PRIVATE shell32)
+    install(TARGETS retcomm-portable RUNTIME DESTINATION bin)
 endif()
 
 # ---------------------------------------------------------------------------
@@ -140,6 +161,7 @@ if(RETCOMM_HAVE_SDL3 AND RETCOMM_IMGUI_READY)
         src/hub/hub_main.cpp
         src/hub/hub_model.cpp
         src/hub/hub_boxart.cpp
+        ${RETCOMM_WIN_RC}
     )
     target_include_directories(retcomm-hub PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src

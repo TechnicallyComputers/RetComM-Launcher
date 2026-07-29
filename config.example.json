@@ -1,6 +1,7 @@
 {
   "library_root": "D:/Emulation/roms",
   "bios_root": "D:/Emulation/bios",
+  "saves_root": "D:/Emulation/saves",
   "platform_folders": {
     "snes": ["snes"],
     "n64": ["n64"],

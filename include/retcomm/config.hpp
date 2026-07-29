@@ -21,7 +21,8 @@ struct CatalogConfig {
 //   <library_root>/<platform_folder>/...
 struct AppConfig {
     fs::path library_root;
-    fs::path bios_root; // RomM/ES-DE style BIOS tree (flat + per-system folders)
+    fs::path bios_root;  // RomM/ES-DE style BIOS tree (flat + per-system folders)
+    fs::path saves_root; // Shared native saves (SRAM / memcard) library tree
     // catalog platform slug -> one or more folder names under library_root
     // e.g. "psx" -> ["ps", "ps1"]
     std::map<std::string, std::vector<std::string>> platform_folders;
@@ -41,6 +42,10 @@ struct AppConfig {
 
     // bios_root + bios_root/<platform folders> that exist.
     std::vector<fs::path> bios_roots_for_platform(const std::string& platform) const;
+
+    // Preferred per-platform folder under saves_root (created when create=true).
+    // Empty when saves_root is unset.
+    fs::path saves_dir_for_platform(const std::string& platform, bool create = false) const;
 };
 
 // Built-in RomM / EmulationStation-style defaults (overridable in config).

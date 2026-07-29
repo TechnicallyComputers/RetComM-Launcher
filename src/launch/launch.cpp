@@ -1,4 +1,5 @@
 #include "retcomm/launch.hpp"
+#include "retcomm/config.hpp"
 #include "retcomm/install.hpp"
 #include "retcomm/library_index.hpp"
 #include "retcomm/romm_saves.hpp"
@@ -560,11 +561,13 @@ LaunchResult launch_title(const Paths& paths, const Title& title, const LaunchOp
         return result;
     }
 
-    // Point [memcard] / cart slots at the shared saves/ tree (RomM sync + picker)
+    // Point [memcard] / cart slots at the shared saves tree (library or install)
     // before staging rom.cfg — GBA launcher sidecars need the resolved save path.
     {
-        auto bind =
-            bind_recomp_save_paths(paths, title, result.plan.use_wine, result.plan.save_path);
+        const AppConfig cfg = load_app_config(paths.config_path);
+        auto bind = bind_recomp_save_paths(paths, cfg, title, result.plan.use_wine,
+                                           result.plan.save_path, opts.save_path_card2,
+                                           opts.save_path_card2_blank);
         if (bind.ok) {
             if (result.plan.save_path.empty() && !bind.active_save.empty())
                 result.plan.save_path = bind.active_save;

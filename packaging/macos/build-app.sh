@@ -87,5 +87,67 @@ rm -f "${ZIP}"
   ditto -c -k --sequesterRsrc --keepParent "${APP_NAME}" "$(basename "${ZIP}")"
 )
 
+# Drag-to-Applications DMG (Finder window with .app + /Applications symlink).
+DMG="${OUT_DIR}/RetComM-Launcher-${VERSION}-macos-${ARCH}.dmg"
+VOLUME_NAME="RetComM Launcher"
+STAGE="${OUT_DIR}/dmg-staging"
+RW_DMG="${OUT_DIR}/.retcomm-dmg-rw.dmg"
+rm -rf "${STAGE}"
+rm -f "${DMG}" "${RW_DMG}"
+mkdir -p "${STAGE}"
+# ditto preserves resource forks / signatures better than cp -R.
+ditto "${APP}" "${STAGE}/${APP_NAME}"
+ln -s /Applications "${STAGE}/Applications"
+
+# RW image so we can set Finder icon layout, then compress to UDZO.
+# Size headroom: app + frameworks; hdiutil grows poorly if undersized.
+hdiutil create \
+  -srcfolder "${STAGE}" \
+  -volname "${VOLUME_NAME}" \
+  -fs HFS+ \
+  -fsargs "-c c=64,a=16,e=16" \
+  -format UDRW \
+  -ov \
+  "${RW_DMG}" >/dev/null
+
+ATTACH_OUT="$(hdiutil attach -readwrite -noverify -noautoopen "${RW_DMG}")"
+MOUNT_DIR="$(echo "${ATTACH_OUT}" | awk 'END { print $NF }')"
+DEVICE="$(echo "${ATTACH_OUT}" | awk 'NR==1 { print $1 }')"
+if [[ -z "${MOUNT_DIR}" || ! -d "${MOUNT_DIR}" ]]; then
+  echo "error: failed to mount temporary DMG" >&2
+  echo "${ATTACH_OUT}" >&2
+  exit 1
+fi
+
+# Best-effort Finder layout (classic drag-install sheet). Safe to skip on headless flakes.
+set +e
+osascript <<EOF
+tell application "Finder"
+  tell disk "${VOLUME_NAME}"
+    open
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    set the bounds of container window to {200, 120, 780, 480}
+    set theViewOptions to the icon view options of container window
+    set arrangement of theViewOptions to not arranged
+    set icon size of theViewOptions to 128
+    set position of item "${APP_NAME}" of container window to {160, 180}
+    set position of item "Applications" of container window to {480, 180}
+    update without registering applications
+    delay 1
+    close
+  end tell
+end tell
+EOF
+sync
+hdiutil detach "${DEVICE}" >/dev/null || hdiutil detach "${MOUNT_DIR}" >/dev/null
+set -e
+
+hdiutil convert "${RW_DMG}" -format UDZO -imagekey zlib-level=9 -o "${DMG}" >/dev/null
+rm -f "${RW_DMG}"
+rm -rf "${STAGE}"
+
 echo "App: ${APP}"
 echo "Zip: ${ZIP}"
+echo "DMG: ${DMG}"

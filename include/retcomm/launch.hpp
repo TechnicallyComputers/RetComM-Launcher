@@ -26,6 +26,11 @@ struct LaunchOptions {
     // Optional native save (host path or release-relative "saves/Foo.sav").
     // Cart: --save-path; disc: settings.toml [memcard] card1 via bind.
     fs::path save_path;
+    // Disc / dual-memcard: optional card2 path.
+    // When save_path_card2_blank is true, force an empty card2.mcd.
+    // When both blank-flag and path are unset, bind auto-picks card2.
+    fs::path save_path_card2;
+    bool save_path_card2_blank = false;
     bool detach = false;
     bool dry_run = false;
 };

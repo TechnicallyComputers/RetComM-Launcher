@@ -90,6 +90,19 @@ std::vector<fs::path> AppConfig::bios_roots_for_platform(const std::string& plat
     return out;
 }
 
+fs::path AppConfig::saves_dir_for_platform(const std::string& platform, bool create) const {
+    if (saves_root.empty()) return {};
+    const auto folders = folders_for_platform(platform);
+    const std::string folder = folders.empty() ? platform : folders.front();
+    fs::path dir = saves_root / folder;
+    if (create) {
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        if (ec) return {};
+    }
+    return dir;
+}
+
 AppConfig load_app_config(const fs::path& config_path) {
     AppConfig cfg;
     cfg.platform_folders = default_platform_folders();
@@ -105,6 +118,8 @@ AppConfig load_app_config(const fs::path& config_path) {
             cfg.library_root = j.at("library_root").get<std::string>();
         if (j.contains("bios_root") && j.at("bios_root").is_string())
             cfg.bios_root = j.at("bios_root").get<std::string>();
+        if (j.contains("saves_root") && j.at("saves_root").is_string())
+            cfg.saves_root = j.at("saves_root").get<std::string>();
 
         if (j.contains("platform_folders") && j.at("platform_folders").is_object()) {
             for (auto it = j.at("platform_folders").begin();
@@ -158,6 +173,7 @@ bool save_app_config(const fs::path& config_path, const AppConfig& cfg, std::str
 
     json j = {{"library_root", cfg.library_root.string()},
               {"bios_root", cfg.bios_root.string()},
+              {"saves_root", cfg.saves_root.string()},
               {"platform_folders", folders},
               {"exclude_dirs", cfg.exclude_dirs},
               {"prefer_local_boxart", cfg.prefer_local_boxart},

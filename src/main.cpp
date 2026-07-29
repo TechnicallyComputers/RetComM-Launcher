@@ -55,6 +55,7 @@ void print_help(const char* argv0) {
         << "  help                         This message\n\n"
         << "ROM scan uses config library_root (platform folders only).\n"
         << "BIOS scan uses config bios_root (flat + per-system folders).\n"
+        << "Game saves use config saves_root/<platform>/ when set (else install saves/).\n"
         << "--full ignores the hash cache and rebuilds the index from disk\n"
         << "(drops missing files; recomputes digests for everything scanned).\n"
         << "Indexes: ~/.local/share/retcomm/library-index.json and bios-index.json.\n";
@@ -122,7 +123,9 @@ int cmd_status(const retcomm::Paths& paths, const retcomm::AppConfig& cfg,
               << (cfg.library_root.empty() ? "(unset)" : cfg.library_root.string())
               << "\n"
               << "bios_root: "
-              << (cfg.bios_root.empty() ? "(unset)" : cfg.bios_root.string()) << "\n\n";
+              << (cfg.bios_root.empty() ? "(unset)" : cfg.bios_root.string()) << "\n"
+              << "saves_root: "
+              << (cfg.saves_root.empty() ? "(unset)" : cfg.saves_root.string()) << "\n\n";
 
     std::cout << "Platform folders (catalog → disk):\n";
     std::unordered_set<std::string> plats;
@@ -159,6 +162,8 @@ int cmd_config(const retcomm::Paths& paths, const retcomm::AppConfig& cfg) {
               << "\n"
               << "bios_root: "
               << (cfg.bios_root.empty() ? "(unset)" : cfg.bios_root.string()) << "\n"
+              << "saves_root: "
+              << (cfg.saves_root.empty() ? "(unset)" : cfg.saves_root.string()) << "\n"
               << "exclude_dirs: ";
     for (size_t i = 0; i < cfg.exclude_dirs.size(); ++i) {
         if (i) std::cout << ", ";
@@ -176,6 +181,7 @@ int cmd_config(const retcomm::Paths& paths, const retcomm::AppConfig& cfg) {
               << "{\n"
               << "  \"library_root\": \"/mnt/crucial4tb/Emulation/roms\",\n"
               << "  \"bios_root\": \"/mnt/crucial4tb/Emulation/bios\",\n"
+              << "  \"saves_root\": \"/mnt/crucial4tb/Emulation/saves\",\n"
               << "  \"platform_folders\": {\n"
               << "    \"psx\": [\"ps\", \"ps1\", \"psx\"],\n"
               << "    \"snes\": [\"snes\"],\n"
@@ -520,6 +526,7 @@ int cmd_launch(const retcomm::Paths& paths, const retcomm::Catalog& cat,
         std::cerr << "unknown title: " << id << "\n";
         return 1;
     }
+    const auto cfg = retcomm::load_app_config(paths.config_path);
     std::string rom_source;
     std::string bios_source;
     std::string save_source;
@@ -541,14 +548,22 @@ int cmd_launch(const retcomm::Paths& paths, const retcomm::Catalog& cat,
         auto st = retcomm::load_app_state(paths.state_path);
         const std::string save_id = retcomm::preferred_save_for(st, id);
         if (!save_id.empty()) {
-            opts.save_path = retcomm::resolve_managed_save(paths, *t, save_id);
+            opts.save_path = retcomm::resolve_managed_save(paths, cfg, *t, save_id);
             if (opts.save_path.empty()) opts.save_path = save_id;
             if (!opts.save_path.empty()) save_source = "state.json";
         } else {
-            const auto saves = retcomm::list_managed_saves(paths, *t);
+            const auto saves = retcomm::list_managed_saves(paths, cfg, *t);
             if (!saves.empty()) {
                 opts.save_path = saves.front().host_path;
                 save_source = "saves/";
+            }
+        }
+        if (retcomm::title_uses_memcards(*t)) {
+            const std::string card2_id = retcomm::preferred_save_card2_for(st, id);
+            if (card2_id == retcomm::kBlankMemcardId) {
+                opts.save_path_card2_blank = true;
+            } else if (!card2_id.empty()) {
+                opts.save_path_card2 = retcomm::resolve_managed_save(paths, cfg, *t, card2_id);
             }
         }
     } else {
