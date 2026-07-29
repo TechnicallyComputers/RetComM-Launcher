@@ -3,28 +3,28 @@
   "name": "Bomberman Party Edition",
   "kind": "recomp",
   "platform": "psx",
-  "description": "PlayStation recomp of Bomberman Party Edition.",
-  "homepage": "https://github.com/mstan/BombermanPartyEditionRecomp",
+  "description": "USA (SLUS-01189) static recompilation on psxrecomp — Bomberman Party Edition (5-player / multitap).",
+  "homepage": "https://github.com/TechnicallyComputers/BombermanPartyEditionRecomp",
   "rom_identity": {
-    "crc32": [
-      "98275a08"
-    ],
+    "crc32": [],
     "md5": [
-      "e0ceba6e448677f3d938b1dd176be3af"
+      "054204cd016afb3c56fd9e1eea80676e",
+      "74c5fbb8b2ca87b2f1d0f0c292241c03"
     ],
     "sha1": [
-      "53a509dbe859f773856f26d966f5edacbc701b4e"
+      "306888eee5bf95cb3cabd3a40cd836063887ab77",
+      "85c30e5da35c8d737b049079d8e72b7d3a45eb05"
     ],
-    "sha256": [
-      "8bd229969aadcd9fe085ef4026209a0f230b82442a599c58d1da5da68260d3d9"
-    ],
+    "sha256": [],
     "disc_serials": [
       "SLUS-01189"
     ],
     "sizes": [
-      660770880
+      645566976,
+      660775584
     ],
     "filenames": [
+      "Bomberman Party Edition.cue",
       "Bomberman - Party Edition (USA).cue"
     ]
   },
@@ -32,11 +32,10 @@
     ".cue",
     ".chd",
     ".iso",
-    ".bin",
-    ".exe"
+    ".bin"
   ],
   "release": {
-    "github": "mstan/BombermanPartyEditionRecomp",
+    "github": "TechnicallyComputers/BombermanPartyEditionRecomp",
     "asset_glob": {
       "linux": "*linux*",
       "windows": "*windows*",
@@ -51,16 +50,18 @@
   },
   "romm": {
     "platforms": [
+      "ps",
       "psx",
       "ps1"
     ]
   },
   "saves": {
     "memcard_glob": [
+      "saves/*.mcd",
+      "saves/*.mcr",
       "*.mcd",
-      "*.mcr",
-      "saves/*.mcd"
+      "*.mcr"
     ]
   },
-  "notes": "Redump-style USA .bin SHA-1/size; prefer bin/cue MODE2/2352."
+  "notes": "Disc serial SLUS-01189 / boot EXE SLUS_011.89. SHA-1s: source ISO (645,566,976) and prepared MODE2/2352 .bin (660,775,584) from DISC.md. Runtime expects prepared bpe/ cue+bin (tools/prepare_disc.py) plus BIOS; packages never ship disc/BIOS. Releases: bpe-*-{linux,windows,macos}-*.zip. VERSION pin 0.1.0."
 }
