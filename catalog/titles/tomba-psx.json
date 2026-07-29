@@ -1,0 +1,67 @@
+{
+  "id": "tomba-psx",
+  "name": "Tomba!",
+  "kind": "recomp",
+  "platform": "psx",
+  "description": "Tomba! (SCUS-94236) static recompilation on psxrecomp.",
+  "homepage": "https://github.com/mstan/TombaRecomp",
+  "rom_identity": {
+    "crc32": [
+      "b00ecb0d"
+    ],
+    "md5": [
+      "c80636a28de4abcfa34f9e57fb3b043d"
+    ],
+    "sha1": [
+      "c259ec7ff6ef4163913991f4e4db2eff71702818"
+    ],
+    "sha256": [
+      "25ada3dd51e70eb9f9218cd83fb02d73139750229fb44b012d62d183ab32eb13"
+    ],
+    "disc_serials": [
+      "SCUS-94236"
+    ],
+    "sizes": [
+      280193760
+    ],
+    "filenames": [
+      "Tomba! (USA).cue"
+    ]
+  },
+  "rom_extensions": [
+    ".cue",
+    ".chd",
+    ".iso",
+    ".bin"
+  ],
+  "release": {
+    "github": "mstan/TombaRecomp",
+    "asset_glob": {
+      "linux": "*linux*",
+      "windows": "*windows*",
+      "macos": "*macos*"
+    }
+  },
+  "install_dir_name": "TombaRecomp",
+  "launch": {
+    "linux": "Tomba_Recompiled",
+    "windows": "Tomba_Recompiled.exe",
+    "macos": "Tomba_Recompiled"
+  },
+  "romm": {
+    "platforms": [
+      "ps",
+      "psx",
+      "ps1"
+    ]
+  },
+  "saves": {
+    "memcard_glob": [
+      "saves/*.mcd",
+      "saves/*.mcr",
+      "*.mcd",
+      "*.mcr"
+    ]
+  },
+  "notes": "Serial SCUS-94236 from game.toml. USA .bin SHA-1/size pinned for library match; prefer companion .cue for launch."
+}

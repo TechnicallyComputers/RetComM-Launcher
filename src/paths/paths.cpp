@@ -1,7 +1,20 @@
 #include "retcomm/paths.hpp"
 
+#include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
+#include <string>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <shellapi.h>
+#else
+#include <unistd.h>
+#include <sys/wait.h>
+#endif
 
 namespace retcomm {
 namespace {
@@ -41,6 +54,8 @@ Paths default_paths() {
     p.apps_dir = p.data_dir / "apps";
     p.state_path = p.data_dir / "state.json";
     p.config_path = p.config_dir / "config.json";
+    p.library_index_path = p.data_dir / "library-index.json";
+    p.bios_index_path = p.data_dir / "bios-index.json";
     return p;
 }
 
@@ -90,6 +105,102 @@ std::string host_os_key() {
     return "macos";
 #else
     return "linux";
+#endif
+}
+
+bool open_path_in_file_manager(const fs::path& path, std::string* error) {
+    std::error_code ec;
+    fs::path target = path;
+    if (target.empty()) {
+        if (error) *error = "empty path";
+        return false;
+    }
+    if (fs::is_regular_file(target, ec))
+        target = target.parent_path();
+    else if (!fs::is_directory(target, ec)) {
+        if (error) *error = "path does not exist: " + path.string();
+        return false;
+    }
+    if (target.empty()) {
+        if (error) *error = "cannot resolve folder for " + path.string();
+        return false;
+    }
+
+#if defined(_WIN32)
+    const std::wstring w = target.wstring();
+    const HINSTANCE rc =
+        ShellExecuteW(nullptr, L"explore", w.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    const auto code = reinterpret_cast<std::uintptr_t>(rc);
+    if (code <= 32) {
+        if (error) *error = "ShellExecute failed (" + std::to_string(code) + ")";
+        return false;
+    }
+    return true;
+#else
+    // Double-fork so the file manager is fully detached and we don't leave zombies.
+    const pid_t pid = fork();
+    if (pid < 0) {
+        if (error) *error = "fork failed";
+        return false;
+    }
+    if (pid == 0) {
+        if (fork() > 0) _exit(0);
+        if (setsid() < 0) { /* best-effort */ }
+#if defined(__APPLE__)
+        const char* cmd = "open";
+#else
+        const char* cmd = "xdg-open";
+#endif
+        execlp(cmd, cmd, target.c_str(), static_cast<char*>(nullptr));
+        _exit(127);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        if (error) *error = "waitpid failed";
+        return false;
+    }
+    return true;
+#endif
+}
+
+bool open_url_in_browser(const std::string& url, std::string* error) {
+    if (url.empty()) {
+        if (error) *error = "empty url";
+        return false;
+    }
+#if defined(_WIN32)
+    const std::wstring w(url.begin(), url.end());
+    const HINSTANCE rc =
+        ShellExecuteW(nullptr, L"open", w.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    const auto code = reinterpret_cast<std::uintptr_t>(rc);
+    if (code <= 32) {
+        if (error) *error = "ShellExecute failed (" + std::to_string(code) + ")";
+        return false;
+    }
+    return true;
+#else
+    const pid_t pid = fork();
+    if (pid < 0) {
+        if (error) *error = "fork failed";
+        return false;
+    }
+    if (pid == 0) {
+        if (fork() > 0) _exit(0);
+        if (setsid() < 0) { /* best-effort */ }
+#if defined(__APPLE__)
+        const char* cmd = "open";
+#else
+        const char* cmd = "xdg-open";
+#endif
+        execlp(cmd, cmd, url.c_str(), static_cast<char*>(nullptr));
+        _exit(127);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        if (error) *error = "waitpid failed";
+        return false;
+    }
+    return true;
 #endif
 }
 

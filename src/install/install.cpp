@@ -1,78 +1,1024 @@
 #include "retcomm/install.hpp"
+#include "retcomm/http.hpp"
 #include "retcomm/paths.hpp"
 
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <cctype>
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <iostream>
 #include <sstream>
+#include <system_error>
+#include <unordered_set>
+
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 namespace retcomm {
+namespace {
+
+using nlohmann::json;
+
+std::string to_lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+bool match_glob(const std::string& pattern, const std::string& name) {
+    if (pattern.empty()) return false;
+    const std::string p = to_lower(pattern);
+    const std::string n = to_lower(name);
+    size_t pi = 0, ni = 0, star = std::string::npos, match = 0;
+    while (ni < n.size()) {
+        if (pi < p.size() && (p[pi] == '?' || p[pi] == n[ni])) {
+            ++pi;
+            ++ni;
+        } else if (pi < p.size() && p[pi] == '*') {
+            star = pi++;
+            match = ni;
+        } else if (star != std::string::npos) {
+            pi = star + 1;
+            ni = ++match;
+        } else {
+            return false;
+        }
+    }
+    while (pi < p.size() && p[pi] == '*') ++pi;
+    return pi == p.size();
+}
+
+// Glob against a relative path (forward slashes) and/or its filename.
+bool path_matches_glob(const std::string& rel_posix, const std::string& pattern) {
+    if (match_glob(pattern, rel_posix)) return true;
+    const auto slash = rel_posix.find_last_of('/');
+    const std::string base =
+        slash == std::string::npos ? rel_posix : rel_posix.substr(slash + 1);
+    return match_glob(pattern, base);
+}
+
+std::vector<std::string> save_globs_for_title(const Title& title) {
+    std::vector<std::string> g = title.saves_sram_glob;
+    g.insert(g.end(), title.saves_memcard_glob.begin(), title.saves_memcard_glob.end());
+    // Always consider common save / savestate layouts next to the binary.
+    static const char* kDefaults[] = {"saves/*",
+                                      "saves/**",
+                                      "*.mcd",
+                                      "*.mcr",
+                                      "*.srm",
+                                      "*.state",
+                                      "*.sts",
+                                      "states/*",
+                                      "savestates/*",
+                                      "savestates/**"};
+    for (const char* d : kDefaults) g.emplace_back(d);
+    return g;
+}
+
+bool is_save_path(const std::string& rel_posix, const std::vector<std::string>& globs) {
+    if (rel_posix.empty()) return false;
+    // Whole saves/ tree (memcards + host dumps games often drop here).
+    if (rel_posix == "saves" || rel_posix.rfind("saves/", 0) == 0) return true;
+    if (rel_posix == "states" || rel_posix.rfind("states/", 0) == 0) return true;
+    if (rel_posix == "savestates" || rel_posix.rfind("savestates/", 0) == 0) return true;
+    for (const auto& g : globs) {
+        if (path_matches_glob(rel_posix, g)) return true;
+    }
+    return false;
+}
+
+std::string rel_posix_under(const fs::path& root, const fs::path& file) {
+    std::error_code ec;
+    fs::path rel = fs::relative(file, root, ec);
+    if (ec) return {};
+    std::string s = rel.generic_string();
+    if (s == "." || s.empty() || s.rfind("..", 0) == 0) return {};
+    return s;
+}
+
+// Keep stash paths release-relative (saves/…), never apps-root-relative
+// (releases/<tag>/saves/…) or nested preserved/ junk.
+std::string normalize_preserved_rel(std::string rel) {
+    if (rel.empty() || rel.rfind("preserved/", 0) == 0) return {};
+    const std::string pfx = "releases/";
+    if (rel.rfind(pfx, 0) == 0) {
+        const auto rest = rel.substr(pfx.size());
+        const auto slash = rest.find('/');
+        if (slash == std::string::npos) return {};
+        rel = rest.substr(slash + 1);
+    }
+    if (rel.empty() || rel.rfind("preserved/", 0) == 0) return {};
+    return rel;
+}
+
+// Copy matching save files from `search_root` into install_root/preserved/<rel>.
+size_t stash_saves_from(const fs::path& search_root, const fs::path& preserved,
+                        const std::vector<std::string>& globs,
+                        std::vector<std::string>* out_rels, std::string* error) {
+    std::error_code ec;
+    if (!fs::exists(search_root, ec)) return 0;
+    size_t n = 0;
+    for (auto it = fs::recursive_directory_iterator(
+             search_root, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (it->is_directory(ec) && it->path().filename() == "preserved") {
+            it.disable_recursion_pending();
+            continue;
+        }
+        if (!it->is_regular_file(ec)) continue;
+        const std::string rel =
+            normalize_preserved_rel(rel_posix_under(search_root, it->path()));
+        if (rel.empty() || !is_save_path(rel, globs)) continue;
+        const fs::path dest = preserved / rel;
+        fs::create_directories(dest.parent_path(), ec);
+        fs::copy_file(it->path(), dest, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+            if (error) *error = "failed to preserve " + it->path().string() + ": " + ec.message();
+            return n;
+        }
+        if (out_rels) out_rels->push_back(rel);
+        ++n;
+    }
+    return n;
+}
+
+void restore_preserved_saves(const fs::path& install_root, const fs::path& release_dir,
+                             std::string* note) {
+    const fs::path preserved = install_root / "preserved";
+    std::error_code ec;
+    if (!fs::is_directory(preserved, ec)) return;
+    size_t n = 0;
+    for (auto it = fs::recursive_directory_iterator(
+             preserved, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        const std::string rel =
+            normalize_preserved_rel(rel_posix_under(preserved, it->path()));
+        // Empty globs: still matches saves/, states/, savestates/ trees.
+        if (rel.empty() || !is_save_path(rel, {})) continue;
+        const fs::path dest = release_dir / rel;
+        if (fs::exists(dest, ec)) continue; // don't clobber newer files
+        fs::create_directories(dest.parent_path(), ec);
+        fs::copy_file(it->path(), dest, fs::copy_options::skip_existing, ec);
+        if (!ec) ++n;
+    }
+    if (note && n > 0)
+        *note = "restored " + std::to_string(n) + " preserved save file(s) into release\n";
+}
+
+std::string iso8601_now() {
+    using clock = std::chrono::system_clock;
+    const auto t = clock::to_time_t(clock::now());
+    std::tm tm{};
+#if defined(_WIN32)
+    gmtime_s(&tm, &t);
+#else
+    gmtime_r(&t, &tm);
+#endif
+    char buf[32];
+    std::strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
+    return buf;
+}
+
+std::string sanitize_tag(std::string tag) {
+    for (char& c : tag) {
+        if (c == '/' || c == '\\' || c == ':' || c == 0) c = '_';
+    }
+    if (tag.empty()) tag = "unknown";
+    return tag;
+}
+
+bool ends_with_ci(const std::string& s, const char* suf) {
+    const std::string lower = to_lower(s);
+    const std::string suffix = to_lower(suf);
+    return lower.size() >= suffix.size() &&
+           lower.compare(lower.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+bool is_archive_path(const fs::path& p) {
+    const std::string name = p.filename().string();
+    return ends_with_ci(name, ".zip") || ends_with_ci(name, ".7z") || ends_with_ci(name, ".tgz") ||
+           ends_with_ci(name, ".tar") || ends_with_ci(name, ".tar.gz") ||
+           ends_with_ci(name, ".tar.xz") || ends_with_ci(name, ".tar.bz2");
+}
+
+int run_cmd(const std::string& cmd, std::string* err_out = nullptr) {
+    const int rc = std::system(cmd.c_str());
+    if (rc != 0 && err_out) *err_out = "command failed (" + std::to_string(rc) + "): " + cmd;
+    return rc;
+}
+
+std::string shell_quote(const fs::path& p) {
+    std::string s = p.string();
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'')
+            out += "'\\''";
+        else
+            out += c;
+    }
+    out += "'";
+    return out;
+}
+
+bool extract_archive(const fs::path& archive, const fs::path& dest, std::string* error) {
+    std::error_code ec;
+    fs::create_directories(dest, ec);
+    const std::string name = archive.filename().string();
+    std::string err;
+
+    // Prefer bsdtar (libarchive) — handles zip/tar/7z well on many systems.
+    if (run_cmd("command -v bsdtar >/dev/null 2>&1") == 0) {
+        const std::string cmd = "bsdtar -xf " + shell_quote(archive) + " -C " + shell_quote(dest);
+        if (run_cmd(cmd, &err) == 0) return true;
+    }
+    if (ends_with_ci(name, ".zip") && run_cmd("command -v unzip >/dev/null 2>&1") == 0) {
+        const std::string cmd =
+            "unzip -qo " + shell_quote(archive) + " -d " + shell_quote(dest);
+        if (run_cmd(cmd, &err) == 0) return true;
+    }
+    if (run_cmd("command -v 7z >/dev/null 2>&1") == 0) {
+        const std::string cmd =
+            "7z x -y -o" + shell_quote(dest) + " " + shell_quote(archive) + " >/dev/null";
+        if (run_cmd(cmd, &err) == 0) return true;
+    }
+    if (error) *error = err.empty() ? "no extractor succeeded for " + archive.string() : err;
+    return false;
+}
+
+std::vector<fs::path> list_archives(const fs::path& root) {
+    std::vector<fs::path> out;
+    std::error_code ec;
+    if (!fs::exists(root, ec)) return out;
+    for (auto it = fs::recursive_directory_iterator(root, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (it->is_regular_file(ec) && is_archive_path(it->path())) out.push_back(it->path());
+    }
+    return out;
+}
+
+bool top_level_only_archives(const fs::path& root) {
+    std::error_code ec;
+    bool any = false;
+    for (auto it = fs::directory_iterator(root, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (it->is_directory(ec)) return false;
+        if (!it->is_regular_file(ec)) continue;
+        any = true;
+        if (!is_archive_path(it->path())) return false;
+    }
+    return any;
+}
+
+fs::path find_named_file(const fs::path& root, const std::string& filename) {
+    if (filename.empty()) return {};
+    std::error_code ec;
+    const fs::path direct = root / filename;
+    if (fs::is_regular_file(direct, ec)) return direct;
+    for (auto it = fs::recursive_directory_iterator(root, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        if (it->path().filename() == filename) return it->path();
+    }
+    return {};
+}
+
+void make_executable(const fs::path& p) {
+#if !defined(_WIN32)
+    std::error_code ec;
+    auto st = fs::status(p, ec);
+    if (ec || !fs::is_regular_file(st)) return;
+    fs::permissions(p,
+                    fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec,
+                    fs::perm_options::add, ec);
+#else
+    (void)p;
+#endif
+}
+
+bool unwrap_nested_archives(const fs::path& dest, const std::string& launch_name,
+                            std::string* error) {
+    for (int pass = 0; pass < 5; ++pass) {
+        if (!launch_name.empty() && !find_named_file(dest, launch_name).empty()) {
+            // Binary found — still unwrap pure wrapper zips at top level.
+            if (!top_level_only_archives(dest)) return true;
+        }
+
+        auto archives = list_archives(dest);
+        if (archives.empty()) return true;
+
+        const bool wrapper = top_level_only_archives(dest);
+        const bool missing_bin =
+            !launch_name.empty() && find_named_file(dest, launch_name).empty();
+        if (!wrapper && !missing_bin) return true;
+
+        for (const auto& arch : archives) {
+            // Extract into the archive's parent so nested paths stay sensible.
+            const fs::path parent = arch.parent_path();
+            if (!extract_archive(arch, parent, error)) return false;
+            std::error_code ec;
+            fs::remove(arch, ec);
+        }
+    }
+    return true;
+}
+
+struct GhAsset {
+    std::string name;
+    std::string browser_download_url;
+    std::uint64_t size = 0;
+};
+
+struct GhRelease {
+    std::string tag;
+    std::string html_url;
+    std::vector<GhAsset> assets;
+};
+
+bool parse_release(const json& j, GhRelease& out, std::string* error) {
+    if (!j.is_object()) {
+        if (error) *error = "invalid release JSON";
+        return false;
+    }
+    out.tag = j.value("tag_name", "");
+    out.html_url = j.value("html_url", "");
+    out.assets.clear();
+    if (j.contains("assets") && j.at("assets").is_array()) {
+        for (const auto& a : j.at("assets")) {
+            if (!a.is_object()) continue;
+            GhAsset asset;
+            asset.name = a.value("name", "");
+            asset.browser_download_url = a.value("browser_download_url", "");
+            asset.size = a.value("size", 0ull);
+            if (!asset.name.empty() && !asset.browser_download_url.empty())
+                out.assets.push_back(std::move(asset));
+        }
+    }
+    if (out.tag.empty()) {
+        if (error) *error = "release missing tag_name";
+        return false;
+    }
+    return true;
+}
+
+bool fetch_latest_release(const std::string& github_slug, GhRelease& out, std::string* error,
+                          bool allow_prerelease) {
+    if (github_slug.empty() || github_slug.find('/') == std::string::npos) {
+        if (error) *error = "invalid github slug (want owner/repo)";
+        return false;
+    }
+    const auto headers = github_http_headers();
+    if (!allow_prerelease) {
+        const std::string url =
+            "https://api.github.com/repos/" + github_slug + "/releases/latest";
+        auto res = http_get(url, headers);
+        if (!res.ok()) {
+            if (error) *error = "GitHub latest: " + (res.error.empty() ? res.body : res.error);
+            return false;
+        }
+        try {
+            return parse_release(json::parse(res.body), out, error);
+        } catch (const std::exception& e) {
+            if (error) *error = e.what();
+            return false;
+        }
+    }
+
+    const std::string url = "https://api.github.com/repos/" + github_slug + "/releases?per_page=10";
+    auto res = http_get(url, headers);
+    if (!res.ok()) {
+        if (error) *error = "GitHub releases: " + (res.error.empty() ? res.body : res.error);
+        return false;
+    }
+    try {
+        const json arr = json::parse(res.body);
+        if (!arr.is_array() || arr.empty()) {
+            if (error) *error = "no releases";
+            return false;
+        }
+        for (const auto& item : arr) {
+            if (item.value("draft", false)) continue;
+            if (!allow_prerelease && item.value("prerelease", false)) continue;
+            return parse_release(item, out, error);
+        }
+        if (error) *error = "no suitable release";
+        return false;
+    } catch (const std::exception& e) {
+        if (error) *error = e.what();
+        return false;
+    }
+}
+
+const GhAsset* pick_asset(const GhRelease& rel, const std::string& glob) {
+    if (glob.empty()) return nullptr;
+    const GhAsset* best = nullptr;
+    int best_score = -1;
+    for (const auto& a : rel.assets) {
+        if (!match_glob(glob, a.name)) continue;
+        int score = 0;
+        const std::string n = to_lower(a.name);
+        if (ends_with_ci(n, ".zip")) score += 3;
+        if (n.find("x64") != std::string::npos || n.find("amd64") != std::string::npos ||
+            n.find("x86_64") != std::string::npos)
+            score += 2;
+        if (n.find("arm64") != std::string::npos || n.find("aarch64") != std::string::npos)
+            score += 1; // still acceptable
+        if (score > best_score) {
+            best_score = score;
+            best = &a;
+        }
+    }
+    return best;
+}
+
+void set_current_symlink(const fs::path& install_root, const std::string& tag) {
+    const fs::path link = install_root / "current";
+    const fs::path target = fs::path("releases") / tag;
+    std::error_code ec;
+    if (fs::exists(link, ec) || fs::is_symlink(link, ec)) fs::remove(link, ec);
+#if defined(_WIN32)
+    // Directory junction / symlink — may require privileges; fall back to copy marker.
+    fs::create_directory_symlink(install_root / target, link, ec);
+    if (ec) {
+        // Last resort: write a text pointer (inspect will still use install.json).
+        std::ofstream ptr(install_root / "current.path");
+        ptr << target.string();
+    }
+#else
+    fs::create_directory_symlink(target, link, ec);
+    if (ec) throw std::runtime_error("cannot create current symlink: " + ec.message());
+#endif
+}
+
+fs::path resolve_current_dir(const fs::path& install_root) {
+    const fs::path link = install_root / "current";
+    std::error_code ec;
+    if (fs::exists(link, ec)) return fs::weakly_canonical(link, ec);
+    const fs::path ptr = install_root / "current.path";
+    if (fs::is_regular_file(ptr, ec)) {
+        std::ifstream in(ptr);
+        std::string rel;
+        std::getline(in, rel);
+        if (!rel.empty()) return install_root / rel;
+    }
+    return {};
+}
+
+std::string launch_name_for_plan(const InstallPlan& plan) {
+    if (!plan.title) return {};
+    if (plan.record) {
+        if (plan.record->runtime == "wine" || plan.record->target_os == "windows")
+            return plan.title->launch.windows;
+        if (!plan.record->target_os.empty())
+            return plan.title->launch_binary_for_os(plan.record->target_os);
+    }
+    return plan.title->launch_binary_for_host();
+}
+
+void fill_from_disk(InstallPlan& plan) {
+    plan.record.reset();
+    plan.installed = false;
+    plan.installed_tag.clear();
+    plan.binary_path.clear();
+
+    InstallRecord rec = load_install_record(plan.install_root);
+    if (!rec.title_id.empty()) {
+        plan.record = rec;
+        plan.installed_tag = rec.tag;
+    }
+
+    const fs::path current = resolve_current_dir(plan.install_root);
+    const std::string bin = launch_name_for_plan(plan);
+
+    if (!current.empty()) {
+        fs::path candidate;
+        if (plan.record && !plan.record->binary.empty())
+            candidate = current / plan.record->binary;
+        if (candidate.empty() || !fs::exists(candidate))
+            candidate = find_named_file(current, bin);
+        if (candidate.empty() && !bin.empty()) candidate = current / bin;
+        if (!candidate.empty() && fs::exists(candidate)) {
+            plan.binary_path = candidate;
+            plan.installed = true;
+            plan.message = "installed: " + candidate.string();
+            if (!plan.installed_tag.empty())
+                plan.message += " [" + plan.installed_tag + "]";
+            if (plan.record && plan.record->runtime == "wine")
+                plan.message += " [wine]";
+            return;
+        }
+        plan.message = "current/ present but binary missing";
+        if (!bin.empty()) plan.message += ": " + bin;
+        return;
+    }
+
+    if (!bin.empty()) {
+        const fs::path flat = find_named_file(plan.install_root, bin);
+        if (!flat.empty()) {
+            plan.binary_path = flat;
+            plan.installed = true;
+            plan.message = "installed (flat): " + flat.string();
+            return;
+        }
+    }
+    plan.message = "not installed under " + plan.install_root.string();
+}
+
+} // namespace
+
+InstallRecord load_install_record(const fs::path& install_root) {
+    InstallRecord rec;
+    const fs::path path = install_root / "install.json";
+    std::ifstream in(path);
+    if (!in) return rec;
+    try {
+        json j;
+        in >> j;
+        rec.schema_version = j.value("schema_version", 1);
+        rec.title_id = j.value("title_id", "");
+        rec.github = j.value("github", "");
+        rec.tag = j.value("tag", "");
+        rec.asset_name = j.value("asset_name", "");
+        rec.binary = j.value("binary", "");
+        rec.host_os = j.value("host_os", "");
+        rec.target_os = j.value("target_os", "");
+        rec.runtime = j.value("runtime", "");
+        rec.installed_at = j.value("installed_at", "");
+        rec.release_url = j.value("release_url", "");
+        // Legacy installs: infer Wine from a Windows .exe on a non-Windows host.
+        if (rec.runtime.empty()) {
+            const std::string& b = rec.binary;
+            const bool looks_exe =
+                b.size() >= 4 &&
+                (b.compare(b.size() - 4, 4, ".exe") == 0 || b.compare(b.size() - 4, 4, ".EXE") == 0);
+            if (looks_exe && host_os_key() != "windows") {
+                rec.runtime = "wine";
+                if (rec.target_os.empty()) rec.target_os = "windows";
+            } else {
+                rec.runtime = "native";
+                if (rec.target_os.empty())
+                    rec.target_os = rec.host_os.empty() ? host_os_key() : rec.host_os;
+            }
+        }
+    } catch (...) {
+        return InstallRecord{};
+    }
+    return rec;
+}
+
+bool save_install_record(const fs::path& install_root, const InstallRecord& rec) {
+    std::error_code ec;
+    fs::create_directories(install_root, ec);
+    const fs::path path = install_root / "install.json";
+    json j = {{"schema_version", rec.schema_version},
+              {"title_id", rec.title_id},
+              {"github", rec.github},
+              {"tag", rec.tag},
+              {"asset_name", rec.asset_name},
+              {"binary", rec.binary},
+              {"host_os", rec.host_os},
+              {"target_os", rec.target_os},
+              {"runtime", rec.runtime},
+              {"installed_at", rec.installed_at},
+              {"release_url", rec.release_url}};
+    std::ofstream out(path);
+    if (!out) return false;
+    out << j.dump(2) << "\n";
+    return static_cast<bool>(out);
+}
+
+std::string resolve_wine_binary(std::string* error) {
+#if defined(_WIN32)
+    if (error) *error = "Wine is not used on native Windows";
+    return {};
+#else
+    const char* path_env = std::getenv("PATH");
+    if (!path_env || !*path_env) {
+        if (error) *error = "PATH is empty; cannot find wine";
+        return {};
+    }
+    const char* names[] = {"wine64", "wine"};
+    std::istringstream iss(path_env);
+    std::string dir;
+    while (std::getline(iss, dir, ':')) {
+        if (dir.empty()) continue;
+        for (const char* name : names) {
+            const fs::path candidate = fs::path(dir) / name;
+            std::error_code ec;
+            if (!fs::exists(candidate, ec)) continue;
+            if (::access(candidate.c_str(), X_OK) == 0) return candidate.string();
+        }
+    }
+    if (error) *error = "wine/wine64 not found on PATH";
+    return {};
+#endif
+}
+
+bool host_supports_wine() {
+#if defined(_WIN32)
+    return false;
+#else
+    return !resolve_wine_binary(nullptr).empty();
+#endif
+}
+
+std::string fetch_latest_release_tag(const std::string& github_slug, std::string* error,
+                                     bool allow_prerelease) {
+    GhRelease rel;
+    if (!fetch_latest_release(github_slug, rel, error, allow_prerelease)) return {};
+    return rel.tag;
+}
 
 InstallPlan inspect_install(const Paths& paths, const Title& title) {
     InstallPlan plan;
     plan.title = &title;
     plan.install_root = paths.apps_dir / title.install_dir_name;
     plan.current_link = plan.install_root / "current";
-
-    const std::string& bin = title.launch_binary_for_host();
-    if (fs::exists(plan.current_link)) {
-        plan.binary_path = plan.current_link / bin;
-        plan.installed = fs::exists(plan.binary_path);
-        if (plan.installed) {
-            plan.message = "installed: " + plan.binary_path.string();
-        } else {
-            plan.message =
-                "current/ present but binary missing: " + plan.binary_path.string();
-        }
-    } else if (!bin.empty() && fs::exists(plan.install_root / bin)) {
-        plan.binary_path = plan.install_root / bin;
-        plan.installed = true;
-        plan.message = "installed (flat): " + plan.binary_path.string();
-    } else {
-        plan.message = "not installed under " + plan.install_root.string();
-    }
+    fill_from_disk(plan);
     return plan;
 }
 
-InstallPlan plan_install(const Paths& paths, const Title& title) {
+InstallPlan plan_install(const Paths& paths, const Title& title, const InstallOptions& opts) {
     InstallPlan plan = inspect_install(paths, title);
+    const bool use_wine = opts.use_wine;
+    const std::string target_os = use_wine ? "windows" : host_os_key();
     std::ostringstream oss;
     oss << "install plan for " << title.id << "\n"
         << "  target:  " << plan.install_root.string() << "\n"
         << "  github:  "
         << (title.release.github.empty() ? "(unset)" : title.release.github) << "\n"
-        << "  asset:   " << title.asset_glob_for_host() << "\n"
-        << "  binary:  " << title.launch_binary_for_host() << "\n";
+        << "  asset:   " << title.asset_glob_for_os(target_os) << "\n"
+        << "  binary:  " << title.launch_binary_for_os(target_os) << "\n"
+        << "  runtime: " << (use_wine ? "wine" : "native") << "\n";
+
+    if (opts.check_latest && !title.release.github.empty()) {
+        std::string err;
+        const bool allow_pre = opts.allow_prerelease || title.release.allow_prerelease;
+        plan.latest_tag =
+            fetch_latest_release_tag(title.release.github, &err, allow_pre);
+        if (!plan.latest_tag.empty()) {
+            oss << "  latest:  " << plan.latest_tag << "\n";
+            if (plan.installed && !plan.installed_tag.empty() &&
+                plan.installed_tag != plan.latest_tag) {
+                plan.update_available = true;
+                oss << "  update:  available (" << plan.installed_tag << " → "
+                    << plan.latest_tag << ")\n";
+            } else if (plan.installed && plan.installed_tag == plan.latest_tag) {
+                oss << "  update:  up to date\n";
+            }
+        } else if (!err.empty()) {
+            oss << "  latest:  (unavailable: " << err << ")\n";
+        }
+    }
+
     if (plan.installed) {
-        oss << "  status:  already present — update check not implemented yet\n";
+        oss << "  status:  " << plan.message << "\n";
     } else {
-        oss << "  status:  STUB — download/extract from GitHub Releases not wired yet\n";
+        oss << "  status:  not installed\n";
     }
     plan.message = oss.str();
     return plan;
 }
 
-LaunchPlan plan_launch(const Paths& paths, const Title& title, const fs::path& rom_path) {
-    LaunchPlan lp;
-    lp.title = &title;
-    const InstallPlan inst = inspect_install(paths, title);
-    lp.binary = inst.binary_path;
-    if (!inst.installed) {
-        lp.ready = false;
-        lp.message = "cannot launch: " + inst.message + "\n  tip: retcomm install " +
-                     title.id + "\n";
-        return lp;
+InstallResult install_title(const Paths& paths, const Title& title, const InstallOptions& opts) {
+    InstallResult result;
+    result.plan = inspect_install(paths, title);
+
+    if (title.release.github.empty()) {
+        result.message = "no release.github in catalog for " + title.id;
+        return result;
     }
-    lp.argv.push_back(lp.binary.string());
-    if (!rom_path.empty()) lp.argv.push_back(rom_path.string());
-    lp.ready = true;
+
+#if !defined(_WIN32)
+    // Installing as root into a normal user's XDG data dir leaves rom.cfg /
+    // settings.toml unwritable, so Play cannot seed the Wine library path.
+    if (geteuid() == 0) {
+        std::cerr << "warning: installing as root — install files will be owned by "
+                     "root; run the hub/CLI as your normal user instead\n";
+    }
+#endif
+
+    const bool use_wine = opts.use_wine;
+    if (use_wine) {
+        if (host_os_key() == "windows") {
+            result.message = "Wine install is only for Linux/macOS hosts";
+            return result;
+        }
+        if (!title.supports_wine_install()) {
+            result.message = "catalog has no Windows asset_glob/launch binary for " + title.id;
+            return result;
+        }
+        std::string wine_err;
+        if (resolve_wine_binary(&wine_err).empty()) {
+            result.message = "Wine install requested but " + wine_err;
+            return result;
+        }
+    }
+
+    const std::string target_os = use_wine ? "windows" : host_os_key();
+    const std::string glob = title.asset_glob_for_os(target_os);
+    if (glob.empty()) {
+        result.message = "no asset_glob for target OS (" + target_os + ")";
+        return result;
+    }
+
+    std::string err;
+    GhRelease rel;
+    const bool allow_pre = opts.allow_prerelease || title.release.allow_prerelease;
+    if (!fetch_latest_release(title.release.github, rel, &err, allow_pre)) {
+        result.message = "failed to fetch release: " + err;
+        return result;
+    }
+    result.plan.latest_tag = rel.tag;
+
+    if (result.plan.installed && !opts.force && result.plan.installed_tag == rel.tag) {
+        const bool same_runtime =
+            !result.plan.record ||
+            (use_wine ? result.plan.record->runtime == "wine"
+                      : result.plan.record->runtime != "wine");
+        if (same_runtime) {
+            result.ok = true;
+            result.skipped = true;
+            result.plan.update_available = false;
+            result.message = "already installed at " + rel.tag + " — use --force to reinstall\n";
+            return result;
+        }
+    }
+
+    const GhAsset* asset = pick_asset(rel, glob);
+    if (!asset) {
+        result.message = "no release asset matching '" + glob + "' on " + rel.tag +
+                         " (target " + target_os + ")";
+        return result;
+    }
+
+    ensure_dirs(paths);
+    const std::string tag = sanitize_tag(rel.tag);
+    const fs::path install_root = paths.apps_dir / title.install_dir_name;
+    const fs::path release_dir = install_root / "releases" / tag;
+    const fs::path staging = install_root / ".staging";
+    const fs::path download = install_root / ".download" / asset->name;
+
+    std::error_code ec;
+    fs::remove_all(staging, ec);
+    fs::create_directories(staging, ec);
+    fs::create_directories(download.parent_path(), ec);
+
+    std::cerr << "Downloading " << asset->name << " (" << rel.tag << ")…\n";
+    auto headers = github_http_headers();
+    // browser_download_url wants a normal Accept for the binary body.
+    headers.erase(std::remove_if(headers.begin(), headers.end(),
+                                 [](const auto& h) { return h.first == "Accept"; }),
+                  headers.end());
+    headers.emplace_back("Accept", "application/octet-stream");
+
+    if (!http_download(
+            asset->browser_download_url, download, &err, headers,
+            [](std::uint64_t got, std::uint64_t total) {
+                if (total == 0) {
+                    std::cerr << "\r  " << got << " bytes" << std::flush;
+                } else {
+                    const int pct = static_cast<int>((got * 100) / total);
+                    std::cerr << "\r  " << pct << "%  (" << got << "/" << total << ")"
+                              << std::flush;
+                }
+            })) {
+        result.message = "download failed: " + err;
+        return result;
+    }
+    std::cerr << "\nExtracting…\n";
+
+    if (!extract_archive(download, staging, &err)) {
+        result.message = "extract failed: " + err;
+        return result;
+    }
+    const std::string launch_name = title.launch_binary_for_os(target_os);
+    if (!unwrap_nested_archives(staging, launch_name, &err)) {
+        result.message = "nested extract failed: " + err;
+        return result;
+    }
+
+    fs::path binary = find_named_file(staging, launch_name);
+    if (binary.empty()) {
+        result.message = "launch binary not found after extract: " + launch_name;
+        return result;
+    }
+    make_executable(binary);
+
+    fs::remove_all(release_dir, ec);
+    fs::create_directories(release_dir.parent_path(), ec);
+    fs::rename(staging, release_dir, ec);
+    if (ec) {
+        // Cross-device rename can fail; copy then remove.
+        fs::copy(staging, release_dir, fs::copy_options::recursive, ec);
+        fs::remove_all(staging, ec);
+        if (ec) {
+            result.message = "failed to place release dir: " + ec.message();
+            return result;
+        }
+    }
+
+    // Re-resolve binary under release_dir.
+    binary = find_named_file(release_dir, launch_name);
+    if (binary.empty()) {
+        result.message = "binary missing after move";
+        return result;
+    }
+    make_executable(binary);
+
+    const fs::path rel_bin = fs::relative(binary, release_dir, ec);
+    set_current_symlink(install_root, tag);
+
+    InstallRecord rec;
+    rec.title_id = title.id;
+    rec.github = title.release.github;
+    rec.tag = rel.tag;
+    rec.asset_name = asset->name;
+    rec.binary = ec ? binary.filename().string() : rel_bin.generic_string();
+    rec.host_os = host_os_key();
+    rec.target_os = target_os;
+    rec.runtime = use_wine ? "wine" : "native";
+    rec.installed_at = iso8601_now();
+    rec.release_url = rel.html_url;
+    if (!save_install_record(install_root, rec)) {
+        result.message = "installed files but failed to write install.json";
+        return result;
+    }
+
+    fs::remove(download, ec);
+    fs::remove_all(download.parent_path(), ec);
+
+    std::string restore_note;
+    restore_preserved_saves(install_root, release_dir, &restore_note);
+
+    result.plan = inspect_install(paths, title);
+    result.plan.latest_tag = rel.tag;
+    result.plan.update_available = false;
+    result.ok = true;
+    result.message = "installed " + title.id + " " + rel.tag +
+                     (use_wine ? " (wine)\n" : "\n") + "  asset:  " + asset->name +
+                     "\n  binary: " + result.plan.binary_path.string() + "\n";
+    if (!restore_note.empty()) result.message += "  " + restore_note;
+    return result;
+}
+
+InstallResult update_title(const Paths& paths, const Title& title, const InstallOptions& opts) {
+    InstallOptions o = opts;
+    o.check_latest = true;
+    // Preserve Wine runtime across updates unless the caller forced native.
+    if (!o.use_wine) {
+        InstallPlan existing = inspect_install(paths, title);
+        if (existing.record && existing.record->runtime == "wine") o.use_wine = true;
+    }
+    InstallPlan plan = plan_install(paths, title, o);
+    if (plan.installed && !plan.update_available && !o.force) {
+        InstallResult r;
+        r.ok = true;
+        r.skipped = true;
+        r.plan = std::move(plan);
+        r.message = title.id + " is up to date (" + r.plan.installed_tag + ")\n";
+        return r;
+    }
+    o.force = o.force || plan.update_available;
+    return install_title(paths, title, o);
+}
+
+UninstallResult uninstall_title(const Paths& paths, const Title& title,
+                                const UninstallOptions& opts) {
+    UninstallResult result;
+    result.plan = inspect_install(paths, title);
+    const fs::path install_root = result.plan.install_root;
+
+    std::error_code ec;
+    if (!fs::exists(install_root, ec)) {
+        result.skipped = true;
+        result.ok = true;
+        result.message = title.id + " is not installed (" + install_root.string() + ")\n";
+        return result;
+    }
+
+    const fs::path preserved = install_root / "preserved";
+    const auto globs = save_globs_for_title(title);
+
+    // Only scan install_root/releases/<tag>/ trees (canonicalized + deduped).
+    std::vector<fs::path> roots;
+    std::unordered_set<std::string> seen_roots;
+    auto add_root = [&](const fs::path& p) {
+        std::error_code lec;
+        if (!fs::is_directory(p, lec)) return;
+        const fs::path canon = fs::weakly_canonical(p, lec);
+        const fs::path use = lec ? p : canon;
+        if (!seen_roots.insert(use.string()).second) return;
+        roots.push_back(use);
+    };
+    {
+        const fs::path releases_dir = install_root / "releases";
+        if (fs::is_directory(releases_dir, ec)) {
+            for (auto it = fs::directory_iterator(releases_dir, ec);
+                 !ec && it != fs::directory_iterator(); it.increment(ec)) {
+                if (it->is_directory(ec)) add_root(it->path());
+            }
+        }
+    }
+    // Active current/ release if it points outside releases/ (unusual).
+    if (!result.plan.binary_path.empty())
+        add_root(result.plan.binary_path.parent_path());
+
+    if (opts.keep_saves) {
+        std::unordered_set<std::string> seen_rel;
+        if (opts.dry_run) {
+            for (const auto& root : roots) {
+                for (auto it = fs::recursive_directory_iterator(
+                         root, fs::directory_options::skip_permission_denied, ec);
+                     !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+                    if (it->is_directory(ec) && it->path().filename() == "preserved") {
+                        it.disable_recursion_pending();
+                        continue;
+                    }
+                    if (!it->is_regular_file(ec)) continue;
+                    const std::string rel =
+                        normalize_preserved_rel(rel_posix_under(root, it->path()));
+                    if (rel.empty() || !is_save_path(rel, globs)) continue;
+                    if (seen_rel.insert(rel).second) result.preserved_paths.push_back(rel);
+                }
+            }
+        } else {
+            std::string err;
+            // Fresh stash each uninstall keep-saves pass.
+            fs::remove_all(preserved, ec);
+            for (const auto& root : roots) {
+                std::vector<std::string> batch;
+                stash_saves_from(root, preserved, globs, &batch, &err);
+                if (!err.empty()) {
+                    result.message = err + "\n";
+                    return result;
+                }
+                for (auto& r : batch) {
+                    const std::string norm = normalize_preserved_rel(r);
+                    if (norm.empty()) continue;
+                    if (seen_rel.insert(norm).second) result.preserved_paths.push_back(norm);
+                }
+            }
+        }
+        std::sort(result.preserved_paths.begin(), result.preserved_paths.end());
+    }
+
     std::ostringstream oss;
-    oss << "launch plan for " << title.id << "\n"
-        << "  binary: " << lp.binary.string() << "\n";
-    if (!rom_path.empty())
-        oss << "  rom:    " << rom_path.string() << "\n";
-    else
-        oss << "  rom:    (none staged — game recomp-ui will prompt)\n";
-    oss << "  status: STUB — process spawn not wired yet; would exec argv above\n";
-    lp.message = oss.str();
-    return lp;
+    oss << "uninstall " << title.id << "\n"
+        << "  target: " << install_root.string() << "\n";
+    if (opts.keep_saves) {
+        oss << "  saves:  preserve (" << result.preserved_paths.size() << " file(s)";
+        if (!result.preserved_paths.empty())
+            oss << " → " << preserved.string();
+        oss << ")\n";
+        for (size_t i = 0; i < result.preserved_paths.size() && i < 12; ++i)
+            oss << "    - " << result.preserved_paths[i] << "\n";
+        if (result.preserved_paths.size() > 12)
+            oss << "    … +" << (result.preserved_paths.size() - 12) << " more\n";
+    } else {
+        oss << "  saves:  delete (including any preserved/ stash)\n";
+    }
+
+    if (opts.dry_run) {
+        oss << "  status: dry-run (not removed)\n";
+        result.ok = true;
+        result.message = oss.str();
+        return result;
+    }
+
+    // Remove build artifacts; optionally keep preserved/.
+    const fs::path current = install_root / "current";
+    const fs::path current_path = install_root / "current.path";
+    fs::remove(current, ec);
+    fs::remove(current_path, ec);
+    fs::remove_all(install_root / "releases", ec);
+    fs::remove(install_root / "install.json", ec);
+    fs::remove_all(install_root / ".download", ec);
+    fs::remove_all(install_root / ".staging", ec);
+
+    for (auto it = fs::directory_iterator(install_root, ec);
+         !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        const auto name = it->path().filename().string();
+        if (opts.keep_saves && name == "preserved") continue;
+        fs::remove_all(it->path(), ec);
+    }
+
+    if (!opts.keep_saves) {
+        fs::remove_all(preserved, ec);
+        fs::remove_all(install_root, ec);
+    } else if (!fs::exists(preserved, ec) || fs::is_empty(preserved, ec)) {
+        fs::remove_all(preserved, ec);
+        fs::remove(install_root, ec);
+    }
+
+    oss << "  status: removed\n";
+    result.ok = true;
+    result.plan = inspect_install(paths, title);
+    result.message = oss.str();
+    return result;
 }
 
 } // namespace retcomm

@@ -1,15 +1,36 @@
 {
   "id": "pokemon-stadium-n64",
-  "name": "Pokémon Stadium",
+  "name": "Pok\u00e9mon Stadium",
   "kind": "recomp",
   "platform": "n64",
-  "description": "N64 recomp of Pokémon Stadium.",
+  "description": "Pok\u00e9mon Stadium (US v1.0) recompiled with an N64Recomp fork.",
   "homepage": "https://github.com/mstan/PokemonStadiumRecomp",
   "rom_identity": {
-    "crc32": [],
-    "sha1": []
+    "crc32": [
+      "235b1842"
+    ],
+    "md5": [
+      "6dc6820cef755fc1253d06df45c9bd2a"
+    ],
+    "sha1": [
+      "0d3b1d740c6ee6da6923550bf24ad827262fd8c0"
+    ],
+    "sha256": [
+      "a2dc9d14bae5035bda8a7ca05b9c16e61bb5a19be5e707dd6f6e1fe98ceba4ea"
+    ],
+    "disc_serials": [],
+    "sizes": [
+      33554432
+    ],
+    "filenames": [
+      "Pokemon Stadium (USA) (Rev 2).z64"
+    ]
   },
-  "rom_extensions": [".z64", ".n64", ".v64"],
+  "rom_extensions": [
+    ".z64",
+    ".n64",
+    ".v64"
+  ],
   "release": {
     "github": "mstan/PokemonStadiumRecomp",
     "asset_glob": {
@@ -25,10 +46,15 @@
     "macos": "PokemonStadiumRecomp"
   },
   "romm": {
-    "platforms": ["n64"]
+    "platforms": [
+      "n64"
+    ]
   },
   "saves": {
-    "sram_glob": ["*.srm", "saves/*"]
+    "sram_glob": [
+      "*.srm",
+      "saves/*"
+    ]
   },
-  "notes": "Fill rom_identity from the game's known hashes when pinning."
+  "notes": "Fill rom_identity from baserom / runtime gate when pinning. Pinned USA Rev 2 (32 MiB). Upstream README mentions US v1.0 \u2014 add that hash if the gate rejects Rev 2."
 }

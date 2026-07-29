@@ -1,0 +1,54 @@
+{
+  "id": "pocket-monsters-stadium-n64",
+  "name": "Pocket Monsters Stadium",
+  "kind": "recomp",
+  "platform": "n64",
+  "description": "Pocket Monsters Stadium (Japan) recompiled with an N64Recomp fork — early/buggy bring-up.",
+  "homepage": "https://github.com/mstan/PocketMonstersStadiumRecomp",
+  "rom_identity": {
+    "crc32": [],
+    "md5": [
+      "c46e087d966a35095df96799b0b4ffae"
+    ],
+    "sha1": [],
+    "sha256": [],
+    "disc_serials": [],
+    "sizes": [
+      16777216
+    ],
+    "filenames": [
+      "Pocket Monsters Stadium (Japan).z64"
+    ]
+  },
+  "rom_extensions": [
+    ".z64",
+    ".n64",
+    ".v64"
+  ],
+  "release": {
+    "github": "mstan/PocketMonstersStadiumRecomp",
+    "asset_glob": {
+      "linux": "*linux*",
+      "windows": "*windows*",
+      "macos": "*macos*"
+    }
+  },
+  "install_dir_name": "PocketMonstersStadiumRecomp",
+  "launch": {
+    "linux": "PocketMonstersStadiumRecomp",
+    "windows": "PocketMonstersStadiumRecomp.exe",
+    "macos": "PocketMonstersStadiumRecomp"
+  },
+  "romm": {
+    "platforms": [
+      "n64"
+    ]
+  },
+  "saves": {
+    "sram_glob": [
+      "*.srm",
+      "saves/*"
+    ]
+  },
+  "notes": "Baserom MD5 from PocketMonstersStadiumRecomp README (16 MiB .z64). CRC/SHA pending local dump or No-Intro cross-check."
+}

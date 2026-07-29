@@ -1,0 +1,56 @@
+{
+  "id": "minish-cap-gba",
+  "name": "The Legend of Zelda: The Minish Cap",
+  "kind": "recomp",
+  "platform": "gba",
+  "description": "The Legend of Zelda: The Minish Cap recompiled with gbarecomp.",
+  "homepage": "https://github.com/mstan/MinishCapRecomp",
+  "rom_identity": {
+    "crc32": [
+      "abcebbb1"
+    ],
+    "md5": [
+      "a104896da0047abe8bee2a6e3f4c7290"
+    ],
+    "sha1": [
+      "b4bd50e4131b027c334547b4524e2dbbd4227130"
+    ],
+    "sha256": [
+      "bedc74df62755f705398273de8ed3bc59be610cf55760d0b9aa277f1f5035e73"
+    ],
+    "disc_serials": [],
+    "sizes": [],
+    "filenames": [
+      "Legend of Zelda, The - The Minish Cap (USA).gba"
+    ]
+  },
+  "rom_extensions": [
+    ".gba"
+  ],
+  "release": {
+    "github": "mstan/MinishCapRecomp",
+    "asset_glob": {
+      "linux": "*linux*",
+      "windows": "*windows*",
+      "macos": "*macos*"
+    }
+  },
+  "install_dir_name": "MinishCapRecomp",
+  "launch": {
+    "linux": "MinishCapRecomp",
+    "windows": "MinishCapRecomp.exe",
+    "macos": "MinishCapRecomp"
+  },
+  "romm": {
+    "platforms": [
+      "gba"
+    ]
+  },
+  "saves": {
+    "sram_glob": [
+      "*.sav",
+      "saves/*"
+    ]
+  },
+  "notes": "USA SHA-1 from baserom.md / zeldaret/tmc."
+}

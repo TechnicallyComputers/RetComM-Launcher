@@ -1,8 +1,13 @@
+#include "retcomm/app_state.hpp"
+#include "retcomm/bios_index.hpp"
 #include "retcomm/catalog.hpp"
 #include "retcomm/config.hpp"
 #include "retcomm/install.hpp"
+#include "retcomm/launch.hpp"
+#include "retcomm/library_index.hpp"
 #include "retcomm/paths.hpp"
 #include "retcomm/romm.hpp"
+#include "retcomm/romm_saves.hpp"
 #include "retcomm/romscan.hpp"
 
 #include <cstdlib>
@@ -18,21 +23,39 @@ namespace {
 
 void print_help(const char* argv0) {
     std::cout
-        << "Retcomm Launcher — multi-title hub for recomp/decomp projects\n\n"
+        << "RetComM Launcher — multi-title hub for recomp/decomp projects\n\n"
         << "Usage:\n"
         << "  " << argv0 << " [--catalog DIR] <command> [args]\n\n"
         << "Commands:\n"
         << "  list                         List catalog titles\n"
         << "  status                       Show paths, library, installs\n"
         << "  config                       Show / explain config.json\n"
-        << "  scan [--rom-dir DIR ...]     Scan RomM-style library + match catalog\n"
-        << "  install <title-id>           Show install plan (stub)\n"
-        << "  launch <title-id> [--rom P]  Show launch plan (stub)\n"
+        << "  scan [--full] [--rom-dir DIR ...]  Scan ROM library, match catalog, update index\n"
+        << "  bios scan [--full] [--bios-dir DIR]  Scan BIOS tree, match titles that need BIOS\n"
+        << "  bios list                    Show indexed title → BIOS bindings\n"
+        << "  library [--check-updates]    Indexed title → ROM + install + BIOS status\n"
+        << "  install <title-id> [opts]    Download/extract latest GitHub release\n"
+        << "      --force                  Reinstall even if same tag\n"
+        << "      --wine                   Linux/macOS: install Windows build via Wine\n"
+        << "      --dry-run                Print install plan only\n"
+        << "  update <title-id>|--all      Update installed title(s) if newer\n"
+        << "  uninstall <title-id> [opts]  Remove installed title (alias: remove)\n"
+        << "      --keep-saves             Keep memcards/SRAM/savestates (default)\n"
+        << "      --delete-saves           Also wipe saves / preserved stash\n"
+        << "      --dry-run                Show what would be removed\n"
+        << "  launch <title-id> [opts]     Launch title into its dedicated launcher\n"
+        << "      --rom PATH               ROM/disc path (else library index)\n"
+        << "      --bios PATH              BIOS path (else bios index)\n"
+        << "      --mode default|direct|netplay\n"
+        << "      --detach                 Don't wait for the game to exit\n"
+        << "      --dry-run                Print argv/cwd only\n"
         << "  romm                         Show RomM config / stub ping\n"
         << "  help                         This message\n\n"
-        << "Scan uses ~/.config/retcomm/config.json library_root and only walks\n"
-        << "platform folders needed by the catalog (e.g. snes/, n64/, ps/).\n"
-        << "Pass --rom-dir to override for one run (library root or platform folder).\n";
+        << "ROM scan uses config library_root (platform folders only).\n"
+        << "BIOS scan uses config bios_root (flat + per-system folders).\n"
+        << "--full ignores the hash cache and rebuilds the index from disk\n"
+        << "(drops missing files; recomputes digests for everything scanned).\n"
+        << "Indexes: ~/.local/share/retcomm/library-index.json and bios-index.json.\n";
 }
 
 fs::path exe_dir_from(const char* argv0) {
@@ -49,6 +72,9 @@ retcomm::ScanProgressFn make_progress_printer() {
                       << p.total << "  " << p.path.filename().string() << "          "
                       << std::flush;
             if (p.current == p.total) std::cerr << "\n";
+        } else if (p.phase == "cache" && p.current > 0 && (p.current % 25 == 0)) {
+            std::cerr << "\r  cache-hit [" << p.platform << "] " << p.current
+                      << "          " << std::flush;
         } else if (p.phase == "walk" && p.current > 0 && (p.current % 50 == 0)) {
             std::cerr << "\r  indexing [" << p.platform << "] " << p.current
                       << " files…          " << std::flush;
@@ -76,13 +102,23 @@ int cmd_status(const retcomm::Paths& paths, const retcomm::AppConfig& cfg,
     } catch (const std::exception& e) {
         std::cerr << "note: could not create data dirs (" << e.what() << ")\n";
     }
+    auto idx = retcomm::load_library_index(paths.library_index_path);
+    auto bios_idx = retcomm::load_bios_index(paths.bios_index_path);
     std::cout << "config:  " << paths.config_path.string() << "\n"
               << "data:    " << paths.data_dir.string() << "\n"
               << "apps:    " << paths.apps_dir.string() << "\n"
+              << "index:   " << paths.library_index_path.string() << " ("
+              << idx.titles.size() << " bound titles, " << idx.files.size()
+              << " files)\n"
+              << "bios:    " << paths.bios_index_path.string() << " ("
+              << bios_idx.titles.size() << " bound titles, " << bios_idx.files.size()
+              << " files)\n"
               << "catalog: " << cat.root.string() << "\n"
               << "library: "
               << (cfg.library_root.empty() ? "(unset)" : cfg.library_root.string())
-              << "\n\n";
+              << "\n"
+              << "bios_root: "
+              << (cfg.bios_root.empty() ? "(unset)" : cfg.bios_root.string()) << "\n\n";
 
     std::cout << "Platform folders (catalog → disk):\n";
     std::unordered_set<std::string> plats;
@@ -104,7 +140,10 @@ int cmd_status(const retcomm::Paths& paths, const retcomm::AppConfig& cfg,
 
     for (const auto& t : cat.titles) {
         auto plan = retcomm::inspect_install(paths, t);
-        std::cout << "  " << t.id << " — " << plan.message << "\n";
+        const auto rom = idx.preferred_rom(t.id);
+        std::cout << "  " << t.id << " — " << plan.message;
+        if (!rom.empty()) std::cout << "\n      rom: " << rom.string();
+        std::cout << "\n";
     }
     return 0;
 }
@@ -114,6 +153,8 @@ int cmd_config(const retcomm::Paths& paths, const retcomm::AppConfig& cfg) {
               << "library_root: "
               << (cfg.library_root.empty() ? "(unset)" : cfg.library_root.string())
               << "\n"
+              << "bios_root: "
+              << (cfg.bios_root.empty() ? "(unset)" : cfg.bios_root.string()) << "\n"
               << "exclude_dirs: ";
     for (size_t i = 0; i < cfg.exclude_dirs.size(); ++i) {
         if (i) std::cout << ", ";
@@ -125,8 +166,9 @@ int cmd_config(const retcomm::Paths& paths, const retcomm::AppConfig& cfg) {
               << "Example config.json:\n"
               << "{\n"
               << "  \"library_root\": \"/mnt/crucial4tb/Emulation/roms\",\n"
+              << "  \"bios_root\": \"/mnt/crucial4tb/Emulation/bios\",\n"
               << "  \"platform_folders\": {\n"
-              << "    \"psx\": [\"ps\", \"ps1\"],\n"
+              << "    \"psx\": [\"ps\", \"ps1\", \"psx\"],\n"
               << "    \"snes\": [\"snes\"],\n"
               << "    \"n64\": [\"n64\"]\n"
               << "  },\n"
@@ -139,15 +181,202 @@ int cmd_config(const retcomm::Paths& paths, const retcomm::AppConfig& cfg) {
     return 0;
 }
 
-int cmd_scan(const retcomm::Catalog& cat, const retcomm::AppConfig& cfg,
-             const std::vector<fs::path>& rom_dirs) {
+int cmd_library(const retcomm::Paths& paths, const retcomm::Catalog& cat,
+                bool check_updates) {
+    auto idx = retcomm::load_library_index(paths.library_index_path);
+    auto bios_idx = retcomm::load_bios_index(paths.bios_index_path);
+    std::cout << "Library index: " << paths.library_index_path.string() << "\n"
+              << "library_root: "
+              << (idx.library_root.empty() ? "(unset)" : idx.library_root) << "\n"
+              << "files: " << idx.files.size() << "  bound titles: " << idx.titles.size()
+              << "\n\n";
+    if (idx.titles.empty()) {
+        std::cout << "No bound titles yet. Run: retcomm scan\n";
+        return 0;
+    }
+    for (const auto& b : idx.titles) {
+        const auto* t = cat.find(b.title_id);
+        std::cout << "  " << b.title_id;
+        if (t) std::cout << "  (" << t->name << ")";
+        std::cout << "\n"
+                  << "      preferred: " << b.preferred_path << "\n";
+        if (b.paths.size() > 1) {
+            for (size_t i = 1; i < b.paths.size(); ++i)
+                std::cout << "      also:      " << b.paths[i] << "\n";
+        }
+        if (t) {
+            auto plan = retcomm::inspect_install(paths, *t);
+            if (plan.installed) {
+                std::cout << "      app:       installed";
+                if (!plan.installed_tag.empty())
+                    std::cout << " " << plan.installed_tag;
+                if (check_updates && !t->release.github.empty()) {
+                    std::string err;
+                    const std::string latest = retcomm::fetch_latest_release_tag(
+                        t->release.github, &err, t->release.allow_prerelease);
+                    if (!latest.empty() && latest != plan.installed_tag)
+                        std::cout << "  [update available: " << latest << "]";
+                    else if (!latest.empty())
+                        std::cout << "  [up to date]";
+                    else if (!err.empty())
+                        std::cout << "  [update check failed]";
+                }
+                std::cout << "\n";
+            } else {
+                std::cout << "      app:       not installed\n";
+            }
+            if (t->requires_bios()) {
+                const auto bios = bios_idx.preferred_bios(t->id);
+                if (!bios.empty())
+                    std::cout << "      bios:      " << bios.string() << "\n";
+                else
+                    std::cout << "      bios:      missing (retcomm bios scan)\n";
+            }
+        }
+    }
+    return 0;
+}
+
+int cmd_bios_list(const retcomm::Paths& paths, const retcomm::Catalog& cat) {
+    auto idx = retcomm::load_bios_index(paths.bios_index_path);
+    std::cout << "BIOS index: " << paths.bios_index_path.string() << "\n"
+              << "bios_root: " << (idx.bios_root.empty() ? "(unset)" : idx.bios_root)
+              << "\n"
+              << "files: " << idx.files.size() << "  bound titles: " << idx.titles.size()
+              << "\n\n";
+    if (idx.titles.empty()) {
+        std::cout << "No BIOS bindings yet. Run: retcomm bios scan\n";
+        return 0;
+    }
+    for (const auto& b : idx.titles) {
+        const auto* t = cat.find(b.title_id);
+        std::cout << "  " << b.title_id;
+        if (t) std::cout << "  (" << t->name << ")";
+        std::cout << "\n"
+                  << "      preferred: " << b.preferred_path << "\n";
+        for (const auto& p : b.paths) {
+            if (p == b.preferred_path) continue;
+            std::cout << "      also:      " << p << "\n";
+        }
+    }
+    return 0;
+}
+
+int cmd_bios_scan(const retcomm::Paths& paths, const retcomm::Catalog& cat,
+                  const retcomm::AppConfig& cfg, const std::vector<fs::path>& bios_dirs,
+                  bool full_rescan) {
+    retcomm::BiosIndex index = retcomm::load_bios_index(paths.bios_index_path);
+
+    retcomm::BiosScanOptions opts;
+    opts.on_progress = [](const retcomm::BiosScanProgress& p) {
+        if (p.phase == "hash" && p.total > 0) {
+            std::cerr << "\r  hashing [" << p.platform << "] " << p.current << "/"
+                      << p.total << "  " << p.path.filename().string() << "          "
+                      << std::flush;
+            if (p.current == p.total) std::cerr << "\n";
+        } else if (p.phase == "match") {
+            std::cerr << "  matching catalog…\n";
+        }
+    };
+    opts.full_rescan = full_rescan;
+    if (full_rescan) {
+        if (bios_dirs.empty()) {
+            std::cerr << "Full BIOS rescan: rebuilding index from scratch…\n";
+            index = retcomm::BiosIndex{};
+        } else {
+            std::cerr << "Full BIOS rescan: ignoring hash cache…\n";
+        }
+        opts.index = nullptr;
+    } else {
+        opts.index = &index;
+    }
+
+    retcomm::BiosScanResult result;
+    fs::path bios_root = cfg.bios_root;
+    if (!bios_dirs.empty()) {
+        std::cerr << "Scanning " << bios_dirs.size() << " BIOS path(s)…\n";
+        result = retcomm::scan_bios_roots(cat, cfg, bios_dirs, opts);
+        if (bios_root.empty()) bios_root = bios_dirs[0];
+    } else {
+        if (cfg.bios_root.empty()) {
+            std::cerr << "bios scan requires bios_root in config.json or --bios-dir DIR\n"
+                      << "  tip: retcomm config\n";
+            return 2;
+        }
+        std::cerr << "Scanning BIOS tree " << cfg.bios_root.string() << "…\n";
+        result = retcomm::scan_bios_library(cat, cfg, opts);
+    }
+
+    std::cout << "Scanned roots:\n";
+    for (const auto& r : result.scanned_roots) std::cout << "  " << r.string() << "\n";
+    std::cout << "Candidates: " << result.files.size()
+              << "  hashed: " << result.hashed_files
+              << "  cache-hits: " << result.cache_hits
+              << "  size-skipped: " << result.skipped_hash << "\n";
+    for (const auto& err : result.errors) std::cerr << "  warning: " << err << "\n";
+
+    merge_bios_scan_into_index(index, cat, result, bios_root);
+    try {
+        retcomm::ensure_dirs(paths);
+    } catch (const std::exception& e) {
+        std::cerr << "note: " << e.what() << "\n";
+    }
+    if (!retcomm::save_bios_index(paths.bios_index_path, index)) {
+        std::cerr << "warning: failed to write " << paths.bios_index_path.string() << "\n";
+    } else {
+        std::cout << "BIOS index updated: " << paths.bios_index_path.string() << " ("
+                  << index.titles.size() << " titles, " << index.files.size()
+                  << " files)\n";
+    }
+
+    if (result.matches.empty()) {
+        std::cout << "No BIOS matches for catalog titles.\n"
+                  << "  Tip: PSX titles expect SCPH1001.BIN (CRC32 37157331, 512 KiB).\n";
+        return 0;
+    }
+    std::cout << "\nBIOS bindings:\n";
+    for (const auto& m : result.matches) {
+        const auto* t = cat.find(m.title_id);
+        std::cout << "  " << m.title_id;
+        if (t) std::cout << " (" << t->name << ")";
+        std::cout << "\n"
+                  << "      " << m.preferred_path << "\n";
+    }
+    return 0;
+}
+
+int cmd_scan(const retcomm::Paths& paths, const retcomm::Catalog& cat,
+             const retcomm::AppConfig& cfg, const std::vector<fs::path>& rom_dirs,
+             bool full_rescan) {
+    retcomm::LibraryIndex index = retcomm::load_library_index(paths.library_index_path);
+
     retcomm::ScanOptions opts;
     opts.on_progress = make_progress_printer();
+    opts.full_rescan = full_rescan;
+    if (full_rescan) {
+        if (rom_dirs.empty()) {
+            std::cerr << "Full ROM rescan: rebuilding library index from scratch…\n";
+            index = retcomm::LibraryIndex{};
+        } else {
+            std::cerr << "Full ROM rescan: ignoring hash cache for scanned roots…\n";
+        }
+        opts.index = nullptr;
+    } else {
+        opts.index = &index;
+    }
 
     retcomm::ScanResult result;
+    fs::path lib_root = cfg.library_root;
     if (!rom_dirs.empty()) {
         std::cerr << "Scanning " << rom_dirs.size() << " path(s) (platform-scoped)…\n";
         result = retcomm::scan_rom_roots(cat, cfg, rom_dirs, opts);
+        if (lib_root.empty() && !rom_dirs.empty()) {
+            // If user passed a library root, remember it on the index.
+            std::error_code ec;
+            if (fs::is_directory(rom_dirs[0] / "snes", ec) ||
+                fs::is_directory(rom_dirs[0] / "ps", ec))
+                lib_root = rom_dirs[0];
+        }
     } else {
         if (cfg.library_root.empty()) {
             std::cerr << "scan requires library_root in config.json or --rom-dir DIR\n"
@@ -163,8 +392,24 @@ int cmd_scan(const retcomm::Catalog& cat, const retcomm::AppConfig& cfg,
     for (const auto& r : result.scanned_roots) std::cout << "  " << r.string() << "\n";
     std::cout << "Candidates: " << result.files.size()
               << "  hashed: " << result.hashed_files
+              << "  cache-hits: " << result.cache_hits
               << "  hash-skipped: " << result.skipped_hash << "\n";
     for (const auto& err : result.errors) std::cerr << "  warning: " << err << "\n";
+
+    merge_scan_into_index(index, cat, result, lib_root);
+    try {
+        retcomm::ensure_dirs(paths);
+    } catch (const std::exception& e) {
+        std::cerr << "note: " << e.what() << "\n";
+    }
+    if (!retcomm::save_library_index(paths.library_index_path, index)) {
+        std::cerr << "warning: failed to write " << paths.library_index_path.string()
+                  << "\n";
+    } else {
+        std::cout << "Index updated: " << paths.library_index_path.string() << " ("
+                  << index.titles.size() << " titles, " << index.files.size()
+                  << " files)\n";
+    }
 
     if (result.matches.empty()) {
         std::cout << "No catalog matches yet.\n"
@@ -176,12 +421,14 @@ int cmd_scan(const retcomm::Catalog& cat, const retcomm::AppConfig& cfg,
     for (const auto& m : result.matches) {
         std::cout << "  " << m.title->name << " (" << m.title->id << ")\n"
                   << "      via " << m.matched_by << ": " << m.rom_path.string() << "\n";
+        for (size_t i = 1; i < m.all_paths.size(); ++i)
+            std::cout << "      also: " << m.all_paths[i].string() << "\n";
     }
     return 0;
 }
 
 int cmd_install(const retcomm::Paths& paths, const retcomm::Catalog& cat,
-                const std::string& id) {
+                const std::string& id, bool force, bool dry_run, bool use_wine) {
     const auto* t = cat.find(id);
     if (!t) {
         std::cerr << "unknown title: " << id << "\n";
@@ -192,21 +439,124 @@ int cmd_install(const retcomm::Paths& paths, const retcomm::Catalog& cat,
     } catch (const std::exception& e) {
         std::cerr << "note: " << e.what() << "\n";
     }
-    auto plan = retcomm::plan_install(paths, *t);
-    std::cout << plan.message;
-    return 0;
+    retcomm::InstallOptions opts;
+    opts.force = force;
+    opts.check_latest = true;
+    opts.use_wine = use_wine;
+    if (dry_run) {
+        auto plan = retcomm::plan_install(paths, *t, opts);
+        std::cout << plan.message;
+        return 0;
+    }
+    auto result = retcomm::install_title(paths, *t, opts);
+    std::cout << result.message;
+    return result.ok ? 0 : 1;
 }
 
-int cmd_launch(const retcomm::Paths& paths, const retcomm::Catalog& cat,
-               const std::string& id, const fs::path& rom) {
+int cmd_update(const retcomm::Paths& paths, const retcomm::Catalog& cat,
+               const std::string& id_or_all, bool force) {
+    retcomm::InstallOptions opts;
+    opts.force = force;
+    opts.check_latest = true;
+
+    std::vector<const retcomm::Title*> targets;
+    if (id_or_all == "--all") {
+        for (const auto& t : cat.titles) {
+            auto plan = retcomm::inspect_install(paths, t);
+            if (plan.installed) targets.push_back(&t);
+        }
+        if (targets.empty()) {
+            std::cout << "No installed titles to update.\n";
+            return 0;
+        }
+    } else {
+        const auto* t = cat.find(id_or_all);
+        if (!t) {
+            std::cerr << "unknown title: " << id_or_all << "\n";
+            return 1;
+        }
+        targets.push_back(t);
+    }
+
+    int failures = 0;
+    for (const auto* t : targets) {
+        auto result = retcomm::update_title(paths, *t, opts);
+        std::cout << result.message;
+        if (!result.ok) ++failures;
+    }
+    return failures ? 1 : 0;
+}
+
+int cmd_uninstall(const retcomm::Paths& paths, const retcomm::Catalog& cat,
+                  const std::string& id, const retcomm::UninstallOptions& opts) {
     const auto* t = cat.find(id);
     if (!t) {
         std::cerr << "unknown title: " << id << "\n";
         return 1;
     }
-    auto plan = retcomm::plan_launch(paths, *t, rom);
-    std::cout << plan.message;
-    return plan.ready ? 0 : 1;
+    auto result = retcomm::uninstall_title(paths, *t, opts);
+    std::cout << result.message;
+    return result.ok ? 0 : 1;
+}
+
+int cmd_launch(const retcomm::Paths& paths, const retcomm::Catalog& cat,
+               const std::string& id, retcomm::LaunchOptions opts) {
+    const auto* t = cat.find(id);
+    if (!t) {
+        std::cerr << "unknown title: " << id << "\n";
+        return 1;
+    }
+    std::string rom_source;
+    std::string bios_source;
+    std::string save_source;
+    if (opts.rom_path.empty()) {
+        auto idx = retcomm::load_library_index(paths.library_index_path);
+        opts.rom_path = idx.preferred_rom(id);
+        if (!opts.rom_path.empty()) rom_source = "library-index";
+    } else {
+        rom_source = "--rom";
+    }
+    if (opts.bios_path.empty() && t->has_bios_identity()) {
+        auto bidx = retcomm::load_bios_index(paths.bios_index_path);
+        opts.bios_path = bidx.preferred_bios(id);
+        if (!opts.bios_path.empty()) bios_source = "bios-index";
+    } else if (!opts.bios_path.empty()) {
+        bios_source = "--bios";
+    }
+    if (opts.save_path.empty()) {
+        auto st = retcomm::load_app_state(paths.state_path);
+        const std::string save_id = retcomm::preferred_save_for(st, id);
+        if (!save_id.empty()) {
+            opts.save_path = retcomm::resolve_managed_save(paths, *t, save_id);
+            if (opts.save_path.empty()) opts.save_path = save_id;
+            if (!opts.save_path.empty()) save_source = "state.json";
+        } else {
+            const auto saves = retcomm::list_managed_saves(paths, *t);
+            if (!saves.empty()) {
+                opts.save_path = saves.front().host_path;
+                save_source = "saves/";
+            }
+        }
+    } else {
+        save_source = "--save";
+    }
+
+    auto result = retcomm::launch_title(paths, *t, opts);
+    std::cout << result.message;
+    if (!opts.rom_path.empty() && result.plan.ready)
+        std::cout << "  media source: " << rom_source << "\n";
+    else if (opts.rom_path.empty() && result.plan.ready)
+        std::cout << "  tip: run retcomm scan, or pass --rom PATH\n";
+    if (!opts.bios_path.empty() && result.plan.ready)
+        std::cout << "  bios source:  " << bios_source << "\n";
+    else if (t->requires_bios() && opts.bios_path.empty() && result.plan.ready)
+        std::cout << "  tip: run retcomm bios scan, or pass --bios PATH\n";
+    if (!opts.save_path.empty() && result.plan.ready)
+        std::cout << "  save source:  " << save_source << "\n";
+
+    if (!result.ok) return 1;
+    if (opts.dry_run || opts.detach) return 0;
+    return result.exit_code;
 }
 
 int cmd_romm(const retcomm::Paths& paths, const retcomm::AppConfig& cfg) {
@@ -263,41 +613,149 @@ int main(int argc, char** argv) {
         if (cmd == "list") return cmd_list(catalog);
         if (cmd == "status") return cmd_status(paths, cfg, catalog);
         if (cmd == "config") return cmd_config(paths, cfg);
+        if (cmd == "library") {
+            bool check_updates = false;
+            for (size_t i = 1; i < args.size(); ++i) {
+                if (args[i] == "--check-updates")
+                    check_updates = true;
+                else if (args[i] == "list")
+                    continue;
+                else {
+                    std::cerr << "unexpected library arg: " << args[i] << "\n";
+                    return 2;
+                }
+            }
+            return cmd_library(paths, catalog, check_updates);
+        }
         if (cmd == "romm") return cmd_romm(paths, cfg);
+        if (cmd == "bios") {
+            if (args.size() < 2 || args[1] == "list") return cmd_bios_list(paths, catalog);
+            if (args[1] == "scan") {
+                std::vector<fs::path> roots;
+                bool full = false;
+                for (size_t i = 2; i < args.size(); ++i) {
+                    if (args[i] == "--full") {
+                        full = true;
+                    } else if (args[i] == "--bios-dir" && i + 1 < args.size()) {
+                        roots.emplace_back(args[++i]);
+                    } else {
+                        std::cerr << "unexpected bios scan arg: " << args[i] << "\n";
+                        return 2;
+                    }
+                }
+                return cmd_bios_scan(paths, catalog, cfg, roots, full);
+            }
+            std::cerr << "usage: retcomm bios scan [--full] [--bios-dir DIR] | "
+                         "retcomm bios list\n";
+            return 2;
+        }
         if (cmd == "scan") {
             std::vector<fs::path> roots;
+            bool full = false;
             for (size_t i = 1; i < args.size(); ++i) {
-                if (args[i] == "--rom-dir" && i + 1 < args.size()) {
+                if (args[i] == "--full") {
+                    full = true;
+                } else if (args[i] == "--rom-dir" && i + 1 < args.size()) {
                     roots.emplace_back(args[++i]);
                 } else {
                     std::cerr << "unexpected scan arg: " << args[i] << "\n";
                     return 2;
                 }
             }
-            return cmd_scan(catalog, cfg, roots);
+            return cmd_scan(paths, catalog, cfg, roots, full);
         }
         if (cmd == "install") {
             if (args.size() < 2) {
-                std::cerr << "usage: retcomm install <title-id>\n";
+                std::cerr << "usage: retcomm install <title-id> [--force] [--wine] [--dry-run]\n";
                 return 2;
             }
-            return cmd_install(paths, catalog, args[1]);
+            bool force = false;
+            bool dry_run = false;
+            bool use_wine = false;
+            for (size_t i = 2; i < args.size(); ++i) {
+                if (args[i] == "--force")
+                    force = true;
+                else if (args[i] == "--dry-run")
+                    dry_run = true;
+                else if (args[i] == "--wine")
+                    use_wine = true;
+                else {
+                    std::cerr << "unexpected install arg: " << args[i] << "\n";
+                    return 2;
+                }
+            }
+            return cmd_install(paths, catalog, args[1], force, dry_run, use_wine);
+        }
+        if (cmd == "update") {
+            if (args.size() < 2) {
+                std::cerr << "usage: retcomm update <title-id>|--all [--force]\n";
+                return 2;
+            }
+            bool force = false;
+            for (size_t i = 2; i < args.size(); ++i) {
+                if (args[i] == "--force")
+                    force = true;
+                else {
+                    std::cerr << "unexpected update arg: " << args[i] << "\n";
+                    return 2;
+                }
+            }
+            return cmd_update(paths, catalog, args[1], force);
+        }
+        if (cmd == "uninstall" || cmd == "remove") {
+            if (args.size() < 2) {
+                std::cerr << "usage: retcomm uninstall <title-id> "
+                             "[--keep-saves|--delete-saves] [--dry-run]\n";
+                return 2;
+            }
+            retcomm::UninstallOptions opts;
+            for (size_t i = 2; i < args.size(); ++i) {
+                if (args[i] == "--keep-saves")
+                    opts.keep_saves = true;
+                else if (args[i] == "--delete-saves" || args[i] == "--purge")
+                    opts.keep_saves = false;
+                else if (args[i] == "--dry-run")
+                    opts.dry_run = true;
+                else {
+                    std::cerr << "unexpected uninstall arg: " << args[i] << "\n";
+                    return 2;
+                }
+            }
+            return cmd_uninstall(paths, catalog, args[1], opts);
         }
         if (cmd == "launch") {
             if (args.size() < 2) {
-                std::cerr << "usage: retcomm launch <title-id> [--rom PATH]\n";
+                std::cerr << "usage: retcomm launch <title-id> [--rom PATH] [--bios PATH] "
+                             "[--save PATH] [--mode default|direct|netplay] [--detach] "
+                             "[--dry-run]\n";
                 return 2;
             }
-            fs::path rom;
+            retcomm::LaunchOptions opts;
             for (size_t i = 2; i < args.size(); ++i) {
                 if (args[i] == "--rom" && i + 1 < args.size()) {
-                    rom = args[++i];
+                    opts.rom_path = args[++i];
+                } else if (args[i] == "--bios" && i + 1 < args.size()) {
+                    opts.bios_path = args[++i];
+                } else if ((args[i] == "--save" || args[i] == "--save-path") &&
+                           i + 1 < args.size()) {
+                    opts.save_path = args[++i];
+                } else if (args[i] == "--mode" && i + 1 < args.size()) {
+                    std::string err;
+                    opts.mode = retcomm::parse_launch_mode(args[++i], &err);
+                    if (!err.empty()) {
+                        std::cerr << err << "\n";
+                        return 2;
+                    }
+                } else if (args[i] == "--detach") {
+                    opts.detach = true;
+                } else if (args[i] == "--dry-run") {
+                    opts.dry_run = true;
                 } else {
                     std::cerr << "unexpected launch arg: " << args[i] << "\n";
                     return 2;
                 }
             }
-            return cmd_launch(paths, catalog, args[1], rom);
+            return cmd_launch(paths, catalog, args[1], opts);
         }
         std::cerr << "unknown command: " << cmd << "\n";
         print_help(argv[0]);

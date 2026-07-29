@@ -1,5 +1,6 @@
 #include "retcomm/romscan.hpp"
 #include "retcomm/hash.hpp"
+#include "retcomm/library_index.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -33,7 +34,13 @@ bool name_excluded(const fs::path& p, const std::vector<std::string>& exclude) {
 struct PlatformNeed {
     std::unordered_set<std::string> extensions; // ".sfc"
     bool need_crc = false;
+    bool need_md5 = false;
     bool need_sha1 = false;
+    bool need_sha256 = false;
+    // Each title's acceptable hash list — used to stop hashing once all are hit.
+    // Titles that list multiple algorithms contribute one group per non-empty list;
+    // matching any algorithm for that title is enough (see title_identity_matched).
+    std::vector<const Title*> identity_titles;
 };
 
 std::unordered_map<std::string, PlatformNeed> needs_by_platform(const Catalog& catalog) {
@@ -47,9 +54,84 @@ std::unordered_map<std::string, PlatformNeed> needs_by_platform(const Catalog& c
             n.extensions.insert(le);
         }
         if (!t.rom_identity.crc32.empty()) n.need_crc = true;
+        if (!t.rom_identity.md5.empty()) n.need_md5 = true;
         if (!t.rom_identity.sha1.empty()) n.need_sha1 = true;
+        if (!t.rom_identity.sha256.empty()) n.need_sha256 = true;
+        if (!t.rom_identity.crc32.empty() || !t.rom_identity.md5.empty() ||
+            !t.rom_identity.sha1.empty() || !t.rom_identity.sha256.empty()) {
+            n.identity_titles.push_back(&t);
+        }
     }
     return out;
+}
+
+// Size gate is per-title. Hash a candidate when any identity title could use it:
+//   - title has empty sizes[] (no gate — typical carts), or
+//   - title lists this exact byte length (disc dumps).
+// Full rescan ignores sizes and hashes every extension match.
+bool size_eligible_for_hash(const PlatformNeed& need, std::uint64_t size, bool full_rescan) {
+    if (full_rescan || need.identity_titles.empty()) return true;
+    for (const Title* t : need.identity_titles) {
+        if (t->rom_identity.sizes.empty()) return true;
+        for (auto sz : t->rom_identity.sizes) {
+            if (sz == size) return true;
+        }
+    }
+    return false;
+}
+
+// SNES copier header: 512 bytes when (size % 1024) == 512. Catalog CRCs are
+// headerless (No-Intro); strip before hashing.
+std::uint64_t snes_hash_skip(const std::string& platform, std::uint64_t size) {
+    if (platform == "snes" && size >= 512 && (size % 1024ull) == 512ull) return 512;
+    return 0;
+}
+
+bool title_identity_matched(const Title& t, const std::string& platform,
+                            const ScanResult& result) {
+    for (const auto& rf : result.files) {
+        if (rf.platform != platform) continue;
+        if (!t.rom_identity.crc32.empty() && !rf.crc32.empty() &&
+            list_has(t.rom_identity.crc32, rf.crc32))
+            return true;
+        if (!t.rom_identity.md5.empty() && !rf.md5.empty() &&
+            list_has(t.rom_identity.md5, rf.md5))
+            return true;
+        if (!t.rom_identity.sha1.empty() && !rf.sha1.empty() &&
+            list_has(t.rom_identity.sha1, rf.sha1))
+            return true;
+        if (!t.rom_identity.sha256.empty() && !rf.sha256.empty() &&
+            list_has(t.rom_identity.sha256, rf.sha256))
+            return true;
+    }
+    return false;
+}
+
+// Early-out when every hash-identified title on this platform has a hit.
+bool all_identity_titles_matched(const PlatformNeed& need, const std::string& platform,
+                                 const ScanResult& result) {
+    if (need.identity_titles.empty()) return false;
+    for (const Title* t : need.identity_titles) {
+        if (!title_identity_matched(*t, platform, result)) return false;
+    }
+    return true;
+}
+
+// During the hash loop: skip files that cannot help any still-unmatched title.
+bool size_eligible_for_unmatched(const PlatformNeed& need, const std::string& platform,
+                                 std::uint64_t size, const ScanResult& result,
+                                 bool full_rescan) {
+    for (const Title* t : need.identity_titles) {
+        if (title_identity_matched(*t, platform, result)) continue;
+        if (full_rescan) return true;
+        // Empty sizes[] = no size gate (typical carts): any candidate may match.
+        // Non-empty sizes[] = only those byte lengths can identify the title.
+        if (t->rom_identity.sizes.empty()) return true;
+        for (auto sz : t->rom_identity.sizes) {
+            if (sz == size) return true;
+        }
+    }
+    return false;
 }
 
 std::string platform_for_folder(const AppConfig& config, const std::string& folder) {
@@ -123,37 +205,125 @@ void walk_platform_root(const fs::path& root, const std::string& platform,
         result.errors.push_back("scan error under " + root.string() + ": " + ec.message());
     }
 
-    const bool do_crc = opts.compute_crc_when_needed && need.need_crc;
-    const bool do_sha1 = opts.compute_sha1_when_needed && need.need_sha1;
+    const bool want_crc = opts.compute_crc_when_needed && need.need_crc;
+    const bool want_md5 = opts.compute_md5_when_needed && need.need_md5;
+    const bool want_sha1 = opts.compute_sha1_when_needed && need.need_sha1;
+    const bool want_sha256 = opts.compute_sha256_when_needed && need.need_sha256;
+    const bool want_any_hash = want_crc || want_md5 || want_sha1 || want_sha256;
 
-    for (size_t i = 0; i < candidates.size(); ++i) {
-        const auto& path = candidates[i];
+    auto fill_meta = [](RomFile& rf, const fs::path& path) {
+        std::error_code ec;
+        rf.size = fs::file_size(path, ec);
+        if (ec) rf.size = 0;
+        rf.mtime_sec = file_mtime_sec(path);
+    };
+
+    // Pre-filter to the files we will actually hash (size gate for disc dumps).
+    std::vector<fs::path> to_hash;
+    to_hash.reserve(candidates.size());
+    for (const auto& path : candidates) {
         RomFile rf;
         rf.path = path;
         rf.platform = platform;
         rf.ext = lower_ext(path);
+        fill_meta(rf, path);
 
-        if (do_crc || do_sha1) {
-            emit(opts, {"hash", platform, path, i + 1, candidates.size()});
-            if (do_crc) {
-                rf.crc32 = file_crc32_hex(path);
-                ++result.hashed_files;
-            }
-            if (do_sha1) {
-                rf.sha1 = file_sha1_hex(path);
-                if (!do_crc) ++result.hashed_files;
-            }
-        } else {
+        if (!want_any_hash) {
             ++result.skipped_hash;
+            result.files.push_back(std::move(rf));
+            continue;
         }
+        if (!size_eligible_for_hash(need, rf.size, opts.full_rescan)) {
+            ++result.skipped_hash;
+            result.files.push_back(std::move(rf));
+            continue;
+        }
+
+        // Incremental: reuse hashes when path+size+mtime still match the index.
+        // Rehash SNES dumps with a copier header — older indexes stored
+        // header-inclusive CRCs that never match No-Intro identities.
+        const bool smc_header = snes_hash_skip(platform, rf.size) != 0;
+        if (!opts.full_rescan && opts.index && !smc_header) {
+            std::error_code cec;
+            const fs::path canon = fs::weakly_canonical(path, cec);
+            const std::string key = (cec ? path : canon).string();
+            if (const LibraryFile* cached = opts.index->find_path(key)) {
+                const bool need_ok =
+                    (!want_crc || !cached->crc32.empty()) &&
+                    (!want_md5 || !cached->md5.empty()) &&
+                    (!want_sha1 || !cached->sha1.empty()) &&
+                    (!want_sha256 || !cached->sha256.empty());
+                if (need_ok && opts.index->is_fresh(*cached, rf.size, rf.mtime_sec)) {
+                    rf.crc32 = cached->crc32;
+                    rf.md5 = cached->md5;
+                    rf.sha1 = cached->sha1;
+                    rf.sha256 = cached->sha256;
+                    rf.from_cache = true;
+                    ++result.cache_hits;
+                    emit(opts, {"cache", platform, path, result.cache_hits, 0});
+                    result.files.push_back(std::move(rf));
+                    continue;
+                }
+            }
+        }
+        to_hash.push_back(path);
+    }
+
+    if (!want_any_hash) return;
+
+    // Smaller dumps first (MotK .bin before .iso) so we can early-out on match.
+    std::sort(to_hash.begin(), to_hash.end(), [](const fs::path& a, const fs::path& b) {
+        std::error_code ea, eb;
+        const auto sa = fs::file_size(a, ea);
+        const auto sb = fs::file_size(b, eb);
+        if (ea || eb) return a.string() < b.string();
+        if (sa != sb) return sa < sb;
+        return a.string() < b.string();
+    });
+
+    for (size_t i = 0; i < to_hash.size(); ++i) {
+        const auto& path = to_hash[i];
+        RomFile rf;
+        rf.path = path;
+        rf.platform = platform;
+        rf.ext = lower_ext(path);
+        fill_meta(rf, path);
+
+        if (!size_eligible_for_unmatched(need, platform, rf.size, result, opts.full_rescan)) {
+            ++result.skipped_hash;
+            result.files.push_back(std::move(rf));
+            continue;
+        }
+
+        emit(opts, {"hash", platform, path, i + 1, to_hash.size()});
+        const std::uint64_t skip = snes_hash_skip(platform, rf.size);
+        if (want_crc) rf.crc32 = file_crc32_hex(path, skip);
+        if (want_md5) rf.md5 = file_md5_hex(path, skip);
+        if (want_sha1) rf.sha1 = file_sha1_hex(path, skip);
+        if (want_sha256) rf.sha256 = file_sha256_hex(path, skip);
+        ++result.hashed_files;
         result.files.push_back(std::move(rf));
+
+        if (all_identity_titles_matched(need, platform, result)) {
+            for (size_t j = i + 1; j < to_hash.size(); ++j) {
+                ++result.skipped_hash;
+                RomFile rest;
+                rest.path = to_hash[j];
+                rest.platform = platform;
+                rest.ext = lower_ext(to_hash[j]);
+                fill_meta(rest, to_hash[j]);
+                result.files.push_back(std::move(rest));
+            }
+            break;
+        }
     }
 }
 
 void match_titles(const Catalog& catalog, ScanResult& result) {
-    std::unordered_set<std::string> matched_title_ids;
     for (const auto& t : catalog.titles) {
         if (!t.has_rom_identity()) continue;
+        TitleMatch m;
+        m.title = &t;
         for (const auto& rf : result.files) {
             if (rf.platform != t.platform) continue;
             bool hit = false;
@@ -162,24 +332,33 @@ void match_titles(const Catalog& catalog, ScanResult& result) {
                 list_has(t.rom_identity.crc32, rf.crc32)) {
                 hit = true;
                 by = "crc32";
-            } else if (!t.rom_identity.sha1.empty()) {
-                std::string sha = rf.sha1;
-                if (sha.empty()) sha = file_sha1_hex(rf.path);
-                if (!sha.empty() && list_has(t.rom_identity.sha1, sha)) {
-                    hit = true;
-                    by = "sha1";
-                }
+            } else if (!t.rom_identity.md5.empty() && !rf.md5.empty() &&
+                       list_has(t.rom_identity.md5, rf.md5)) {
+                hit = true;
+                by = "md5";
+            } else if (!t.rom_identity.sha1.empty() && !rf.sha1.empty() &&
+                       list_has(t.rom_identity.sha1, rf.sha1)) {
+                hit = true;
+                by = "sha1";
+            } else if (!t.rom_identity.sha256.empty() && !rf.sha256.empty() &&
+                       list_has(t.rom_identity.sha256, rf.sha256)) {
+                hit = true;
+                by = "sha256";
             }
             if (!hit) continue;
-            if (matched_title_ids.count(t.id)) continue;
-            matched_title_ids.insert(t.id);
-            TitleMatch m;
-            m.title = &t;
-            m.rom_path = rf.path;
-            m.matched_by = by;
-            result.matches.push_back(m);
-            break;
+            m.all_paths.push_back(rf.path);
+            if (m.matched_by.empty()) m.matched_by = by;
         }
+        if (m.all_paths.empty()) continue;
+        std::sort(m.all_paths.begin(), m.all_paths.end(),
+                  [](const fs::path& a, const fs::path& b) {
+                      const int ra = rom_path_rank(lower_ext(a));
+                      const int rb = rom_path_rank(lower_ext(b));
+                      if (ra != rb) return ra < rb;
+                      return a.string() < b.string();
+                  });
+        m.rom_path = m.all_paths.front();
+        result.matches.push_back(std::move(m));
     }
     std::sort(result.matches.begin(), result.matches.end(),
               [](const TitleMatch& a, const TitleMatch& b) {
@@ -245,6 +424,7 @@ void merge_results(ScanResult& into, ScanResult&& from) {
                               std::make_move_iterator(from.scanned_roots.end()));
     into.hashed_files += from.hashed_files;
     into.skipped_hash += from.skipped_hash;
+    into.cache_hits += from.cache_hits;
 }
 
 } // namespace

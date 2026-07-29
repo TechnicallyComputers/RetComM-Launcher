@@ -1,0 +1,59 @@
+{
+  "id": "star-fox-snes",
+  "name": "Star Fox",
+  "kind": "recomp",
+  "platform": "snes",
+  "description": "Star Fox (USA v1.2) recompiled with snesrecomp.",
+  "homepage": "https://github.com/mstan/StarFoxSNESRecomp",
+  "rom_identity": {
+    "crc32": [
+      "8fc4e6d0"
+    ],
+    "md5": [
+      "def66db12f5e644c0cf00c42cfa7ae7b"
+    ],
+    "sha1": [
+      "cf08148cd8f26d51f8c67c956179dfc594e7a4f1"
+    ],
+    "sha256": [
+      "82e39dfbb3e4fe5c28044e80878392070c618b298dd5a267e5ea53c8f72cc548"
+    ],
+    "disc_serials": [],
+    "sizes": [],
+    "filenames": [
+      "Star Fox (USA) (Rev 2).sfc"
+    ]
+  },
+  "rom_extensions": [
+    ".sfc",
+    ".smc",
+    ".fig",
+    ".swc"
+  ],
+  "release": {
+    "github": "mstan/StarFoxSNESRecomp",
+    "asset_glob": {
+      "linux": "*linux*",
+      "windows": "*windows*",
+      "macos": "*macos*"
+    }
+  },
+  "install_dir_name": "StarFoxSNESRecomp",
+  "launch": {
+    "linux": "StarFoxSNESRecomp",
+    "windows": "StarFoxSNESRecomp.exe",
+    "macos": "StarFoxSNESRecomp"
+  },
+  "romm": {
+    "platforms": [
+      "snes"
+    ]
+  },
+  "saves": {
+    "sram_glob": [
+      "*.srm",
+      "saves/*.srm"
+    ]
+  },
+  "notes": "CRC32 8FC4E6D0 for unheadered Star Fox (USA) v1.2 (1 MiB)."
+}

@@ -1,0 +1,64 @@
+{
+  "id": "sonic-3-and-knuckles-genesis",
+  "name": "Sonic 3 & Knuckles",
+  "kind": "recomp",
+  "platform": "genesis",
+  "description": "Sonic 3 & Knuckles recompiled with segagenesisrecomp.",
+  "homepage": "https://github.com/mstan/Sonic3AndKnucklesRecomp",
+  "rom_identity": {
+    "crc32": [
+      "63522553"
+    ],
+    "md5": [
+      "c5b1c655c19f462ade0ac4e17a844d10"
+    ],
+    "sha1": [
+      "cfbf98c36c776677290a872547ac47c53d2761d6"
+    ],
+    "sha256": [
+      "fba0677fde9f76df93f3e98d6310d8af68b9847bde16e253d73cd4dd8134ed23"
+    ],
+    "disc_serials": [],
+    "sizes": [
+      4194304
+    ],
+    "filenames": [
+      "Sonic & Knuckles + Sonic The Hedgehog 3 (USA).md",
+      "Sonic and Knuckles & Sonic 3.bin"
+    ]
+  },
+  "rom_extensions": [
+    ".bin",
+    ".md",
+    ".gen",
+    ".smd"
+  ],
+  "release": {
+    "github": "mstan/Sonic3AndKnucklesRecomp",
+    "asset_glob": {
+      "linux": "*linux*",
+      "windows": "*windows*",
+      "macos": "*macos*"
+    }
+  },
+  "install_dir_name": "Sonic3AndKnucklesRecomp",
+  "launch": {
+    "linux": "Sonic3AndKnucklesRecomp",
+    "windows": "Sonic3AndKnucklesRecomp.exe",
+    "macos": "Sonic3AndKnucklesRecomp"
+  },
+  "romm": {
+    "platforms": [
+      "genesis",
+      "smd",
+      "megadrive"
+    ]
+  },
+  "saves": {
+    "sram_glob": [
+      "*.srm",
+      "saves/*.srm"
+    ]
+  },
+  "notes": "Pinned to locked-on Sonic 3 & Knuckles (4 MiB). Separate Sonic 3 (2 MiB, CRC 9BC192CE) is not sufficient."
+}

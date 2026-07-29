@@ -6,9 +6,35 @@
   "description": "PlayStation recomp of Bomberman Party Edition.",
   "homepage": "https://github.com/mstan/BombermanPartyEditionRecomp",
   "rom_identity": {
-    "disc_serials": []
+    "crc32": [
+      "98275a08"
+    ],
+    "md5": [
+      "e0ceba6e448677f3d938b1dd176be3af"
+    ],
+    "sha1": [
+      "53a509dbe859f773856f26d966f5edacbc701b4e"
+    ],
+    "sha256": [
+      "8bd229969aadcd9fe085ef4026209a0f230b82442a599c58d1da5da68260d3d9"
+    ],
+    "disc_serials": [
+      "SLUS-01189"
+    ],
+    "sizes": [
+      660770880
+    ],
+    "filenames": [
+      "Bomberman - Party Edition (USA).cue"
+    ]
   },
-  "rom_extensions": [".cue", ".chd", ".iso", ".bin", ".exe"],
+  "rom_extensions": [
+    ".cue",
+    ".chd",
+    ".iso",
+    ".bin",
+    ".exe"
+  ],
   "release": {
     "github": "mstan/BombermanPartyEditionRecomp",
     "asset_glob": {
@@ -24,9 +50,17 @@
     "macos": "Bomberman_Party_Edition_Recompiled"
   },
   "romm": {
-    "platforms": ["psx", "ps1"]
+    "platforms": [
+      "psx",
+      "ps1"
+    ]
   },
   "saves": {
-    "memcard_glob": ["*.mcd", "*.mcr", "saves/*.mcd"]
-  }
+    "memcard_glob": [
+      "*.mcd",
+      "*.mcr",
+      "saves/*.mcd"
+    ]
+  },
+  "notes": "Redump-style USA .bin SHA-1/size; prefer bin/cue MODE2/2352."
 }

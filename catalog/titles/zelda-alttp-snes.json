@@ -1,0 +1,59 @@
+{
+  "id": "zelda-alttp-snes",
+  "name": "The Legend of Zelda: A Link to the Past",
+  "kind": "recomp",
+  "platform": "snes",
+  "description": "A Link to the Past (USA) recompiled with snesrecomp.",
+  "homepage": "https://github.com/mstan/ZeldaAlttPSNESRecomp",
+  "rom_identity": {
+    "crc32": [
+      "777aac2f"
+    ],
+    "md5": [
+      "608c22b8ff930c62dc2de54bcd6eba72"
+    ],
+    "sha1": [
+      "6d4f10a8b10e10dbe624cb23cf03b88bb8252973"
+    ],
+    "sha256": [
+      "66871d66be19ad2c34c927d6b14cd8eb6fc3181965b6e517cb361f7316009cfb"
+    ],
+    "disc_serials": [],
+    "sizes": [],
+    "filenames": [
+      "Legend of Zelda, The - A Link to the Past (USA).sfc"
+    ]
+  },
+  "rom_extensions": [
+    ".sfc",
+    ".smc",
+    ".fig",
+    ".swc"
+  ],
+  "release": {
+    "github": "mstan/ZeldaAlttPSNESRecomp",
+    "asset_glob": {
+      "linux": "*linux*",
+      "windows": "*windows*",
+      "macos": "*macos*"
+    }
+  },
+  "install_dir_name": "ZeldaAlttPSNESRecomp",
+  "launch": {
+    "linux": "ZeldaAlttPSNESRecomp",
+    "windows": "ZeldaAlttPSNESRecomp.exe",
+    "macos": "ZeldaAlttPSNESRecomp"
+  },
+  "romm": {
+    "platforms": [
+      "snes"
+    ]
+  },
+  "saves": {
+    "sram_glob": [
+      "*.srm",
+      "saves/*.srm"
+    ]
+  },
+  "notes": "CRC32 0x777AAC2F No-Intro USA 1 MiB LoROM; SMC header stripped before hash."
+}

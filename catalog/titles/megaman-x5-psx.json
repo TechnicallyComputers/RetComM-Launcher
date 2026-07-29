@@ -1,0 +1,67 @@
+{
+  "id": "megaman-x5-psx",
+  "name": "Mega Man X5",
+  "kind": "recomp",
+  "platform": "psx",
+  "description": "Mega Man X5 (SLUS-01334) static recompilation on psxrecomp.",
+  "homepage": "https://github.com/mstan/MegaManX5Recomp",
+  "rom_identity": {
+    "crc32": [
+      "0d0ce609"
+    ],
+    "md5": [
+      "98c0d278dc4a795a0a7562d950d37cc9"
+    ],
+    "sha1": [
+      "10709231f857636b5ccd3cd9acebc91458dcb5fd"
+    ],
+    "sha256": [
+      "be731bc4b9d3211b9267a34b8a68c769199a15479b14004ff25b67cdfebe8af4"
+    ],
+    "disc_serials": [
+      "SLUS-01334"
+    ],
+    "sizes": [
+      582954960
+    ],
+    "filenames": [
+      "Mega Man X5 (USA).cue"
+    ]
+  },
+  "rom_extensions": [
+    ".cue",
+    ".chd",
+    ".iso",
+    ".bin"
+  ],
+  "release": {
+    "github": "mstan/MegaManX5Recomp",
+    "asset_glob": {
+      "linux": "*linux*",
+      "windows": "*windows*",
+      "macos": "*macos*"
+    }
+  },
+  "install_dir_name": "MegaManX5Recomp",
+  "launch": {
+    "linux": "MegaManX5Recomp",
+    "windows": "MegaManX5Recomp.exe",
+    "macos": "MegaManX5Recomp"
+  },
+  "romm": {
+    "platforms": [
+      "ps",
+      "psx",
+      "ps1"
+    ]
+  },
+  "saves": {
+    "memcard_glob": [
+      "saves/*.mcd",
+      "saves/*.mcr",
+      "*.mcd",
+      "*.mcr"
+    ]
+  },
+  "notes": "Redump #7437 USA .bin from DISC.md."
+}

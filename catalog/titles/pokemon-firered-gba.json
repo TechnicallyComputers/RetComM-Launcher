@@ -1,0 +1,56 @@
+{
+  "id": "pokemon-firered-gba",
+  "name": "Pok\u00e9mon FireRed",
+  "kind": "recomp",
+  "platform": "gba",
+  "description": "Pok\u00e9mon FireRed recompiled with gbarecomp.",
+  "homepage": "https://github.com/mstan/FireRedLeafGreenRecomp",
+  "rom_identity": {
+    "crc32": [
+      "dd88761c"
+    ],
+    "md5": [
+      "e26ee0d44e809351c8ce2d73c7400cdd"
+    ],
+    "sha1": [
+      "41cb23d8dccc8ebd7c649cd8fbb58eeace6e2fdc"
+    ],
+    "sha256": [
+      "3d0c79f1627022e18765766f6cb5ea067f6b5bf7dca115552189ad65a5c3a8ac"
+    ],
+    "disc_serials": [],
+    "sizes": [],
+    "filenames": [
+      "Pokemon - FireRed Version (USA) (Rev 0).gba"
+    ]
+  },
+  "rom_extensions": [
+    ".gba"
+  ],
+  "release": {
+    "github": "mstan/FireRedLeafGreenRecomp",
+    "asset_glob": {
+      "linux": "*linux*",
+      "windows": "*windows*",
+      "macos": "*macos*"
+    }
+  },
+  "install_dir_name": "FireRedLeafGreenRecomp",
+  "launch": {
+    "linux": "FireRedRecomp",
+    "windows": "FireRedRecomp.exe",
+    "macos": "FireRedRecomp"
+  },
+  "romm": {
+    "platforms": [
+      "gba"
+    ]
+  },
+  "saves": {
+    "sram_glob": [
+      "*.sav",
+      "saves/*"
+    ]
+  },
+  "notes": "USA v1.0 rev0. Sibling LeafGreen shares the same GitHub repo."
+}

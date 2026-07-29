@@ -7,12 +7,14 @@
 
 namespace retcomm {
 
-// Thin RomM companion-client sketch. Network I/O is stubbed until wired to
-// libcurl / cpp-httplib; shapes match RomM's REST surface (platforms, roms, assets).
+// Companion-client types for a RomM instance (https://docs.romm.app).
 
 struct RommConfig {
     std::string base_url;   // https://romm.example.com
     std::string api_token;  // Client API token or OAuth bearer
+    // When true, remote boxart is pulled from the RomM instance.
+    // When false (default), use Libretro Named_Boxarts thumbnails.
+    bool sync_boxart = false;
     bool enabled() const { return !base_url.empty(); }
 };
 
@@ -35,7 +37,6 @@ struct RommClient {
 
     const RommConfig& config() const { return cfg_; }
 
-    // Stubs: return false + set last_error_ until HTTP is implemented.
     bool ping();
     bool list_platforms(std::vector<RommPlatform>& out);
     bool list_roms(int platform_id, std::vector<RommRom>& out);

@@ -1,16 +1,43 @@
 {
   "id": "masters-of-teras-kasi-psx",
-  "name": "Masters of Teras Kasi",
+  "name": "Star Wars: Masters of Teras Kasi",
   "kind": "recomp",
   "platform": "psx",
-  "description": "PlayStation recomp of Masters of Teras Kasi.",
-  "homepage": "https://github.com/mstan/MastersOfTerasKasiRecomp",
+  "description": "USA (SLUS-00562) static recompilation on psxrecomp \u2014 Star Wars: Masters of Teras Kasi (Oct 31, 1997).",
+  "homepage": "https://github.com/TechnicallyComputers/MastersOfTerasKasiRecomp",
   "rom_identity": {
-    "disc_serials": []
+    "crc32": [
+      "c4191909"
+    ],
+    "md5": [
+      "d3b3d3aaa70b6f98983bafeb8daf24a1"
+    ],
+    "sha1": [
+      "deabb6b39e8857cdbbaacbd72cb0e26646183a63",
+      "2ada1f21012660b5eb2eb1dc752cdfcfb253ff8a"
+    ],
+    "sha256": [
+      "eee0f0401d1221e0beb29994139a50bb8cdf2b4c4488475777f159903b636946"
+    ],
+    "disc_serials": [
+      "SLUS-00562"
+    ],
+    "sizes": [
+      480620736,
+      461772864
+    ],
+    "filenames": [
+      "Star Wars - Masters of Teras Kasi (USA).cue"
+    ]
   },
-  "rom_extensions": [".cue", ".chd", ".iso", ".bin", ".exe"],
+  "rom_extensions": [
+    ".cue",
+    ".chd",
+    ".iso",
+    ".bin"
+  ],
   "release": {
-    "github": "mstan/MastersOfTerasKasiRecomp",
+    "github": "TechnicallyComputers/MastersOfTerasKasiRecomp",
     "asset_glob": {
       "linux": "*linux*",
       "windows": "*windows*",
@@ -24,10 +51,19 @@
     "macos": "Masters_of_Teras_Kasi_Recompiled"
   },
   "romm": {
-    "platforms": ["psx", "ps1"]
+    "platforms": [
+      "ps",
+      "psx",
+      "ps1"
+    ]
   },
   "saves": {
-    "memcard_glob": ["*.mcd", "*.mcr", "saves/*.mcd"]
+    "memcard_glob": [
+      "saves/*.mcd",
+      "saves/*.mcr",
+      "*.mcd",
+      "*.mcr"
+    ]
   },
-  "notes": "Disc identity uses serial/verdict via the game host; add disc_serials when locked."
+  "notes": "Disc serial SLUS-00562 / boot EXE SLUS_005.62. SHA-1s: source 2448-byte ISO (480,620,736) and working MODE2/2352 .bin (461,772,864) from DISC.md. Runtime expects prepared motk/ cue+bin (tools/prepare_disc.py) plus BIOS; packages never ship disc/BIOS. VERSION pin 0.1.0."
 }

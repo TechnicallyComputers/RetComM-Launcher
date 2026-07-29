@@ -1,13 +1,18 @@
 {
   "library_root": "/mnt/crucial4tb/Emulation/roms",
+  "bios_root": "/mnt/crucial4tb/Emulation/bios",
   "platform_folders": {
     "snes": ["snes"],
     "n64": ["n64"],
-    "psx": ["ps", "ps1"]
+    "psx": ["ps", "ps1", "psx"],
+    "gba": ["gba"],
+    "nds": ["nds"]
   },
   "exclude_dirs": ["torrents", "emulators"],
+  "prefer_local_boxart": false,
   "romm": {
     "base_url": "https://your-romm.example",
-    "api_token": ""
+    "api_token": "",
+    "sync_boxart": false
   }
 }

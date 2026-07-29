@@ -1,0 +1,56 @@
+{
+  "id": "megaman-zero-gba",
+  "name": "Mega Man Zero",
+  "kind": "recomp",
+  "platform": "gba",
+  "description": "Mega Man Zero recompiled with gbarecomp.",
+  "homepage": "https://github.com/mstan/MegaManZeroRecomp",
+  "rom_identity": {
+    "crc32": [
+      "9707d2a1"
+    ],
+    "md5": [
+      "b24a17d080a01a404cbf018ba42b9803"
+    ],
+    "sha1": [
+      "193b14120119162518a73c70876f0b8bffdbd96e"
+    ],
+    "sha256": [
+      "cf505422d68295fba36136a49a3c9dedb104ab16aa542edaeecbb89efdd57807"
+    ],
+    "disc_serials": [],
+    "sizes": [],
+    "filenames": [
+      "Mega Man Zero (USA, Europe).gba"
+    ]
+  },
+  "rom_extensions": [
+    ".gba"
+  ],
+  "release": {
+    "github": "mstan/MegaManZeroRecomp",
+    "asset_glob": {
+      "linux": "*linux*",
+      "windows": "*windows*",
+      "macos": "*macos*"
+    }
+  },
+  "install_dir_name": "MegaManZeroRecomp",
+  "launch": {
+    "linux": "MegaManZeroRecomp",
+    "windows": "MegaManZeroRecomp.exe",
+    "macos": "MegaManZeroRecomp"
+  },
+  "romm": {
+    "platforms": [
+      "gba"
+    ]
+  },
+  "saves": {
+    "sram_glob": [
+      "*.sav",
+      "saves/*"
+    ]
+  },
+  "notes": "USA revision 0."
+}
