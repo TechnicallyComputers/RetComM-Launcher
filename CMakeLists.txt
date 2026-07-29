@@ -167,3 +167,11 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/retcomm.png")
     install(FILES assets/retcomm.png DESTINATION share/icons/hicolor/512x512/apps
             RENAME retcomm.png)
 endif()
+
+# Windows: ship vcpkg/shared runtime DLLs next to the installed exes.
+if(WIN32)
+    install(FILES $<TARGET_RUNTIME_DLLS:retcomm> DESTINATION bin COMPONENT Runtime)
+    if(TARGET retcomm-hub)
+        install(FILES $<TARGET_RUNTIME_DLLS:retcomm-hub> DESTINATION bin COMPONENT Runtime)
+    endif()
+endif()
