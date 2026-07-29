@@ -59,6 +59,7 @@ struct TitleRow {
     std::string runtime; // "native" | "wine"
     std::string author;        // GitHub owner from release.github
     std::string github_url;    // source repo URL
+    std::string author_notes;  // Optional message from the recomp/decomp author
     std::string boxart_path;   // local cover image when found
     bool can_wine_install = false;
     bool has_rom_identity = false;

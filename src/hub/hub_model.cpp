@@ -114,6 +114,7 @@ void HubModel::refresh_rows(bool check_updates) {
 
         row.author = t.github_owner();
         row.github_url = t.github_source_url();
+        row.author_notes = t.author_notes;
         {
             const fs::path art = resolve_boxart_path(cfg, t, rom, row.suggested_rom, paths);
             if (!art.empty()) row.boxart_path = art.string();

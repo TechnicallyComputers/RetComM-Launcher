@@ -61,6 +61,7 @@ Title parse_title(const json& j) {
     t.description = j.value("description", "");
     t.homepage = j.value("homepage", "");
     t.notes = j.value("notes", "");
+    t.author_notes = j.value("author_notes", "");
     t.install_dir_name = j.value("install_dir_name", t.id);
     t.rom_extensions = string_array(j, "rom_extensions");
 

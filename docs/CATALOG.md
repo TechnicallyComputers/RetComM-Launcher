@@ -59,6 +59,8 @@ Title manifests may still set `bios_identity` to override the default, or
 | `platform` | string | `snes`, `psx`, `n64`, `gba`, … (RomM + folder map) |
 | `description` | string | Optional short blurb |
 | `homepage` | string | Optional URL (hub “GitHub Source”; defaults to `https://github.com/<release.github>`) |
+| `author_notes` | string | Optional message from the recomp/decomp author to users; shown in the hub as **Author's Notes** (any length) |
+| `notes` | string | Optional catalog/maintainer footnotes (identity sources, pins); not shown in the hub |
 | `release.github` owner | — | Hub shows as Recomp/Decomp Author (owner segment of `owner/repo`) |
 | `rom_identity` | object | How we know the user owns the game (always include every digest field) |
 | `rom_identity.crc32` | string[] | Hex, e.g. `"f2ab92d4"` (empty `[]` if unused) |

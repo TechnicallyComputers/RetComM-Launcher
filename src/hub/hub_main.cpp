@@ -391,6 +391,13 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
     }
 
     ImGui::EndDisabled();
+
+    if (!row.author_notes.empty()) {
+        ImGui::Dummy(ImVec2(0, 10));
+        ImGui::TextColored(th.text_muted, "Author's Notes");
+        ImGui::TextWrapped("%s", row.author_notes.c_str());
+    }
+
     ImGui::Dummy(ImVec2(0, 10));
     ImGui::TextColored(th.text_muted, "Paths");
     if (!row.install_root.empty()) ImGui::TextWrapped("install: %s", row.install_root.c_str());

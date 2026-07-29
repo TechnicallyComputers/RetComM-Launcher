@@ -61,7 +61,8 @@ struct Title {
     std::string platform;   // snes | psx | n64 | ...
     std::string description;
     std::string homepage;
-    std::string notes;
+    std::string notes;         // Catalog/maintainer footnotes (not shown in hub)
+    std::string author_notes;  // Author message to users (hub “Author's Notes”)
     RomIdentity rom_identity;
     BiosIdentity bios_identity;
     std::vector<std::string> rom_extensions;
