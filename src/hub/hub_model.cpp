@@ -97,6 +97,11 @@ void HubModel::refresh_rows(bool check_updates) {
 
         const auto plan = inspect_install(paths, t);
         row.installed = plan.installed;
+        row.install_dir_present = plan.install_dir_present;
+        row.expected_binary = plan.expected_binary;
+        row.install_issue.clear();
+        if (plan.install_dir_present && !plan.installed)
+            row.install_issue = plan.message;
         row.installed_tag = plan.installed_tag;
         row.install_root = plan.install_root.string();
         row.binary_path = plan.binary_path.string();

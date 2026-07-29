@@ -1,5 +1,6 @@
 #include "retcomm/launch.hpp"
 #include "retcomm/install.hpp"
+#include "retcomm/library_index.hpp"
 #include "retcomm/romm_saves.hpp"
 
 #include <algorithm>
@@ -32,28 +33,33 @@ bool is_disc_platform(const std::string& platform) {
     return platform == "psx" || platform == "ps2" || platform == "saturn";
 }
 
-// Wine apps see the Linux root as Z: — convert host paths so CreateFile/fopen
-// in the guest can open library ROMs / BIOS dumps.
-// Use forward slashes (Z:/home/...) not backslashes: several recomp launchers
-// interpret `\a` / `\r` / `\n` in paths as C escapes, which corrupts
-// `/home/alex` and `/.../retcomm/...` into garbage and then falls back to the
-// .exe (Wrong ROM).
+// Normalize to an absolute host path (native), or Wine Z:/… guest path.
+// Use forward slashes for Wine: several recomp launchers interpret `\a` / `\r`
+// / `\n` in paths as C escapes, which corrupts `/home/...` into garbage.
 std::string path_for_guest(const fs::path& host, bool use_wine) {
-    if (host.empty() || !use_wine) return host.string();
-#if defined(_WIN32)
-    return host.string();
-#else
+    if (host.empty()) return {};
     std::error_code ec;
-    fs::path abs = fs::absolute(host, ec);
-    if (ec) abs = host;
-    std::string s = abs.generic_string();
-    if (s.empty() || s[0] != '/') return host.string();
-    return "Z:" + s;
+    fs::path abs = fs::weakly_canonical(host, ec);
+    if (ec || abs.empty()) {
+        ec.clear();
+        abs = fs::absolute(host, ec);
+        if (ec) abs = host;
+    }
+#if defined(_WIN32)
+    (void)use_wine;
+    return abs.string();
+#else
+    const std::string s = abs.generic_string();
+    if (use_wine) {
+        if (!s.empty() && s[0] == '/') return "Z:" + s;
+        return host.string();
+    }
+    return s.empty() ? host.string() : s;
 #endif
 }
 
 // Disc titles usually want a .cue; if the library preferred a raw dump, use a
-// sibling .cue with the same stem when present.
+// companion .cue (same stem or FILE reference) when present.
 fs::path prefer_media_path(const Title& title, fs::path media) {
     if (media.empty()) return media;
     std::error_code ec;
@@ -62,8 +68,8 @@ fs::path prefer_media_path(const Title& title, fs::path media) {
     if (is_disc_platform(title.platform)) {
         const std::string ext = lower_ext(media);
         if (ext == ".bin" || ext == ".iso" || ext == ".img") {
-            const fs::path cue = media.parent_path() / (media.stem().string() + ".cue");
-            if (fs::is_regular_file(cue, ec)) return cue;
+            const fs::path cue = companion_cue_for_disc_dump(media);
+            if (!cue.empty() && fs::is_regular_file(cue, ec)) return cue;
         }
     }
     return media;
@@ -113,14 +119,29 @@ void append_save_path_argv(LaunchPlan& plan, const Title& title) {
 
 bool replace_symlink(const fs::path& link, const fs::path& target, std::string* error) {
     std::error_code ec;
-    if (fs::exists(link, ec) || fs::is_symlink(link, ec)) fs::remove(link, ec);
-    ec.clear();
     fs::path abs = fs::weakly_canonical(target, ec);
     if (ec || abs.empty()) {
         ec.clear();
         abs = fs::absolute(target, ec);
         if (ec) abs = target;
     }
+
+    // Already correct — common when a prior launch staged the same ROM.
+    if (fs::is_symlink(link, ec)) {
+        const fs::path cur = fs::weakly_canonical(link, ec);
+        if (!ec && !cur.empty() && cur == abs) return true;
+    }
+
+    if (fs::exists(link, ec) || fs::is_symlink(link, ec)) {
+        fs::remove(link, ec);
+        if (ec) {
+            if (error)
+                *error = "cannot replace " + link.string() + ": " + ec.message() +
+                         " (chown the install release dir to your user?)";
+            return false;
+        }
+    }
+    ec.clear();
     fs::create_symlink(abs, link, ec);
     if (ec) {
         if (error) *error = "symlink " + link.string() + " → " + abs.string() + ": " + ec.message();
@@ -147,11 +168,12 @@ bool point_link_at(const fs::path& link, const fs::path& target, std::string* er
     return replace_symlink(link, target, error);
 }
 
-// gbarecomp's launcher Save row ignores --save-path and shows <rom>.sav derived
-// from rom.cfg. Stage install-local library.<ext> + library.sav (→ managed save)
-// so the Wine launcher sees the selected file without writing into the ROM library.
-bool stage_gba_launcher_sidecars(LaunchPlan& plan, const Title& title, std::string* note) {
-    if (title.platform != "gba" || plan.media_path.empty() || plan.cwd.empty()) return false;
+// Stage install-local library.<ext> → library ROM so rom.cfg can use a path
+// next to the binary (native absolute or Wine Z:/…/library.ext). GBA also
+// stages library.sav for the launcher Save row (ignores --save-path).
+bool stage_cart_launcher_sidecars(LaunchPlan& plan, const Title& title, std::string* note) {
+    if (is_disc_platform(title.platform) || plan.media_path.empty() || plan.cwd.empty())
+        return false;
 
     std::error_code ec;
     const std::string ext = plan.media_path.extension().string();
@@ -165,11 +187,11 @@ bool stage_gba_launcher_sidecars(LaunchPlan& plan, const Title& title, std::stri
     }
     plan.staged_rom_link = rom_link;
 
-    if (!plan.save_path.empty() &&
+    if (title.platform == "gba" && !plan.save_path.empty() &&
         (fs::is_regular_file(plan.save_path, ec) || fs::is_symlink(plan.save_path, ec))) {
         const fs::path sav_link = plan.cwd / "library.sav";
         if (!point_link_at(sav_link, plan.save_path, &err)) {
-            if (note) *note = "library.gba ok; library.sav failed: " + err;
+            if (note) *note = "library" + ext + " ok; library.sav failed: " + err;
             return true; // rom link still useful
         }
         if (note)
@@ -558,11 +580,11 @@ LaunchResult launch_title(const Paths& paths, const Title& title, const LaunchOp
         }
     }
 
-    // GBA: install-local library.gba + library.sav so the recomp launcher Save
-    // row (which derives <rom>.sav and ignores --save-path) sees the managed file.
+    // Cart: install-local library.<ext> so rom.cfg is next to the binary
+    // (native + Wine). GBA also gets library.sav for the launcher Save row.
     {
         std::string note;
-        if (stage_gba_launcher_sidecars(result.plan, title, &note) && !note.empty())
+        if (stage_cart_launcher_sidecars(result.plan, title, &note) && !note.empty())
             result.plan.message += "  stage:  " + note + "\n";
         else if (!note.empty())
             result.plan.message += "  warning: " + note + "\n";

@@ -13,9 +13,9 @@ cache and refreshes it from there.
 Refresh with `retcomm catalog update` / `--force`, or **Refresh catalog** in the
 hub. On first run (empty cache), the launcher always fetches the catalog (needs
 network). When `catalog.auto_update` is true (default), startup queries the
-catalog repo’s **latest GitHub release** and compares its tag / date to
-`catalog-state.json`. The zip is downloaded only when that identity changed —
-otherwise the local cache is kept.
+catalog repo’s **latest GitHub release** and compares its tag and date/time stamp
+to `catalog-state.json`. The zip is downloaded only when the remote release is
+newer (or the local identity is unknown) — otherwise the local cache is kept.
 
 Optional `config.json`:
 
@@ -35,8 +35,8 @@ Optional `config.json`:
 {
   "schema_version": 1,
   "name": "RetComM supported titles",
-  "catalog_date": "2026-07-29",
-  "release_tag": "v2026.07.29.12",
+  "catalog_date": "2026-07-29T18:41:00Z",
+  "release_tag": "v2026.07.29.184100.12",
   "platform_defaults": {
     "gba": { "bios_identity": { "required": true, "crc32": ["81977335"], "…": "…" } },
     "psx": { "bios_identity": { "required": true, "crc32": ["37157331"], "…": "…" } }
@@ -47,8 +47,8 @@ Optional `config.json`:
 
 | Field | Type | Notes |
 |---|---|---|
-| `catalog_date` | string | `YYYY-MM-DD` from publish CI |
-| `release_tag` | string | GitHub release tag for this zip |
+| `catalog_date` | string | UTC `YYYY-MM-DDTHH:MM:SSZ` (or legacy `YYYY-MM-DD`) from publish CI |
+| `release_tag` | string | GitHub release tag (date + optional `HHMMSS` + suffix) |
 | `platform_defaults` | object | Optional per-platform defaults keyed by catalog `platform` |
 | `platform_defaults.<platform>.bios_identity` | object | Applied to titles on that platform that omit `bios_identity` |
 
@@ -85,7 +85,7 @@ Title manifests may still set `bios_identity` to override the default, or
 | `release` | object | Where to fetch builds |
 | `release.github` | string | `owner/repo` |
 | `release.allow_prerelease` | bool | Allow GitHub pre-releases when no stable latest exists |
-| `release.asset_glob` | object | Per-OS glob: `linux`, `windows`, `macos` |
+| `release.asset_glob` | object | Per-OS glob: `linux`, `windows`, `macos` (launcher also accepts synonyms, e.g. `*windows*` ↔ `win64` / `win-x64`) |
 | `install_dir_name` | string | Folder under `apps/` |
 | `launch` | object | Relative binary names: `linux`, `windows`, `macos` |
 | `romm` | object | Optional match hints |

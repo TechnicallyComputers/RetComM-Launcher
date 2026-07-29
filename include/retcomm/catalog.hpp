@@ -92,8 +92,8 @@ struct Catalog {
     int schema_version = 1;
     std::string name;
     // Optional publish stamp from index.json (set by catalog release CI).
-    std::string catalog_date; // YYYY-MM-DD
-    std::string release_tag;  // e.g. v2026.07.29.12
+    std::string catalog_date; // YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ
+    std::string release_tag;  // e.g. v2026.07.29.184100.12
     std::vector<Title> titles;
     fs::path root;
 

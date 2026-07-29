@@ -275,17 +275,86 @@ bool top_level_only_archives(const fs::path& root) {
     return any;
 }
 
+bool filename_eq_ci(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i])))
+            return false;
+    }
+    return true;
+}
+
 fs::path find_named_file(const fs::path& root, const std::string& filename) {
     if (filename.empty()) return {};
     std::error_code ec;
     const fs::path direct = root / filename;
     if (fs::is_regular_file(direct, ec)) return direct;
+    // Case-insensitive direct hit (common when catalog launch names differ in case).
+    {
+        const auto parent = root;
+        if (fs::is_directory(parent, ec)) {
+            for (auto it = fs::directory_iterator(parent, ec);
+                 !ec && it != fs::directory_iterator(); it.increment(ec)) {
+                if (!it->is_regular_file(ec)) continue;
+                if (filename_eq_ci(it->path().filename().string(), filename)) return it->path();
+            }
+        }
+    }
     for (auto it = fs::recursive_directory_iterator(root, ec);
          !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
         if (!it->is_regular_file(ec)) continue;
-        if (it->path().filename() == filename) return it->path();
+        if (filename_eq_ci(it->path().filename().string(), filename)) return it->path();
     }
     return {};
+}
+
+// Likely launch candidates for error messages / catalog fixes (Windows .exe, ELF-ish names).
+std::vector<std::string> list_launch_candidates(const fs::path& root, size_t limit = 12) {
+    std::vector<std::string> out;
+    std::error_code ec;
+    if (!fs::exists(root, ec)) return out;
+    for (auto it = fs::recursive_directory_iterator(
+             root, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator() && out.size() < limit;
+         it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        const std::string name = it->path().filename().string();
+        if (name.empty() || name[0] == '.') continue;
+        const std::string lower = [&] {
+            std::string s = name;
+            for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return s;
+        }();
+        const bool exe = lower.size() >= 4 && lower.compare(lower.size() - 4, 4, ".exe") == 0;
+        const bool no_ext = name.find('.') == std::string::npos;
+        if (!exe && !no_ext) continue;
+        // Skip obvious non-launch junk.
+        if (lower == "uninstall.exe" || lower.find("crashpad") != std::string::npos) continue;
+        out.push_back(name);
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    if (out.size() > limit) out.resize(limit);
+    return out;
+}
+
+bool promote_staging_to_release(const fs::path& staging, const fs::path& release_dir,
+                                std::string* error) {
+    std::error_code ec;
+    fs::remove_all(release_dir, ec);
+    fs::create_directories(release_dir.parent_path(), ec);
+    ec.clear();
+    fs::rename(staging, release_dir, ec);
+    if (!ec) return true;
+    ec.clear();
+    fs::copy(staging, release_dir, fs::copy_options::recursive, ec);
+    fs::remove_all(staging, ec);
+    if (ec) {
+        if (error) *error = ec.message();
+        return false;
+    }
+    return true;
 }
 
 void make_executable(const fs::path& p) {
@@ -414,20 +483,77 @@ bool fetch_latest_release(const std::string& github_slug, GhRelease& out, std::s
     }
 }
 
+// Extra globs so catalog "*windows*" still hits win64 / win-x64 style asset names.
+std::vector<std::string> asset_glob_aliases(const std::string& glob) {
+    std::vector<std::string> out;
+    if (glob.empty()) return out;
+    out.push_back(glob);
+    const std::string g = to_lower(glob);
+    auto add = [&](const char* alias) {
+        for (const auto& existing : out) {
+            if (to_lower(existing) == to_lower(alias)) return;
+        }
+        out.emplace_back(alias);
+    };
+    const bool win_ish = g.find("windows") != std::string::npos ||
+                         g.find("win64") != std::string::npos ||
+                         g.find("win32") != std::string::npos ||
+                         g.find("win-") != std::string::npos ||
+                         g.find("win_") != std::string::npos ||
+                         g.find("*win*") != std::string::npos || g == "*win*";
+    if (win_ish) {
+        add("*windows*");
+        add("*win64*");
+        add("*win-x64*");
+        add("*win_x64*");
+        add("*win32*");
+        // Avoid bare "*win*" (matches "wine"); use hyphenated / arch forms.
+        add("*-win-*");
+        add("*-win.*");
+        add("*_win_*");
+        add("*_win.*");
+    }
+    const bool linux_ish = g.find("linux") != std::string::npos ||
+                           g.find("appimage") != std::string::npos;
+    if (linux_ish) {
+        add("*linux*");
+        add("*appimage*");
+        add("*.AppImage");
+    }
+    const bool mac_ish = g.find("macos") != std::string::npos || g.find("osx") != std::string::npos ||
+                         g.find("darwin") != std::string::npos || g.find("*mac*") != std::string::npos;
+    if (mac_ish) {
+        add("*macos*");
+        add("*osx*");
+        add("*darwin*");
+        add("*mac*");
+    }
+    return out;
+}
+
+bool asset_name_matches_glob(const std::string& glob, const std::string& name) {
+    for (const auto& pattern : asset_glob_aliases(glob)) {
+        if (match_glob(pattern, name)) return true;
+    }
+    return false;
+}
+
 const GhAsset* pick_asset(const GhRelease& rel, const std::string& glob) {
     if (glob.empty()) return nullptr;
     const GhAsset* best = nullptr;
     int best_score = -1;
     for (const auto& a : rel.assets) {
-        if (!match_glob(glob, a.name)) continue;
+        if (!asset_name_matches_glob(glob, a.name)) continue;
         int score = 0;
         const std::string n = to_lower(a.name);
         if (ends_with_ci(n, ".zip")) score += 3;
         if (n.find("x64") != std::string::npos || n.find("amd64") != std::string::npos ||
-            n.find("x86_64") != std::string::npos)
+            n.find("x86_64") != std::string::npos || n.find("win64") != std::string::npos)
             score += 2;
         if (n.find("arm64") != std::string::npos || n.find("aarch64") != std::string::npos)
             score += 1; // still acceptable
+        // Prefer an exact family hit on the primary glob slightly.
+        if (match_glob(glob, a.name)) score += 1;
         if (score > best_score) {
             best_score = score;
             best = &a;
@@ -485,6 +611,9 @@ void fill_from_disk(InstallPlan& plan) {
     plan.installed = false;
     plan.installed_tag.clear();
     plan.binary_path.clear();
+    plan.expected_binary.clear();
+    std::error_code ec;
+    plan.install_dir_present = fs::exists(plan.install_root, ec);
 
     InstallRecord rec = load_install_record(plan.install_root);
     if (!rec.title_id.empty()) {
@@ -494,6 +623,7 @@ void fill_from_disk(InstallPlan& plan) {
 
     const fs::path current = resolve_current_dir(plan.install_root);
     const std::string bin = launch_name_for_plan(plan);
+    plan.expected_binary = bin;
 
     if (!current.empty()) {
         fs::path candidate;
@@ -525,6 +655,11 @@ void fill_from_disk(InstallPlan& plan) {
             plan.message = "installed (flat): " + flat.string();
             return;
         }
+    }
+    if (plan.install_dir_present) {
+        plan.message = "install folder present but binary missing";
+        if (!bin.empty()) plan.message += ": " + bin;
+        return;
     }
     plan.message = "not installed under " + plan.install_root.string();
 }
@@ -594,6 +729,25 @@ bool save_install_record(const fs::path& install_root, const InstallRecord& rec)
     if (!out) return false;
     out << j.dump(2) << "\n";
     return static_cast<bool>(out);
+}
+
+void write_partial_install_record(const fs::path& install_root, const Title& title,
+                                  const std::string& release_tag, const std::string& asset_name,
+                                  const std::string& release_url, const std::string& target_os,
+                                  bool use_wine, const std::string& tag_dir) {
+    InstallRecord rec;
+    rec.title_id = title.id;
+    rec.github = title.release.github;
+    rec.tag = release_tag;
+    rec.asset_name = asset_name;
+    rec.binary = ""; // unresolved — hub shows NEEDS SETUP
+    rec.host_os = host_os_key();
+    rec.target_os = target_os;
+    rec.runtime = use_wine ? "wine" : "native";
+    rec.installed_at = iso8601_now();
+    rec.release_url = release_url;
+    save_install_record(install_root, rec);
+    set_current_symlink(install_root, tag_dir);
 }
 
 std::string resolve_wine_binary(std::string* error) {
@@ -809,28 +963,47 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
 
     fs::path binary = find_named_file(staging, launch_name);
     if (binary.empty()) {
-        result.message = "launch binary not found after extract: " + launch_name;
+        const auto candidates = list_launch_candidates(staging);
+        std::string place_err;
+        if (!promote_staging_to_release(staging, release_dir, &place_err)) {
+            result.message = "launch binary not found after extract: " + launch_name +
+                             "\n  also failed to keep extract: " + place_err +
+                             "\n  (look under " + staging.string() + " if it still exists)";
+            return result;
+        }
+        write_partial_install_record(install_root, title, rel.tag, asset->name, rel.html_url,
+                                     target_os, use_wine, tag);
+        result.plan = inspect_install(paths, title);
+        result.plan.latest_tag = rel.tag;
+        result.message =
+            "launch binary not found after extract: " + launch_name + "\n" +
+            "  kept extract at: " + release_dir.string() + "\n" +
+            "  Open Folder in the hub to run first-time setup or rename the exe to match.\n" +
+            "  Or fix catalog launch." + target_os +
+            " and use Retry Install / Clean install folder.\n";
+        if (!candidates.empty()) {
+            result.message += "  candidates in archive:";
+            for (const auto& c : candidates) result.message += " " + c;
+            result.message += "\n";
+        }
         return result;
     }
     make_executable(binary);
 
-    fs::remove_all(release_dir, ec);
-    fs::create_directories(release_dir.parent_path(), ec);
-    fs::rename(staging, release_dir, ec);
-    if (ec) {
-        // Cross-device rename can fail; copy then remove.
-        fs::copy(staging, release_dir, fs::copy_options::recursive, ec);
-        fs::remove_all(staging, ec);
-        if (ec) {
-            result.message = "failed to place release dir: " + ec.message();
-            return result;
-        }
+    if (!promote_staging_to_release(staging, release_dir, &err)) {
+        result.message = "failed to place release dir: " + err;
+        return result;
     }
 
     // Re-resolve binary under release_dir.
     binary = find_named_file(release_dir, launch_name);
     if (binary.empty()) {
-        result.message = "binary missing after move";
+        write_partial_install_record(install_root, title, rel.tag, asset->name, rel.html_url,
+                                     target_os, use_wine, tag);
+        result.plan = inspect_install(paths, title);
+        result.plan.latest_tag = rel.tag;
+        result.message = "binary missing after move (expected " + launch_name + ")\n" +
+                         "  kept extract at: " + release_dir.string() + "\n";
         return result;
     }
     make_executable(binary);

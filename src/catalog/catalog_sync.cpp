@@ -9,8 +9,10 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <ctime>
 #include <fstream>
 #include <iomanip>
+#include <optional>
 #include <sstream>
 
 namespace retcomm {
@@ -29,7 +31,7 @@ using json = nlohmann::json;
 struct RemoteCatalogRelease {
     std::string tag;
     std::string published_at; // GitHub ISO timestamp
-    std::string catalog_date; // YYYY-MM-DD derived from tag or published_at
+    std::string catalog_date; // YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ
 };
 
 std::int64_t epoch_seconds_now() {
@@ -51,20 +53,122 @@ std::string iso_timestamp_from_epoch(std::int64_t epoch) {
     return oss.str();
 }
 
+bool is_digit_str(const std::string& s, size_t pos, size_t len) {
+    if (pos + len > s.size()) return false;
+    for (size_t i = 0; i < len; ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(s[pos + i]))) return false;
+    }
+    return true;
+}
+
+// Parse catalog_date / published_at / tag-derived stamps into UTC epoch seconds.
+// Accepts YYYY-MM-DD (start of day UTC) and ISO-8601 with optional fractional seconds.
+std::optional<std::int64_t> parse_catalog_timestamp(const std::string& raw) {
+    if (raw.empty()) return std::nullopt;
+    std::string s = raw;
+    // Trim
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+    if (s.size() < 10 || s[4] != '-' || s[7] != '-') return std::nullopt;
+
+    int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0;
+    try {
+        year = std::stoi(s.substr(0, 4));
+        month = std::stoi(s.substr(5, 2));
+        day = std::stoi(s.substr(8, 2));
+    } catch (...) {
+        return std::nullopt;
+    }
+
+    if (s.size() == 10) {
+        // Date-only → start of UTC day.
+    } else if (s.size() >= 19 && (s[10] == 'T' || s[10] == ' ')) {
+        if (s[13] != ':' || s[16] != ':') return std::nullopt;
+        try {
+            hour = std::stoi(s.substr(11, 2));
+            minute = std::stoi(s.substr(14, 2));
+            second = std::stoi(s.substr(17, 2));
+        } catch (...) {
+            return std::nullopt;
+        }
+    } else {
+        return std::nullopt;
+    }
+
+    if (month < 1 || month > 12 || day < 1 || day > 31) return std::nullopt;
+    if (hour > 23 || minute > 59 || second > 60) return std::nullopt;
+
+    std::tm tm{};
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = hour;
+    tm.tm_min = minute;
+    tm.tm_sec = second;
+#if defined(_WIN32)
+    const std::time_t t = _mkgmtime(&tm);
+#else
+    const std::time_t t = timegm(&tm);
+#endif
+    if (t == static_cast<std::time_t>(-1)) return std::nullopt;
+    return static_cast<std::int64_t>(t);
+}
+
+// Prefer dated tags with optional time:
+//   vYYYY.MM.DD           → YYYY-MM-DD
+//   vYYYY.MM.DD.HHMM      → YYYY-MM-DDTHH:MM:00Z
+//   vYYYY.MM.DD.HHMMSS…   → YYYY-MM-DDTHH:MM:SSZ
+// Legacy vYYYY.MM.DD.<issue> (1–3 digit suffix) stays date-only.
+std::string catalog_stamp_from_tag(const std::string& tag) {
+    std::string t = tag;
+    if (!t.empty() && (t[0] == 'v' || t[0] == 'V')) t = t.substr(1);
+    // YYYY.MM.DD
+    if (t.size() < 10 || !is_digit_str(t, 0, 4) || t[4] != '.' || !is_digit_str(t, 5, 2) ||
+        t[7] != '.' || !is_digit_str(t, 8, 2)) {
+        return {};
+    }
+    const std::string date =
+        t.substr(0, 4) + "-" + t.substr(5, 2) + "-" + t.substr(8, 2);
+    if (t.size() == 10) return date;
+    if (t[10] != '.') return date;
+
+    size_t end = 11;
+    while (end < t.size() && std::isdigit(static_cast<unsigned char>(t[end]))) ++end;
+    const size_t digits = end - 11;
+    if (digits == 4) {
+        // HHMM
+        return date + "T" + t.substr(11, 2) + ":" + t.substr(13, 2) + ":00Z";
+    }
+    if (digits == 6) {
+        // HHMMSS (.issue / .manual… may follow)
+        return date + "T" + t.substr(11, 2) + ":" + t.substr(13, 2) + ":" + t.substr(15, 2) +
+               "Z";
+    }
+    // Short numeric suffix → legacy issue number, date only.
+    return date;
+}
+
 std::string catalog_date_from_tag_or_published(const std::string& tag,
                                                const std::string& published_at) {
-    // Prefer dated tags: vYYYY.MM.DD… → YYYY-MM-DD
-    if (tag.size() >= 11 && tag[0] == 'v') {
-        // v2026.07.29 or v2026.07.29.12
-        if (std::isdigit(static_cast<unsigned char>(tag[1])) && tag[5] == '.' &&
-            tag[8] == '.') {
-            return tag.substr(1, 4) + "-" + tag.substr(6, 2) + "-" + tag.substr(9, 2);
-        }
-    }
-    // published_at: 2026-07-29T12:34:56Z
-    if (published_at.size() >= 10 && published_at[4] == '-' && published_at[7] == '-')
+    const std::string from_tag = catalog_stamp_from_tag(tag);
+    if (!from_tag.empty()) return from_tag;
+    if (parse_catalog_timestamp(published_at)) {
+        // Normalize published_at to second precision when possible.
+        if (published_at.size() >= 20 && published_at.back() == 'Z')
+            return published_at.substr(0, 19) + "Z";
+        if (published_at.size() >= 19) return published_at.substr(0, 19) + "Z";
         return published_at.substr(0, 10);
+    }
     return {};
+}
+
+// Best-effort age for a release / local state (higher = newer).
+std::optional<std::int64_t> release_age_epoch(const std::string& catalog_date,
+                                              const std::string& published_at,
+                                              const std::string& tag) {
+    if (auto e = parse_catalog_timestamp(catalog_date)) return e;
+    if (auto e = parse_catalog_timestamp(published_at)) return e;
+    return parse_catalog_timestamp(catalog_stamp_from_tag(tag));
 }
 
 fs::path catalog_state_path(const Paths& paths) { return paths.data_dir / "catalog-state.json"; }
@@ -142,22 +246,43 @@ bool fetch_latest_catalog_release(const AppConfig& cfg, RemoteCatalogRelease* ou
     }
 }
 
-// True when local state already matches the remote latest release identity.
-bool local_matches_remote(const Paths& paths, const RemoteCatalogRelease& remote) {
+// Decide whether the local cache already satisfies the remote latest release.
+// - Same release_tag → up to date.
+// - Remote age <= local age (by catalog_date / published_at / tag time) → keep local
+//   (avoid replacing with an older stamp if /latest is surprising).
+// - Otherwise → download.
+enum class CatalogFreshness { UpToDate, NeedsDownload, RemoteNotNewer };
+
+CatalogFreshness compare_local_to_remote(const Paths& paths,
+                                         const RemoteCatalogRelease& remote) {
     json state;
-    if (!read_catalog_state(paths, &state)) return false;
+    if (!read_catalog_state(paths, &state)) return CatalogFreshness::NeedsDownload;
 
     const std::string local_tag = state.value("release_tag", "");
-    if (!local_tag.empty() && local_tag == remote.tag) return true;
+    if (!local_tag.empty() && local_tag == remote.tag) return CatalogFreshness::UpToDate;
 
-    // Older state files may only have catalog_date.
-    const std::string local_date = state.value("catalog_date", "");
-    if (!local_date.empty() && !remote.catalog_date.empty() &&
-        local_date == remote.catalog_date && local_tag.empty()) {
-        // Ambiguous if multiple releases share a calendar day — prefer tag when known.
-        return false;
+    const auto remote_age =
+        release_age_epoch(remote.catalog_date, remote.published_at, remote.tag);
+    const auto local_age =
+        release_age_epoch(state.value("catalog_date", ""),
+                          state.value("release_published_at", ""), local_tag);
+
+    if (remote_age && local_age) {
+        if (*remote_age < *local_age) return CatalogFreshness::RemoteNotNewer;
+        if (*remote_age == *local_age && !local_tag.empty() && local_tag == remote.tag)
+            return CatalogFreshness::UpToDate;
+        // Same calendar instant but different tags (e.g. two publishes in one second
+        // with different issue suffixes) → still fetch when tags differ.
+        if (*remote_age == *local_age && !local_tag.empty() && !remote.tag.empty() &&
+            local_tag != remote.tag)
+            return CatalogFreshness::NeedsDownload;
+        if (*remote_age == *local_age) return CatalogFreshness::UpToDate;
+        return CatalogFreshness::NeedsDownload; // remote newer
     }
-    return false;
+
+    // No comparable timestamps — trust tag identity only.
+    if (!local_tag.empty() && local_tag == remote.tag) return CatalogFreshness::UpToDate;
+    return CatalogFreshness::NeedsDownload;
 }
 
 fs::path find_catalog_root(const fs::path& staging) {
@@ -218,16 +343,26 @@ CatalogSyncResult sync_remote_catalog(const Paths& paths, const AppConfig& cfg, 
     const bool have_remote = fetch_latest_catalog_release(cfg, &remote, &remote_err);
 
     if (!force && catalog_cache_valid(paths)) {
-        if (have_remote && local_matches_remote(paths, remote)) {
+        if (have_remote) {
             json state;
             read_catalog_state(paths, &state);
-            return skip_ok("Catalog up to date (" + remote.tag +
-                               (remote.catalog_date.empty() ? ""
-                                                            : ", " + remote.catalog_date) +
-                               ").",
-                           &state);
-        }
-        if (!have_remote) {
+            switch (compare_local_to_remote(paths, remote)) {
+            case CatalogFreshness::UpToDate:
+                return skip_ok("Catalog up to date (" + remote.tag +
+                                   (remote.catalog_date.empty()
+                                        ? ""
+                                        : ", " + remote.catalog_date) +
+                                   ").",
+                               &state);
+            case CatalogFreshness::RemoteNotNewer:
+                return skip_ok("Local catalog is newer than GitHub latest (" +
+                                   state.value("release_tag", std::string("?")) +
+                                   " vs " + remote.tag + "); keeping local cache.",
+                               &state);
+            case CatalogFreshness::NeedsDownload:
+                break;
+            }
+        } else {
             // Cannot verify freshness — keep the local cache instead of re-downloading.
             json state;
             read_catalog_state(paths, &state);
@@ -347,7 +482,7 @@ CatalogSyncResult maybe_auto_update_catalog(const Paths& paths, const AppConfig&
     }
 
     // Startup path: cheap GitHub latest-release check; download zip only when the
-    // remote release tag/date differs from catalog-state.json.
+    // remote release tag/date-time is newer than catalog-state.json.
     return sync_remote_catalog(paths, cfg, false);
 }
 

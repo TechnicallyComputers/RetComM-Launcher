@@ -67,6 +67,9 @@ void merge_scan_into_index(LibraryIndex& index, const Catalog& catalog,
 // Extension preference for launch staging (lower = better).
 int rom_path_rank(const std::string& ext);
 
+// Same-stem sibling .cue, else a sheet whose FILE "…" basename matches the dump.
+fs::path companion_cue_for_disc_dump(const fs::path& dump_path);
+
 std::int64_t file_mtime_sec(const fs::path& path);
 
 } // namespace retcomm

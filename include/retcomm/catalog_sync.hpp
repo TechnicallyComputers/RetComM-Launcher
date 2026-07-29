@@ -19,7 +19,7 @@ struct CatalogSyncResult {
     bool skipped = false; // auto-update disabled or already on latest release
     std::string message;
     std::string synced_at;     // when we last wrote the local cache
-    std::string catalog_date;  // YYYY-MM-DD from index.json / release stamp
+    std::string catalog_date;  // YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ from index/stamp
     std::string release_tag;   // GitHub release tag for the cached catalog
 };
 
@@ -31,12 +31,13 @@ bool catalog_cache_valid(const Paths& paths);
 
 // Download catalog.zip from config (or default URL) and extract into the cache.
 // When force is false, queries the catalog GitHub latest release and skips the
-// zip download if the local catalog-state already matches that release tag/date.
+// zip download if the local catalog-state already matches that release tag, or
+// if the remote stamp (catalog_date / published_at / tag time) is not newer.
 CatalogSyncResult sync_remote_catalog(const Paths& paths, const AppConfig& cfg,
                                       bool force = false);
 
 // Always sync when the on-device cache is missing; when auto_update is enabled,
-// check the latest dated catalog release on startup and download only if newer.
+// check the latest catalog release on startup and download only if newer.
 CatalogSyncResult maybe_auto_update_catalog(const Paths& paths, const AppConfig& cfg);
 
 } // namespace retcomm

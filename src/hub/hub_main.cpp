@@ -96,6 +96,7 @@ const char* chip_label(const TitleRow& r) {
     if (r.update_available) return "UPDATE";
     if (r.installed && r.runtime == "wine") return "WINE";
     if (r.installed) return "INSTALLED";
+    if (r.install_dir_present) return "NEEDS SETUP";
     if (r.has_rom) return "ROM READY";
     return "CATALOG";
 }
@@ -104,6 +105,7 @@ ImVec4 chip_color(const TitleRow& r, const Theme& th) {
     if (r.update_available) return th.warn;
     if (r.installed && r.runtime == "wine") return th.good;
     if (r.installed) return th.good;
+    if (r.install_dir_present) return th.warn;
     if (r.has_rom) return th.focus;
     return th.text_muted;
 }
@@ -240,6 +242,18 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
                            row.runtime == "wine" ? " (Wine)" : "");
         if (row.update_available)
             ImGui::TextColored(th.warn, "Update available: %s", row.latest_tag.c_str());
+    } else if (row.install_dir_present) {
+        ImGui::TextColored(th.warn, "Install folder present — launch binary not found");
+        if (!row.install_issue.empty())
+            ImGui::TextWrapped("%s", row.install_issue.c_str());
+        if (!row.expected_binary.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+            ImGui::TextWrapped(
+                "Looking for executable \"%s\". Open the folder to run first-time setup "
+                "or fix the binary, then use Install again (or Clean install folder).",
+                row.expected_binary.c_str());
+            ImGui::PopStyleColor();
+        }
     } else {
         ImGui::TextColored(th.text_muted, "Not installed");
     }
@@ -328,7 +342,13 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
         if (ImGui::Button("Uninstall + delete saves", ImVec2(-1, 0)))
             hub.start_job(HubJob::UninstallPurge, row.id);
     } else {
-        if (accent_button("Install", th, ImVec2(-1, 0)))
+        if (row.install_dir_present && ImGui::Button("Open Folder", ImVec2(-1, 0))) {
+            std::string err;
+            if (!retcomm::open_path_in_file_manager(row.install_root, &err))
+                hub.append_log("Open Folder failed: " + err);
+        }
+        if (accent_button(row.install_dir_present ? "Retry Install" : "Install", th,
+                          ImVec2(-1, 0)))
             hub.start_job(HubJob::Install, row.id);
         if (row.can_wine_install) {
             if (ImGui::Button("Install with WINE", ImVec2(-1, 0)))
@@ -342,6 +362,12 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
             std::string err;
             if (!retcomm::open_url_in_browser(row.github_url, &err))
                 hub.append_log("Open URL failed: " + err);
+        }
+        if (row.install_dir_present) {
+            if (ImGui::Button("Clean install folder (keep saves)", ImVec2(-1, 0)))
+                hub.start_job(HubJob::Uninstall, row.id);
+            if (ImGui::Button("Clean install folder + delete saves", ImVec2(-1, 0)))
+                hub.start_job(HubJob::UninstallPurge, row.id);
         }
     }
 
@@ -726,7 +752,7 @@ void draw_romm_settings_panel(HubModel& hub, const Theme& th) {
 void draw_sidebar_actions(HubModel& hub, const Theme& th) {
     const bool busy = hub.job_running.load();
     if (hub.show_settings || hub.show_romm_settings) {
-        if (ImGui::Button("← Back to library", ImVec2(-1, 0))) {
+        if (ImGui::Button("Back to Library", ImVec2(-1, 0))) {
             hub.show_settings = false;
             hub.show_romm_settings = false;
             hub.settings.dirty = false;
@@ -747,15 +773,15 @@ void draw_sidebar_actions(HubModel& hub, const Theme& th) {
     }
 
     ImGui::BeginDisabled(busy);
-    if (ImGui::Button("Library settings", ImVec2(-1, 0))) hub.open_settings();
+    if (ImGui::Button("Library Settings", ImVec2(-1, 0))) hub.open_settings();
     if (ImGui::Button("RomM Sync Settings", ImVec2(-1, 0))) hub.open_romm_settings();
     ImGui::Dummy(ImVec2(0, 4));
-    if (ImGui::Button("Check updates", ImVec2(-1, 0))) hub.start_job(HubJob::CheckUpdates);
-    if (ImGui::Button("Refresh catalog", ImVec2(-1, 0)))
+    if (ImGui::Button("Check Updates", ImVec2(-1, 0))) hub.start_job(HubJob::CheckUpdates);
+    if (ImGui::Button("Refresh Catalog", ImVec2(-1, 0)))
         hub.start_job(HubJob::RefreshCatalog);
-    if (ImGui::Button("Refresh", ImVec2(-1, 0))) {
+    if (ImGui::Button("Refresh Library", ImVec2(-1, 0))) {
         hub.refresh_rows(false);
-        hub.set_status("Refreshed");
+        hub.set_status("Library refreshed");
     }
     ImGui::Dummy(ImVec2(0, 10));
     ImGui::Separator();

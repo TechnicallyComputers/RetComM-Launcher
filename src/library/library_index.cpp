@@ -155,8 +155,18 @@ const LibraryTitleBind* LibraryIndex::find_title(const std::string& title_id) co
 
 fs::path LibraryIndex::preferred_rom(const std::string& title_id) const {
     if (const auto* t = find_title(title_id)) {
-        if (t->preferred_path.empty()) return {};
-        fs::path preferred = t->preferred_path;
+        // Prefer best-ranked bound path (.cue first for discs).
+        std::string best = t->preferred_path;
+        int best_rank = best.empty() ? 100 : rom_path_rank(lower_ext_str(best));
+        for (const auto& p : t->paths) {
+            const int r = rom_path_rank(lower_ext_str(p));
+            if (best.empty() || r < best_rank || (r == best_rank && p < best)) {
+                best = p;
+                best_rank = r;
+            }
+        }
+        if (best.empty()) return {};
+        fs::path preferred = best;
         if (is_disc_dump_ext(lower_ext_str(preferred))) {
             const fs::path cue = companion_cue_path(preferred);
             if (!cue.empty()) return cue;
@@ -164,6 +174,10 @@ fs::path LibraryIndex::preferred_rom(const std::string& title_id) const {
         return preferred;
     }
     return {};
+}
+
+fs::path companion_cue_for_disc_dump(const fs::path& dump_path) {
+    return companion_cue_path(dump_path);
 }
 
 int rom_path_rank(const std::string& ext) {
@@ -426,6 +440,17 @@ void merge_scan_into_index(LibraryIndex& index, const Catalog& catalog,
         add_path(b, f.path);
     }
     for (auto& [id, b] : binds) {
+        // Pull companion .cue sheets for any bound disc dumps.
+        {
+            std::vector<std::string> dumps = b.paths;
+            if (!b.preferred_path.empty()) dumps.push_back(b.preferred_path);
+            for (const auto& p : dumps) {
+                if (!is_disc_dump_ext(lower_ext_str(p))) continue;
+                const fs::path cue = companion_cue_path(p);
+                if (!cue.empty()) add_path(b, norm_path(cue));
+            }
+        }
+
         std::sort(b.paths.begin(), b.paths.end(), [](const std::string& a, const std::string& bpath) {
             auto ext_of = [](const std::string& p) {
                 auto pos = p.find_last_of('.');
@@ -439,9 +464,8 @@ void merge_scan_into_index(LibraryIndex& index, const Catalog& catalog,
             if (ra != rb) return ra < rb;
             return a < bpath;
         });
-        if (b.preferred_path.empty() && !b.paths.empty()) b.preferred_path = b.paths.front();
-        // Keep preferred even if sort would pick another path; ensure it is listed.
-        if (!b.preferred_path.empty()) add_path(b, b.preferred_path);
+        // Always prefer best-ranked path (.cue over .bin for discs).
+        if (!b.paths.empty()) b.preferred_path = b.paths.front();
     }
     index.titles.clear();
     for (auto& [id, b] : binds) index.titles.push_back(std::move(b));

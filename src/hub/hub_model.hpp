@@ -45,6 +45,10 @@ struct TitleRow {
     std::string platform;
     std::string kind;
     bool installed = false;
+    // apps/<dir> exists but launch binary was not resolved (partial / mismatched install).
+    bool install_dir_present = false;
+    std::string install_issue;   // human-readable reason when !installed && dir present
+    std::string expected_binary; // catalog launch name looked for
     std::string installed_tag;
     std::string latest_tag;
     bool update_available = false;

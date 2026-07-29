@@ -655,16 +655,24 @@ bool write_text_file(const fs::path& path, const std::string& body, std::string*
 }
 
 std::string path_for_guest(const fs::path& host, bool use_wine) {
-    if (host.empty() || !use_wine) return host.string();
-#if defined(_WIN32)
-    return host.string();
-#else
+    if (host.empty()) return {};
     std::error_code ec;
-    fs::path abs = fs::absolute(host, ec);
-    if (ec) abs = host;
-    std::string s = abs.generic_string();
-    if (s.empty() || s[0] != '/') return host.string();
-    return "Z:" + s;
+    fs::path abs = fs::weakly_canonical(host, ec);
+    if (ec || abs.empty()) {
+        ec.clear();
+        abs = fs::absolute(host, ec);
+        if (ec) abs = host;
+    }
+#if defined(_WIN32)
+    (void)use_wine;
+    return abs.string();
+#else
+    const std::string s = abs.generic_string();
+    if (use_wine) {
+        if (!s.empty() && s[0] == '/') return "Z:" + s;
+        return host.string();
+    }
+    return s.empty() ? host.string() : s;
 #endif
 }
 

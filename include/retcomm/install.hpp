@@ -33,6 +33,10 @@ struct InstallPlan {
     fs::path current_link; // install_root/current
     fs::path binary_path;  // resolved launch binary under current/
     bool installed = false;
+    // True when apps/<install_dir_name> exists even if the launch binary was not found
+    // (failed/partial install — hub can still offer Open Folder / cleanup).
+    bool install_dir_present = false;
+    std::string expected_binary; // catalog launch name looked for when missing
     std::optional<InstallRecord> record;
     std::string installed_tag;
     std::string latest_tag; // filled when an update check ran
