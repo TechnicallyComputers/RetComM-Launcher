@@ -2,6 +2,14 @@
 
 Helpers used by [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 
+Release assets (no zips):
+
+| Platform | Artifact |
+|---|---|
+| Linux | `RetComM-Launcher-<ver>-linux-x86_64.AppImage` |
+| macOS | `RetComM-Launcher-<ver>-macos-{arm64,x86_64}.dmg` |
+| Windows | `*-windows-x64-setup.exe` + `*-windows-portable.exe` |
+
 ## Icons
 
 ```sh
@@ -38,12 +46,9 @@ and writes `dist/RetComM-Launcher-<ver>-linux-<arch>.AppImage`.
 cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/out"
 cmake --build build -j && cmake --install build
 ./packaging/linux/build-appimage.sh "$PWD/out" 0.1.1 x86_64
-./packaging/linux/package-zip.sh "$PWD/out" 0.1.1 x86_64
 ```
 
-- **AppImage** — end-user Linux package (hub via AppRun; `AppRun cli …` for CLI)
-- **zip** — flat `retcomm` + `retcomm-hub` for in-app self-update (catalog is
-  downloaded on-device into `~/.local/share/retcomm/catalog`)
+Self-update replaces the running AppImage in place (`APPIMAGE` env).
 
 ## macOS
 
@@ -55,12 +60,12 @@ Produces under `dist/`:
 
 | Artifact | Role |
 |---|---|
-| `RetComM Launcher.app` | App bundle |
+| `RetComM Launcher.app` | App bundle (local staging) |
 | `RetComM-Launcher-<ver>-macos-<arch>.dmg` | Drag-to-Applications installer disk image |
-| `RetComM-Launcher-<ver>-macos-<arch>.zip` | `.app` zip (self-update / alternate download) |
 
 Open the DMG and drag **RetComM Launcher** onto **Applications**. That puts it on
-Launchpad, Spotlight, and the Applications folder.
+Launchpad, Spotlight, and the Applications folder. Self-update downloads the
+matching arch DMG and refreshes the installed `.app`.
 
 ## Windows
 
@@ -79,7 +84,6 @@ Produces under `dist/`:
 
 | Artifact | Role |
 |---|---|
-| `RetComM-Launcher-<ver>-windows-x64.zip` | Flat folder + **installer self-update** payload |
 | `RetComM-Launcher-<ver>-windows-portable.exe` | Single-file portable (stub + zip trailer; icon embedded) |
 | `RetComM-Launcher-<ver>-windows-x64-setup.exe` | Per-user Inno Setup installer (Start Menu / desktop) |
 
@@ -92,5 +96,5 @@ RetComM-Launcher-*-windows-portable.exe cli list  # CLI
 
 Self-update channels (detected via `channel.json` / env from the portable stub):
 
-- **installer** / zip folder → downloads `*-windows-x64.zip`, replaces exes + DLLs in place
+- **installer** → downloads `*-windows-*-setup.exe`, runs silent Inno into the current install dir
 - **portable** → downloads `*-windows-portable.exe`, replaces the stub, re-extracts on next launch

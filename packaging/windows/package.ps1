@@ -1,4 +1,4 @@
-# Package RetComM Windows zip, portable single-exe, and Inno Setup installer.
+# Package RetComM Windows portable single-exe and Inno Setup installer.
 #
 # Usage:
 #   packaging/windows/package.ps1 -Prefix out -Version 0.1.1 [-VcpkgBin path] [-Arch x64] [-PortableStub path]
@@ -15,7 +15,6 @@ $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $OutDir = Join-Path $Root "dist"
 $Stage = Join-Path $OutDir "windows-stage"
-$ZipName = "RetComM-Launcher-$Version-windows-$Arch.zip"
 $PortableName = "RetComM-Launcher-$Version-windows-portable.exe"
 
 Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
@@ -95,7 +94,7 @@ if (-not (Test-Path (Join-Path $Stage "libcurl.dll")) -and
     Write-Warning "libcurl DLL not bundled — network features may fail on clean machines"
 }
 
-# Installer / zip channel marker (self-update picks the windows-x64.zip asset).
+# Installer channel marker (self-update picks the windows-*-setup.exe asset).
 @'
 {
   "schema_version": 1,
@@ -111,13 +110,7 @@ if (Test-Path (Join-Path $Root "assets\retcomm.png")) {
     Copy-Item (Join-Path $Root "assets\retcomm.png") (Join-Path $Stage "retcomm.png") -Force
 }
 
-# --- Zip (installer update payload + legacy portable folder) ---
-$ZipPath = Join-Path $OutDir $ZipName
-if (Test-Path $ZipPath) { Remove-Item $ZipPath -Force }
-Compress-Archive -Path (Join-Path $Stage "*") -DestinationPath $ZipPath
-Write-Host "Zip: $ZipPath"
-
-# --- Portable single-exe (stub + appended zip trailer) ---
+# --- Portable single-exe (stub + appended zip trailer; zip is temporary only) ---
 if (-not $PortableStub) {
     $candidates = @(
         (Join-Path $PrefixBin "retcomm-portable.exe"),

@@ -38,8 +38,9 @@ struct SelfUpdateResult {
 // newer release, download the host-OS asset for this install channel, and
 // schedule an in-place replace after this process exits.
 //
+// Assets: Linux AppImage, macOS DMG, Windows setup.exe / portable.exe.
 // Windows channels (channel.json / RETCOMM_INSTALL_CHANNEL):
-//   installer|zip  → *-windows-x64.zip (exes + DLLs next to the hub)
+//   installer|zip  → *-windows-*-setup.exe (silent Inno into current dir)
 //   portable       → *-windows-portable.exe (replaces the stub)
 SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions& opts = {});
 

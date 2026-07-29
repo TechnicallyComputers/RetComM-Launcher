@@ -17,6 +17,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
+#include <unistd.h>
 #else
 #include <unistd.h>
 #endif
@@ -84,12 +87,45 @@ fs::path current_executable_path() {
     const DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
     if (n == 0 || n >= MAX_PATH) return {};
     return fs::path(buf);
+#elif defined(__APPLE__)
+    char buf[4096];
+    uint32_t size = sizeof(buf);
+    if (_NSGetExecutablePath(buf, &size) != 0) return {};
+    std::error_code ec;
+    fs::path p = fs::weakly_canonical(fs::path(buf), ec);
+    return ec ? fs::path(buf) : p;
 #else
     std::error_code ec;
     fs::path p = fs::read_symlink("/proc/self/exe", ec);
     if (!ec && !p.empty()) return p;
     return {};
 #endif
+}
+
+fs::path running_appimage_path() {
+#if defined(__linux__)
+    if (const char* env = std::getenv("APPIMAGE")) {
+        if (env && *env) return fs::path(env);
+    }
+#endif
+    const fs::path exe = current_executable_path();
+    if (!exe.empty() && ends_with_ci(exe.string(), ".appimage")) return exe;
+    return {};
+}
+
+fs::path macos_app_bundle_path() {
+#if defined(__APPLE__)
+    const fs::path exe = current_executable_path();
+    // …/RetComM Launcher.app/Contents/MacOS/retcomm-hub
+    if (exe.empty()) return {};
+    const fs::path macos = exe.parent_path();
+    const fs::path contents = macos.parent_path();
+    const fs::path app = contents.parent_path();
+    if (macos.filename() == "MacOS" && contents.filename() == "Contents" &&
+        ends_with_ci(app.filename().string(), ".app"))
+        return app;
+#endif
+    return {};
 }
 
 bool dir_is_writable(const fs::path& dir) {
@@ -279,25 +315,26 @@ const GhAsset* pick_launcher_asset(const GhRelease& rel, InstallChannel channel)
 
 #if defined(_WIN32)
         if (channel == InstallChannel::Portable) {
-            // Prefer the single-file portable artifact.
             if (n.find("portable") != std::string::npos && ends_with_ci(n, ".exe")) score += 40;
-            else if (n.find("setup") != std::string::npos) score -= 30;
-            else if (ends_with_ci(n, ".zip")) score += 5; // weak fallback
+            else if (n.find("setup") != std::string::npos) score -= 40;
+            else if (ends_with_ci(n, ".zip")) score += 5; // legacy releases
             else score -= 20;
         } else {
-            // Installer / folder installs update from the flat windows zip.
-            if (ends_with_ci(n, ".zip") && n.find("portable") == std::string::npos) score += 40;
-            if (n.find("setup") != std::string::npos) score -= 40;
+            // Installer channel: silent Inno setup.exe (legacy zip still accepted).
+            if (n.find("setup") != std::string::npos && ends_with_ci(n, ".exe")) score += 40;
+            else if (ends_with_ci(n, ".zip") && n.find("portable") == std::string::npos)
+                score += 15;
             if (n.find("portable") != std::string::npos) score -= 30;
         }
 #else
         (void)channel;
-        // Prefer extractable archives for in-place self-update (AppImage / DMG
-        // are published for users but not applied by the updater script).
-        if (ends_with_ci(n, ".zip")) score += 20;
-        if (ends_with_ci(n, ".tar.gz") || ends_with_ci(n, ".tgz")) score += 12;
-        if (ends_with_ci(n, ".appimage")) score += 4;
-        if (ends_with_ci(n, ".dmg")) score -= 40;
+        if (os == "linux") {
+            if (ends_with_ci(n, ".appimage")) score += 40;
+            else if (ends_with_ci(n, ".zip")) score += 10; // legacy
+        } else if (os == "macos") {
+            if (ends_with_ci(n, ".dmg")) score += 40;
+            else if (ends_with_ci(n, ".zip")) score += 10; // legacy
+        }
 #endif
         if (n.find("retcomm") != std::string::npos) score += 5;
 #if defined(__aarch64__) || defined(_M_ARM64)
@@ -416,7 +453,43 @@ bool schedule_replace_portable_and_restart(const fs::path& new_portable, const f
     }
     return schedule_bat(script, error);
 }
+
+bool schedule_run_setup_and_restart(const fs::path& setup_exe, const fs::path& install_dir,
+                                    std::string* error) {
+    const DWORD pid = GetCurrentProcessId();
+    const fs::path script = setup_exe.parent_path() / "apply_setup_update.bat";
+    {
+        std::ofstream out(script);
+        if (!out) {
+            if (error) *error = "cannot write apply script";
+            return false;
+        }
+        out << "@echo off\r\n"
+            << "set PID=" << pid << "\r\n"
+            << ":wait\r\n"
+            << "tasklist /FI \"PID eq %PID%\" 2>NUL | find \"%PID%\" >NUL\r\n"
+            << "if not errorlevel 1 (\r\n"
+            << "  timeout /t 1 /nobreak >NUL\r\n"
+            << "  goto wait\r\n"
+            << ")\r\n"
+            << "start /wait \"\" \"" << setup_exe.string()
+            << "\" /VERYSILENT /NORESTART /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /DIR=\""
+            << install_dir.string() << "\"\r\n"
+            << "start \"\" \"" << (install_dir / "retcomm-hub.exe").string() << "\"\r\n";
+    }
+    return schedule_bat(script, error);
+}
 #else
+bool schedule_shell(const fs::path& script, std::string* error) {
+    make_executable(script);
+    const std::string cmd = "nohup bash " + script.string() + " >/dev/null 2>&1 &";
+    if (std::system(cmd.c_str()) != 0) {
+        if (error) *error = "failed to launch apply script";
+        return false;
+    }
+    return true;
+}
+
 bool schedule_apply_dir_and_restart(const fs::path& staging_bin_dir, const fs::path& dest_dir,
                                     const std::string& hub_name, std::string* error) {
     const pid_t pid = ::getpid();
@@ -441,13 +514,72 @@ bool schedule_apply_dir_and_restart(const fs::path& staging_bin_dir, const fs::p
             << "install -m 755 \"$staging/$hub\" \"$dest/$hub\"\n"
             << "exec \"$dest/$hub\"\n";
     }
-    make_executable(script);
-    const std::string cmd = "nohup bash " + script.string() + " >/dev/null 2>&1 &";
-    if (std::system(cmd.c_str()) != 0) {
-        if (error) *error = "failed to launch apply script";
-        return false;
+    return schedule_shell(script, error);
+}
+
+bool schedule_replace_appimage_and_restart(const fs::path& new_appimage, const fs::path& dest_appimage,
+                                           std::string* error) {
+    const pid_t pid = ::getpid();
+    const fs::path script = new_appimage.parent_path() / "apply_appimage_update.sh";
+    {
+        std::ofstream out(script);
+        if (!out) {
+            if (error) *error = "cannot write apply script";
+            return false;
+        }
+        out << "#!/usr/bin/env bash\n"
+            << "set -euo pipefail\n"
+            << "pid=" << pid << "\n"
+            << "src=" << new_appimage.string() << "\n"
+            << "dest=" << dest_appimage.string() << "\n"
+            << "while kill -0 \"$pid\" 2>/dev/null; do sleep 0.2; done\n"
+            << "sleep 0.3\n"
+            << "chmod +x \"$src\"\n"
+            << "tmp=\"${dest}.new.$$\"\n"
+            << "cp -f \"$src\" \"$tmp\"\n"
+            << "mv -f \"$tmp\" \"$dest\"\n"
+            << "chmod +x \"$dest\"\n"
+            << "exec \"$dest\"\n";
     }
-    return true;
+    return schedule_shell(script, error);
+}
+
+bool schedule_dmg_replace_and_restart(const fs::path& dmg, const fs::path& dest_app,
+                                      std::string* error) {
+    const pid_t pid = ::getpid();
+    const fs::path work = dmg.parent_path();
+    const fs::path script = work / "apply_dmg_update.sh";
+    {
+        std::ofstream out(script);
+        if (!out) {
+            if (error) *error = "cannot write apply script";
+            return false;
+        }
+        out << "#!/usr/bin/env bash\n"
+            << "set -euo pipefail\n"
+            << "pid=" << pid << "\n"
+            << "dmg=" << dmg.string() << "\n"
+            << "dest=" << dest_app.string() << "\n"
+            << "mp=" << (work / "dmg-mount").string() << "\n"
+            << "while kill -0 \"$pid\" 2>/dev/null; do sleep 0.2; done\n"
+            << "sleep 0.3\n"
+            << "rm -rf \"$mp\"\n"
+            << "mkdir -p \"$mp\"\n"
+            << "hdiutil attach -nobrowse -readonly -mountpoint \"$mp\" \"$dmg\" >/dev/null\n"
+            << "app=$(find \"$mp\" -maxdepth 1 -name '*.app' -print -quit)\n"
+            << "if [[ -z \"$app\" || ! -d \"$app\" ]]; then\n"
+            << "  hdiutil detach \"$mp\" >/dev/null 2>&1 || true\n"
+            << "  echo 'DMG missing .app' >&2\n"
+            << "  exit 1\n"
+            << "fi\n"
+            << "mkdir -p \"$(dirname \"$dest\")\"\n"
+            << "rm -rf \"$dest\"\n"
+            << "ditto \"$app\" \"$dest\"\n"
+            << "hdiutil detach \"$mp\" >/dev/null 2>&1 || hdiutil detach -force \"$mp\" >/dev/null 2>&1 || true\n"
+            << "rm -rf \"$mp\"\n"
+            << "open \"$dest\"\n";
+    }
+    return schedule_shell(script, error);
 }
 #endif
 
@@ -489,8 +621,8 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
     GhRelease rel;
     if (!fetch_latest_release(slug, rel, &err, opts.allow_prerelease)) {
         return fail(result, "GitHub release check failed for " + slug + ": " + err +
-                                "\nPublish a Release with a host-OS zip "
-                                "(retcomm + retcomm-hub) to enable Update RetComM.");
+                                "\nPublish a Release with host installers "
+                                "(AppImage / DMG / Windows setup+portable) to enable Update RetComM.");
     }
     result.latest_tag = rel.tag;
 
@@ -506,10 +638,11 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
     if (!asset) {
         return fail(result, "Release " + rel.tag + " has no downloadable asset matching this OS (" +
                                 host_os_key() + ", channel=" + channel_name +
-                                "). Expected a zip / windows-portable.exe containing retcomm and "
-                                "retcomm-hub.");
+                                "). Expected AppImage, macOS DMG, windows-*-setup.exe, or "
+                                "windows-portable.exe.");
     }
     result.asset_name = asset->name;
+    const std::string asset_lower = to_lower(asset->name);
 
     ensure_dirs(paths);
     const fs::path work = paths.data_dir / "self-update";
@@ -531,10 +664,8 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
     }
 
 #if defined(_WIN32)
-    const std::string cli_name = "retcomm.exe";
     const std::string hub_name = "retcomm-hub.exe";
 #else
-    const std::string cli_name = "retcomm";
     const std::string hub_name = "retcomm-hub";
 #endif
 
@@ -567,8 +698,84 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
                          "\nRestarting after this window closes…";
         return result;
     }
+
+    if (asset_lower.find("setup") != std::string::npos && ends_with_ci(asset_lower, ".exe")) {
+        fs::path dest_dir;
+        const fs::path exe = current_executable_path();
+        if (!exe.empty()) dest_dir = exe.parent_path();
+        if (dest_dir.empty() || !dir_is_writable(dest_dir)) {
+            return fail(result, "installer update needs a writable install directory "
+                                "(current exe location).");
+        }
+        const fs::path staged_setup = work / "bin" / asset->name;
+        fs::create_directories(staged_setup.parent_path(), ec);
+        fs::copy_file(download, staged_setup, fs::copy_options::overwrite_existing, ec);
+        if (ec) return fail(result, "staging setup.exe failed: " + ec.message());
+
+        save_launcher_state(paths, rel.tag, asset->name, channel_name);
+        if (!schedule_run_setup_and_restart(staged_setup, dest_dir, &err)) {
+            return fail(result, err);
+        }
+        result.ok = true;
+        result.restart_scheduled = true;
+        result.message = "Updating RetComM Launcher " + result.current_tag + " → " + rel.tag +
+                         "\n  channel: installer\n  asset: " + asset->name +
+                         "\n  install: " + dest_dir.string() +
+                         "\nRestarting after this window closes…";
+        return result;
+    }
 #endif
 
+#if !defined(_WIN32)
+    if (ends_with_ci(asset_lower, ".appimage")) {
+        const fs::path dest = running_appimage_path();
+        if (dest.empty()) {
+            return fail(result, "downloaded an AppImage but this process is not running from one "
+                                "($APPIMAGE unset). Relaunch the AppImage, then try Update RetComM.");
+        }
+        if (!dir_is_writable(dest.parent_path())) {
+            return fail(result, "AppImage directory is not writable: " + dest.parent_path().string());
+        }
+        make_executable(download);
+        save_launcher_state(paths, rel.tag, asset->name, channel_name);
+        if (!schedule_replace_appimage_and_restart(download, dest, &err)) {
+            return fail(result, err);
+        }
+        result.ok = true;
+        result.restart_scheduled = true;
+        result.message = "Updating RetComM Launcher " + result.current_tag + " → " + rel.tag +
+                         "\n  channel: appimage\n  asset: " + asset->name +
+                         "\n  install: " + dest.string() +
+                         "\nRestarting after this window closes…";
+        return result;
+    }
+
+    if (ends_with_ci(asset_lower, ".dmg")) {
+        fs::path dest_app = macos_app_bundle_path();
+        if (dest_app.empty()) dest_app = "/Applications/RetComM Launcher.app";
+        if (!dir_is_writable(dest_app.parent_path())) {
+            return fail(result, "cannot write app bundle parent: " + dest_app.parent_path().string());
+        }
+        save_launcher_state(paths, rel.tag, asset->name, channel_name);
+        if (!schedule_dmg_replace_and_restart(download, dest_app, &err)) {
+            return fail(result, err);
+        }
+        result.ok = true;
+        result.restart_scheduled = true;
+        result.message = "Updating RetComM Launcher " + result.current_tag + " → " + rel.tag +
+                         "\n  channel: dmg\n  asset: " + asset->name +
+                         "\n  install: " + dest_app.string() +
+                         "\nRestarting after this window closes…";
+        return result;
+    }
+#endif
+
+    // Legacy zip / folder payload (older releases).
+#if defined(_WIN32)
+    const std::string cli_name = "retcomm.exe";
+#else
+    const std::string cli_name = "retcomm";
+#endif
     if (!extract_archive_to(download, staging, &err)) {
         return fail(result, "extract failed: " + err);
     }
@@ -577,12 +784,11 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
     fs::path hub = find_named_file(staging, hub_name);
     if (hub.empty()) {
         return fail(result, "release archive missing " + hub_name +
-                                " — package retcomm + retcomm-hub in the GitHub Release asset.");
+                                " — expected AppImage/DMG/setup/portable (or a legacy zip).");
     }
     if (!cli.empty()) make_executable(cli);
     make_executable(hub);
 
-    // Flatten sibling runtime files (exes + DLLs + channel.json) for the apply script.
     const fs::path bin_stage = work / "bin";
     fs::create_directories(bin_stage, ec);
     if (!copy_tree_files(hub.parent_path(), bin_stage, &err)) return fail(result, err);

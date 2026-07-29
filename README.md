@@ -50,7 +50,7 @@ installs need `wine` or `wine64` on `PATH`.
 
 Releases are **manual only** (Actions → **Release** → Run workflow). The workflow
 does not run on push. It builds all platforms, creates tag `v<version>` if needed,
-and publishes a GitHub Release with the zips/AppImage.
+and publishes a GitHub Release with end-user installers only (no zips).
 
 - **Version** input empty → uses `RETCOMM_VERSION` from `CMakeLists.txt`
 - Optional **prerelease** checkbox for pre-release tags
@@ -58,19 +58,15 @@ and publishes a GitHub Release with the zips/AppImage.
 | Artifact | Platform |
 |---|---|
 | `RetComM-Launcher-<ver>-linux-x86_64.AppImage` | Linux |
-| `RetComM-Launcher-<ver>-linux-x86_64.zip` | Linux (self-update) |
-| `RetComM-Launcher-<ver>-windows-x64-setup.exe` | Windows installer (Start Menu / desktop; self-updates via zip) |
-| `RetComM-Launcher-<ver>-windows-portable.exe` | Windows single-file portable (self-updates in place) |
-| `RetComM-Launcher-<ver>-windows-x64.zip` | Windows folder / installer update payload |
+| `RetComM-Launcher-<ver>-windows-x64-setup.exe` | Windows installer (Start Menu / desktop) |
+| `RetComM-Launcher-<ver>-windows-portable.exe` | Windows single-file portable |
 | `RetComM-Launcher-<ver>-macos-arm64.dmg` | macOS Apple Silicon (drag into Applications) |
 | `RetComM-Launcher-<ver>-macos-x86_64.dmg` | macOS Intel (drag into Applications) |
-| `RetComM-Launcher-<ver>-macos-arm64.zip` | macOS Apple Silicon (`.app` zip / self-update) |
-| `RetComM-Launcher-<ver>-macos-x86_64.zip` | macOS Intel (`.app` zip / self-update) |
 
 Windows portable launches the hub with no args; use
 `RetComM-Launcher-*-windows-portable.exe cli <command>` for the CLI (same idea as the
-Linux AppImage `cli` dispatch). Installer and portable each self-update from their
-matching release asset via **Update RetComM** in the hub.
+Linux AppImage `cli` dispatch). **Update RetComM** in the hub pulls the matching
+AppImage / DMG / setup / portable asset for the install channel.
 
 Packaging scripts live under `packaging/`; the generic icon is `assets/retcomm.svg`
 (rasterized by `packaging/make-icons.sh`).

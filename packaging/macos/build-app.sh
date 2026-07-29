@@ -80,13 +80,6 @@ else
   done
 fi
 
-ZIP="${OUT_DIR}/RetComM-Launcher-${VERSION}-macos-${ARCH}.zip"
-rm -f "${ZIP}"
-(
-  cd "${OUT_DIR}"
-  ditto -c -k --sequesterRsrc --keepParent "${APP_NAME}" "$(basename "${ZIP}")"
-)
-
 # Drag-to-Applications DMG (Finder window with .app + /Applications symlink).
 DMG="${OUT_DIR}/RetComM-Launcher-${VERSION}-macos-${ARCH}.dmg"
 VOLUME_NAME="RetComM Launcher"
@@ -155,5 +148,4 @@ rm -f "${RW_DMG}"
 rm -rf "${STAGE}" "${MOUNT_DIR}"
 
 echo "App: ${APP}"
-echo "Zip: ${ZIP}"
 echo "DMG: ${DMG}"

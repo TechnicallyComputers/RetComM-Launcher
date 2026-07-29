@@ -66,7 +66,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build pkg-config \
             libcurl4-openssl-dev libgl1-mesa-dev \
-            librsvg2-bin zip curl ca-certificates \
+            librsvg2-bin curl ca-certificates \
             libx11-dev libxext-dev libxrandr-dev libxcursor-dev \
             libxi-dev libxinerama-dev libxss-dev libwayland-dev \
             libxkbcommon-dev libasound2-dev libpulse-dev \
@@ -97,24 +97,23 @@ jobs:
             -DRETCOMM_VERSION="${{ needs.version.outputs.version }}"
           cmake --build build -j"$(nproc)"
           cmake --install build
-          # Bundle SDL3 next to binaries for the portable zip / AppImage.
+          # Bundle SDL3 next to binaries for the AppImage.
           mkdir -p out/lib
           cp -a "$HOME/sdl3/lib/"*.so* out/lib/
 
-      - name: Package AppImage + zip
+      - name: Package AppImage
         run: |
           export PATH="$HOME/sdl3/bin:$PATH"
           export LD_LIBRARY_PATH="$HOME/sdl3/lib:${LD_LIBRARY_PATH:-}"
           ./packaging/linux/build-appimage.sh "$PWD/out" "${{ needs.version.outputs.version }}" x86_64
-          ./packaging/linux/package-zip.sh "$PWD/out" "${{ needs.version.outputs.version }}" x86_64
           ls -lah dist/
+          test -f "dist/RetComM-Launcher-${{ needs.version.outputs.version }}-linux-x86_64.AppImage"
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux-x86_64
           path: |
             dist/RetComM-Launcher-*-linux-x86_64.AppImage
-            dist/RetComM-Launcher-*-linux-x86_64.zip
 
   windows:
     needs: version
@@ -159,7 +158,7 @@ jobs:
           if (-not (Test-Path $iscc)) { throw "ISCC.exe not found after innosetup install" }
           Write-Host "ISCC: $iscc"
 
-      - name: Package zip + portable + installer
+      - name: Package portable + installer
         shell: pwsh
         run: |
           # CMake install ships TARGET_RUNTIME_DLLS into out/bin. Also pass the
@@ -179,7 +178,6 @@ jobs:
             -InnoSetup "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           Get-ChildItem dist
           $need = @(
-            "RetComM-Launcher-${{ needs.version.outputs.version }}-windows-x64.zip",
             "RetComM-Launcher-${{ needs.version.outputs.version }}-windows-portable.exe",
             "RetComM-Launcher-${{ needs.version.outputs.version }}-windows-x64-setup.exe"
           )
@@ -192,7 +190,6 @@ jobs:
         with:
           name: windows-x64
           path: |
-            dist/RetComM-Launcher-*-windows-x64.zip
             dist/RetComM-Launcher-*-windows-portable.exe
             dist/RetComM-Launcher-*-windows-x64-setup.exe
 
@@ -233,16 +230,16 @@ jobs:
           file out/bin/retcomm-hub
           otool -L out/bin/retcomm-hub | head
 
-      - name: Package .app zip + DMG
+      - name: Package DMG
         run: |
           ./packaging/macos/build-app.sh "$PWD/out" "${{ needs.version.outputs.version }}" "${{ matrix.arch }}"
           ls -lah dist/
+          test -f "dist/RetComM-Launcher-${{ needs.version.outputs.version }}-macos-${{ matrix.arch }}.dmg"
 
       - uses: actions/upload-artifact@v4
         with:
           name: macos-${{ matrix.arch }}
           path: |
-            dist/RetComM-Launcher-*-macos-${{ matrix.arch }}.zip
             dist/RetComM-Launcher-*-macos-${{ matrix.arch }}.dmg
 
   publish:
@@ -260,9 +257,15 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p dist
-          find artifacts -type f \( -name '*.AppImage' -o -name '*.zip' -o -name '*.exe' -o -name '*.dmg' \) -exec cp -v {} dist/ \;
+          find artifacts -type f \( -name '*.AppImage' -o -name '*.exe' -o -name '*.dmg' \) -exec cp -v {} dist/ \;
           ls -lah dist/
           test -n "$(ls -A dist)" || { echo "No release artifacts found" >&2; exit 1; }
+          # Guaranteed end-user set (no zips).
+          test -n "$(ls dist/*-linux-*.AppImage 2>/dev/null)"
+          test -n "$(ls dist/*-windows-*-setup.exe 2>/dev/null)"
+          test -n "$(ls dist/*-windows-portable.exe 2>/dev/null)"
+          test -n "$(ls dist/*-macos-arm64.dmg 2>/dev/null)"
+          test -n "$(ls dist/*-macos-x86_64.dmg 2>/dev/null)"
 
       - name: Ensure release tag exists
         env:
