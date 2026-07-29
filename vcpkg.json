@@ -1,6 +1,7 @@
 {
   "name": "retcomm-launcher",
   "version-string": "0.1.1",
+  "builtin-baseline": "9d7f79f56ae1a9b4704d6a7fb8237e347a974133",
   "dependencies": [
     "curl",
     "sdl3"

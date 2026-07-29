@@ -102,19 +102,21 @@ jobs:
 
   windows:
     needs: version
-    runs-on: windows-latest
+    # Pin 2022 image: VS 2022 generator + stable MSVC tooling.
+    runs-on: windows-2022
     env:
-      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+      # Do not use VCPKG_ROOT — VS may override it with its bundled copy.
+      RETCOMM_VCPKG: ${{ github.workspace }}/retcomm-vcpkg
     steps:
       - uses: actions/checkout@v4
 
       - name: Bootstrap vcpkg
         shell: pwsh
         run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
-          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
-          Set-Location $env:GITHUB_WORKSPACE
-          & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet x64-windows
+          $baseline = "9d7f79f56ae1a9b4704d6a7fb8237e347a974133"
+          git clone https://github.com/microsoft/vcpkg.git $env:RETCOMM_VCPKG
+          git -C $env:RETCOMM_VCPKG checkout $baseline
+          & "$env:RETCOMM_VCPKG\bootstrap-vcpkg.bat" -disableMetrics
 
       - name: Build icons
         shell: bash
@@ -122,34 +124,24 @@ jobs:
           chmod +x packaging/make-icons.sh
           ./packaging/make-icons.sh
 
-      # windows-latest currently ships VS 2025 (18); Ninja + MSVC avoids
-      # hard-coding a Visual Studio generator year.
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Install Ninja
-        shell: bash
-        run: choco install ninja -y
-
       - name: Configure & build
         shell: bash
         run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_TOOLCHAIN_FILE="${RETCOMM_VCPKG}/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=x64-windows \
             -DCMAKE_INSTALL_PREFIX="$PWD/out" \
             -DRETCOMM_VERSION="${{ needs.version.outputs.version }}" \
             -DRETCOMM_BUNDLE_CATALOG=ON
-          cmake --build build -j
-          cmake --install build
+          cmake --build build --config Release -j
+          cmake --install build --config Release
 
       - name: Package zip
         shell: pwsh
         run: |
           $candidates = @(
             (Join-Path $env:GITHUB_WORKSPACE "vcpkg_installed\x64-windows\bin"),
-            (Join-Path $env:VCPKG_ROOT "installed\x64-windows\bin")
+            (Join-Path $env:RETCOMM_VCPKG "installed\x64-windows\bin")
           )
           $bin = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $bin) { throw "vcpkg bin dir not found" }
