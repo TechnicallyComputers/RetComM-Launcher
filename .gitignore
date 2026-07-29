@@ -1,5 +1,7 @@
 /build/
 /build-*/
+/dist/
+/out/
 /.cache/
 /cmake-build-*/
 *.user

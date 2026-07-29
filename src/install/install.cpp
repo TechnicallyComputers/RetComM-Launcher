@@ -529,6 +529,10 @@ void fill_from_disk(InstallPlan& plan) {
 
 } // namespace
 
+bool extract_archive_to(const fs::path& archive, const fs::path& dest, std::string* error) {
+    return extract_archive(archive, dest, error);
+}
+
 InstallRecord load_install_record(const fs::path& install_root) {
     InstallRecord rec;
     const fs::path path = install_root / "install.json";

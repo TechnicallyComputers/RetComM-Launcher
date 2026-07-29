@@ -111,6 +111,75 @@ void append_save_path_argv(LaunchPlan& plan, const Title& title) {
     plan.argv.push_back(arg);
 }
 
+bool replace_symlink(const fs::path& link, const fs::path& target, std::string* error) {
+    std::error_code ec;
+    if (fs::exists(link, ec) || fs::is_symlink(link, ec)) fs::remove(link, ec);
+    ec.clear();
+    fs::path abs = fs::weakly_canonical(target, ec);
+    if (ec || abs.empty()) {
+        ec.clear();
+        abs = fs::absolute(target, ec);
+        if (ec) abs = target;
+    }
+    fs::create_symlink(abs, link, ec);
+    if (ec) {
+        if (error) *error = "symlink " + link.string() + " → " + abs.string() + ": " + ec.message();
+        return false;
+    }
+    return true;
+}
+
+// Point `link` at `target`, preferring a release-relative symlink when possible.
+bool point_link_at(const fs::path& link, const fs::path& target, std::string* error) {
+    std::error_code ec;
+    if (fs::exists(link, ec) || fs::is_symlink(link, ec)) fs::remove(link, ec);
+    ec.clear();
+
+    fs::path rel = fs::relative(target, link.parent_path(), ec);
+    if (!ec && !rel.empty()) {
+        const std::string s = rel.generic_string();
+        if (s.rfind("..", 0) != 0 && s.find("/../") == std::string::npos) {
+            fs::create_symlink(rel, link, ec);
+            if (!ec) return true;
+            ec.clear();
+        }
+    }
+    return replace_symlink(link, target, error);
+}
+
+// gbarecomp's launcher Save row ignores --save-path and shows <rom>.sav derived
+// from rom.cfg. Stage install-local library.<ext> + library.sav (→ managed save)
+// so the Wine launcher sees the selected file without writing into the ROM library.
+bool stage_gba_launcher_sidecars(LaunchPlan& plan, const Title& title, std::string* note) {
+    if (title.platform != "gba" || plan.media_path.empty() || plan.cwd.empty()) return false;
+
+    std::error_code ec;
+    const std::string ext = plan.media_path.extension().string();
+    if (ext.empty()) return false;
+
+    const fs::path rom_link = plan.cwd / ("library" + ext);
+    std::string err;
+    if (!replace_symlink(rom_link, plan.media_path, &err)) {
+        if (note) *note = err;
+        return false;
+    }
+    plan.staged_rom_link = rom_link;
+
+    if (!plan.save_path.empty() &&
+        (fs::is_regular_file(plan.save_path, ec) || fs::is_symlink(plan.save_path, ec))) {
+        const fs::path sav_link = plan.cwd / "library.sav";
+        if (!point_link_at(sav_link, plan.save_path, &err)) {
+            if (note) *note = "library.gba ok; library.sav failed: " + err;
+            return true; // rom link still useful
+        }
+        if (note)
+            *note = "staged library" + ext + " + library.sav → " + plan.save_path.filename().string();
+    } else if (note) {
+        *note = "staged library" + ext;
+    }
+    return true;
+}
+
 // Rebuild argv for a cart direct boot (positional ROM, no --launcher).
 void set_cart_direct_argv(LaunchPlan& plan, const Title& title) {
     plan.argv.clear();
@@ -469,6 +538,36 @@ LaunchResult launch_title(const Paths& paths, const Title& title, const LaunchOp
         return result;
     }
 
+    // Point [memcard] / cart slots at the shared saves/ tree (RomM sync + picker)
+    // before staging rom.cfg — GBA launcher sidecars need the resolved save path.
+    {
+        auto bind =
+            bind_recomp_save_paths(paths, title, result.plan.use_wine, result.plan.save_path);
+        if (bind.ok) {
+            if (result.plan.save_path.empty() && !bind.active_save.empty())
+                result.plan.save_path = bind.active_save;
+            if (!is_disc_platform(title.platform) && !result.plan.save_path.empty()) {
+                const bool has_flag = std::find(result.plan.argv.begin(), result.plan.argv.end(),
+                                                "--save-path") != result.plan.argv.end();
+                if (!has_flag) append_save_path_argv(result.plan, title);
+            }
+            if (!bind.message.empty())
+                result.plan.message += "  saves:  " + bind.message + "\n";
+        } else if (!bind.message.empty()) {
+            result.plan.message += "  warning: " + bind.message + "\n";
+        }
+    }
+
+    // GBA: install-local library.gba + library.sav so the recomp launcher Save
+    // row (which derives <rom>.sav and ignores --save-path) sees the managed file.
+    {
+        std::string note;
+        if (stage_gba_launcher_sidecars(result.plan, title, &note) && !note.empty())
+            result.plan.message += "  stage:  " + note + "\n";
+        else if (!note.empty())
+            result.plan.message += "  warning: " + note + "\n";
+    }
+
     if (!result.plan.staged_bios_cfg.empty() && !result.plan.bios_path.empty()) {
         std::string err;
         if (!write_text_file(result.plan.staged_bios_cfg,
@@ -479,8 +578,10 @@ LaunchResult launch_title(const Paths& paths, const Title& title, const LaunchOp
     }
     if (!result.plan.staged_cfg.empty() && !result.plan.media_path.empty()) {
         std::string err;
-        const std::string guest_media =
-            path_for_guest(result.plan.media_path, result.plan.use_wine);
+        const fs::path cfg_media =
+            !result.plan.staged_rom_link.empty() ? result.plan.staged_rom_link
+                                                 : result.plan.media_path;
+        const std::string guest_media = path_for_guest(cfg_media, result.plan.use_wine);
         if (!write_text_file(result.plan.staged_cfg, guest_media, &err)) {
             // Cart + --launcher seeds ONLY via rom.cfg. A stale file (often the
             // .exe path left by a prior root-owned install) causes Wrong ROM.
@@ -515,27 +616,6 @@ LaunchResult launch_title(const Paths& paths, const Title& title, const LaunchOp
                 path_for_guest(result.plan.bios_path, result.plan.use_wine),
                 path_for_guest(result.plan.media_path, result.plan.use_wine), &err)) {
             result.plan.message += "  warning: " + err + "\n";
-        }
-    }
-
-    // Point [memcard] / cart slots at the shared saves/ tree (RomM sync + picker).
-    {
-        auto bind =
-            bind_recomp_save_paths(paths, title, result.plan.use_wine, result.plan.save_path);
-        if (bind.ok) {
-            if (!bind.active_save.empty() && result.plan.save_path.empty())
-                result.plan.save_path = bind.active_save;
-            // Rebuild argv so --save-path reflects the activated file when bind
-            // resolved a preferred id that plan_launch could not yet expand.
-            if (!is_disc_platform(title.platform) && !result.plan.save_path.empty()) {
-                const bool has_flag = std::find(result.plan.argv.begin(), result.plan.argv.end(),
-                                                "--save-path") != result.plan.argv.end();
-                if (!has_flag) append_save_path_argv(result.plan, title);
-            }
-            if (!bind.message.empty())
-                result.plan.message += "  saves:  " + bind.message + "\n";
-        } else if (!bind.message.empty()) {
-            result.plan.message += "  warning: " + bind.message + "\n";
         }
     }
 

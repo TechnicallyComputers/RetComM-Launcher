@@ -1,0 +1,227 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version label (e.g. 0.1.0). Tags use the tag without leading v."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  SDL_TAG: "release-3.2.16"
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.version }}" ]]; then
+            VER="${{ inputs.version }}"
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+            VER="${{ github.ref_name }}"
+            VER="${VER#v}"
+          else
+            VER="0.0.0-ci.${{ github.run_number }}"
+          fi
+          echo "version=${VER}" >> "$GITHUB_OUTPUT"
+          echo "Building RetComM ${VER}"
+
+  linux:
+    needs: version
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build pkg-config \
+            libcurl4-openssl-dev libgl1-mesa-dev \
+            librsvg2-bin zip curl ca-certificates \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev \
+            libxi-dev libxinerama-dev libxss-dev libwayland-dev \
+            libxkbcommon-dev libasound2-dev libpulse-dev \
+            libibus-1.0-dev libudev-dev
+
+      - name: Build icons
+        run: |
+          chmod +x packaging/make-icons.sh packaging/linux/*.sh
+          ./packaging/make-icons.sh
+
+      - name: Build SDL3
+        run: |
+          git clone --depth 1 --branch "${SDL_TAG}" https://github.com/libsdl-org/SDL.git "$HOME/SDL"
+          cmake -G Ninja -S "$HOME/SDL" -B "$HOME/sdl-build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$HOME/sdl3" \
+            -DSDL_SHARED=ON \
+            -DSDL_STATIC=OFF
+          cmake --build "$HOME/sdl-build" -j"$(nproc)"
+          cmake --install "$HOME/sdl-build"
+
+      - name: Configure & build RetComM
+        run: |
+          cmake -G Ninja -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/out" \
+            -DCMAKE_PREFIX_PATH="$HOME/sdl3" \
+            -DRETCOMM_VERSION="${{ needs.version.outputs.version }}" \
+            -DRETCOMM_BUNDLE_CATALOG=ON
+          cmake --build build -j"$(nproc)"
+          cmake --install build
+          # Bundle SDL3 next to binaries for the portable zip / AppImage.
+          mkdir -p out/lib
+          cp -a "$HOME/sdl3/lib/"*.so* out/lib/
+
+      - name: Package AppImage + zip
+        run: |
+          export PATH="$HOME/sdl3/bin:$PATH"
+          export LD_LIBRARY_PATH="$HOME/sdl3/lib:${LD_LIBRARY_PATH:-}"
+          ./packaging/linux/build-appimage.sh "$PWD/out" "${{ needs.version.outputs.version }}" x86_64
+          ./packaging/linux/package-zip.sh "$PWD/out" "${{ needs.version.outputs.version }}" x86_64
+          ls -lah dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64
+          path: |
+            dist/RetComM-Launcher-*-linux-x86_64.AppImage
+            dist/RetComM-Launcher-*-linux-x86_64.zip
+
+  windows:
+    needs: version
+    runs-on: windows-latest
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}/vcpkg
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git $env:VCPKG_ROOT
+          & "$env:VCPKG_ROOT\bootstrap-vcpkg.bat" -disableMetrics
+          Set-Location $env:GITHUB_WORKSPACE
+          & "$env:VCPKG_ROOT\vcpkg.exe" install --triplet x64-windows
+
+      - name: Build icons
+        shell: bash
+        run: |
+          chmod +x packaging/make-icons.sh
+          ./packaging/make-icons.sh
+
+      - name: Configure & build
+        shell: bash
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DCMAKE_INSTALL_PREFIX="$PWD/out" \
+            -DRETCOMM_VERSION="${{ needs.version.outputs.version }}" \
+            -DRETCOMM_BUNDLE_CATALOG=ON
+          cmake --build build --config Release -j
+          cmake --install build --config Release
+
+      - name: Package zip
+        shell: pwsh
+        run: |
+          $candidates = @(
+            (Join-Path $env:GITHUB_WORKSPACE "vcpkg_installed\x64-windows\bin"),
+            (Join-Path $env:VCPKG_ROOT "installed\x64-windows\bin")
+          )
+          $bin = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $bin) { throw "vcpkg bin dir not found" }
+          ./packaging/windows/package.ps1 `
+            -Prefix "$PWD/out" `
+            -Version "${{ needs.version.outputs.version }}" `
+            -VcpkgBin $bin `
+            -Arch x64
+          Get-ChildItem dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/RetComM-Launcher-*-windows-x64.zip
+
+  macos:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            arch: arm64
+          - os: macos-13
+            arch: x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          brew update
+          brew install cmake ninja sdl3 curl librsvg || brew install cmake ninja sdl3 curl
+          chmod +x packaging/make-icons.sh packaging/macos/build-app.sh
+
+      - name: Build icons
+        run: ./packaging/make-icons.sh
+
+      - name: Configure & build
+        run: |
+          cmake -G Ninja -S . -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$PWD/out" \
+            -DRETCOMM_VERSION="${{ needs.version.outputs.version }}" \
+            -DRETCOMM_BUNDLE_CATALOG=ON \
+            -DCMAKE_OSX_ARCHITECTURES="${{ matrix.arch }}"
+          cmake --build build -j"$(sysctl -n hw.ncpu)"
+          cmake --install build
+          # Smoke-check hub linked.
+          file out/bin/retcomm-hub
+          otool -L out/bin/retcomm-hub | head
+
+      - name: Package .app zip
+        run: |
+          ./packaging/macos/build-app.sh "$PWD/out" "${{ needs.version.outputs.version }}" "${{ matrix.arch }}"
+          ls -lah dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/RetComM-Launcher-*-macos-${{ matrix.arch }}.zip
+
+  publish:
+    needs: [version, linux, windows, macos]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts
+        run: |
+          mkdir -p dist
+          find artifacts -type f \( -name '*.AppImage' -o -name '*.zip' \) -exec cp -v {} dist/ \;
+          ls -lah dist/
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: RetComM Launcher ${{ needs.version.outputs.version }}
+          generate_release_notes: true
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -35,6 +35,7 @@ enum class HubJob : int {
     FetchRommBios,
     SyncRommSaves,
     SyncRommStates,
+    SelfUpdate,
 };
 
 struct TitleRow {
@@ -110,10 +111,12 @@ struct HubModel {
     std::string status;
     std::string log;
     std::atomic<bool> job_running{false};
+    std::atomic<bool> request_exit{false}; // set after self-update schedules restart
     HubJob job = HubJob::None;
     std::string job_title_id;
     bool job_force_boxart = false; // FetchBoxart: re-download even when cached
     std::thread worker;
+    std::string launcher_version; // display: installed/current tag
 
     void refresh_rows(bool check_updates);
     void append_log(const std::string& line);

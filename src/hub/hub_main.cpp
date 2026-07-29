@@ -4,6 +4,7 @@
 
 #include "retcomm/config.hpp"
 #include "retcomm/paths.hpp"
+#include "retcomm/self_update.hpp"
 
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
@@ -557,6 +558,17 @@ void draw_sidebar_actions(HubModel& hub, const Theme& th) {
         hub.refresh_rows(false);
         hub.set_status("Refreshed");
     }
+    ImGui::Dummy(ImVec2(0, 10));
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0, 4));
+    if (ImGui::Button("Update RetComM", ImVec2(-1, 0))) hub.start_job(HubJob::SelfUpdate);
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    {
+        std::string ver = hub.launcher_version;
+        if (ver.empty()) ver = retcomm::retcomm_installed_tag(hub.paths);
+        ImGui::TextWrapped("Launcher %s", ver.c_str());
+    }
+    ImGui::PopStyleColor();
     ImGui::EndDisabled();
 
     // Confirmation modals (must be outside BeginDisabled so they stay interactive).
@@ -678,6 +690,7 @@ int main(int argc, char** argv) {
     } catch (const std::exception& e) {
         hub.append_log(std::string("catalog error: ") + e.what());
     }
+    hub.launcher_version = retcomm::retcomm_installed_tag(hub.paths);
     hub.refresh_rows(false);
     hub.set_status("Ready");
     // Fill missing covers in the background (Libretro by default, RomM if Sync Boxart).
@@ -694,6 +707,7 @@ int main(int argc, char** argv) {
                 e.window.windowID == SDL_GetWindowID(window))
                 running = false;
         }
+        if (hub.request_exit.load()) running = false;
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();

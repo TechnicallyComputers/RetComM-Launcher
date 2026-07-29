@@ -4,6 +4,7 @@
 #include "retcomm/romm_fetch.hpp"
 #include "retcomm/romm_saves.hpp"
 #include "retcomm/romscan.hpp"
+#include "retcomm/self_update.hpp"
 
 #include <cstring>
 #include <sstream>
@@ -546,6 +547,33 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 append_log(sr.message);
                 set_status(sr.ok ? ("Savestate sync complete: " + title_id)
                                  : ("Savestate sync failed: " + title_id));
+                break;
+            }
+            case HubJob::SelfUpdate: {
+                set_status("Checking RetComM Launcher updates…");
+                append_log("Self-update: current=" + retcomm_installed_tag(paths) +
+                           " repo=" + retcomm_github_slug());
+                auto ur = self_update_retcomm(paths, {});
+                append_log(ur.message);
+                {
+                    std::lock_guard<std::mutex> lock(mu);
+                    launcher_version = ur.latest_tag.empty() ? retcomm_installed_tag(paths)
+                                                             : ur.latest_tag;
+                    if (ur.skipped) launcher_version = ur.current_tag;
+                }
+                if (ur.ok && ur.restart_scheduled) {
+                    set_status("Updating RetComM — restarting…");
+                    request_exit.store(true);
+                    job_running = false;
+                    job = HubJob::None;
+                    return;
+                }
+                if (ur.ok && ur.skipped)
+                    set_status("RetComM up to date (" + ur.current_tag + ")");
+                else if (ur.ok)
+                    set_status("RetComM update complete");
+                else
+                    set_status("RetComM update failed");
                 break;
             }
             case HubJob::None:

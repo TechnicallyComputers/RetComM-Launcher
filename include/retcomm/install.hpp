@@ -94,6 +94,9 @@ UninstallResult uninstall_title(const Paths& paths, const Title& title,
 std::string fetch_latest_release_tag(const std::string& github_slug, std::string* error = nullptr,
                                      bool allow_prerelease = false);
 
+// Extract zip/tar/7z into dest (creates dest). Used by install + self-update.
+bool extract_archive_to(const fs::path& archive, const fs::path& dest, std::string* error = nullptr);
+
 // Wine helpers for Linux / macOS fallback installs.
 bool host_supports_wine();
 std::string resolve_wine_binary(std::string* error = nullptr);

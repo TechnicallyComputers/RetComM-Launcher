@@ -1,0 +1,8 @@
+{
+  "name": "retcomm-launcher",
+  "version-string": "0.1.1",
+  "dependencies": [
+    "curl",
+    "sdl3"
+  ]
+}

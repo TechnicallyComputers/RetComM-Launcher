@@ -37,14 +37,29 @@ each recomp/decomp exe    →  recomp-ui (settings + PLAY)
 cmake -G Ninja -S . -B build
 cmake --build build -j
 ./build/retcomm --help
-./build/retcomm-hub   # SDL3 + ImGui dashboard (needs sibling ../recomp-ui ImGui)
+./build/retcomm-hub   # SDL3 + ImGui dashboard
 ```
 
 Requires CMake 3.24+, a C++17 compiler, and **libcurl**. Archive tools used at
 runtime: `bsdtar` (preferred), `unzip`, or `7z`. Optional `GITHUB_TOKEN` /
 `GH_TOKEN` raises GitHub API rate limits. Hub UI needs system **SDL3** + OpenGL
-and Dear ImGui from a sibling `../recomp-ui` checkout. Wine installs need
-`wine` or `wine64` on `PATH`.
+and Dear ImGui (sibling `../recomp-ui` checkout, or CMake FetchContent). Wine
+installs need `wine` or `wine64` on `PATH`.
+
+### Release packages (CI)
+
+Push a `v*` tag (or run the **Release** workflow manually) to build:
+
+| Artifact | Platform |
+|---|---|
+| `RetComM-Launcher-<ver>-linux-x86_64.AppImage` | Linux |
+| `RetComM-Launcher-<ver>-linux-x86_64.zip` | Linux (self-update) |
+| `RetComM-Launcher-<ver>-windows-x64.zip` | Windows |
+| `RetComM-Launcher-<ver>-macos-arm64.zip` | macOS Apple Silicon (`.app`) |
+| `RetComM-Launcher-<ver>-macos-x86_64.zip` | macOS Intel (`.app`) |
+
+Packaging scripts live under `packaging/`; the generic icon is `assets/retcomm.svg`
+(rasterized by `packaging/make-icons.sh`).
 
 ## Quick start
 
@@ -118,7 +133,10 @@ catalog/                shipped title manifests + index
 docs/                   architecture + catalog schema
 src/                    CLI + core libraries
 include/retcomm/        public headers
-third_party/            nlohmann/json (single header)
+third_party/            nlohmann/json + stb
+assets/                 app icon (SVG / PNG)
+packaging/              AppImage, macOS .app, Windows zip helpers
+.github/workflows/      Release CI
 ```
 
 ## Data dirs
