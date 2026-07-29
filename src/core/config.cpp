@@ -120,6 +120,13 @@ AppConfig load_app_config(const fs::path& config_path) {
         if (j.contains("prefer_local_boxart"))
             cfg.prefer_local_boxart = j.value("prefer_local_boxart", false);
 
+        if (j.contains("catalog") && j.at("catalog").is_object()) {
+            const auto& c = j.at("catalog");
+            cfg.catalog.url = c.value("url", "");
+            cfg.catalog.github_repo = c.value("github_repo", "");
+            cfg.catalog.auto_update = c.value("auto_update", true);
+        }
+
         if (j.contains("romm") && j.at("romm").is_object()) {
             const auto& r = j.at("romm");
             cfg.romm.base_url = r.value("base_url", "");
@@ -154,6 +161,10 @@ bool save_app_config(const fs::path& config_path, const AppConfig& cfg, std::str
               {"platform_folders", folders},
               {"exclude_dirs", cfg.exclude_dirs},
               {"prefer_local_boxart", cfg.prefer_local_boxart},
+              {"catalog",
+               {{"url", cfg.catalog.url},
+                {"github_repo", cfg.catalog.github_repo},
+                {"auto_update", cfg.catalog.auto_update}}},
               {"romm",
                {{"base_url", cfg.romm.base_url},
                 {"api_token", cfg.romm.api_token},

@@ -17,10 +17,13 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(RETCOMM_VERSION "0.1.1" CACHE STRING "RetComM Launcher semantic version")
 set(RETCOMM_GITHUB_SLUG "TechnicallyComputers/RetComM-Launcher" CACHE STRING
     "GitHub owner/repo used for self-update")
+set(RETCOMM_CATALOG_GITHUB_REPO "TechnicallyComputers/retcomm-catalog" CACHE STRING
+    "GitHub owner/repo for the title catalog")
+set(RETCOMM_CATALOG_DOWNLOAD_URL
+    "https://github.com/TechnicallyComputers/retcomm-catalog/releases/latest/download/catalog.zip"
+    CACHE STRING "Default catalog.zip download URL")
 
 # Portable installs: look next to the binary first; baked path is a dev fallback.
-option(RETCOMM_BUNDLE_CATALOG "Install catalog beside binaries (release layout)" ON)
-
 find_package(CURL REQUIRED)
 
 set(RETCOMM_CORE_SOURCES
@@ -29,6 +32,7 @@ set(RETCOMM_CORE_SOURCES
     src/core/config.cpp
     src/core/app_state.cpp
     src/catalog/catalog.cpp
+    src/catalog/catalog_sync.cpp
     src/romscan/romscan.cpp
     src/library/library_index.cpp
     src/bios/bios_index.cpp
@@ -47,9 +51,10 @@ target_include_directories(retcomm_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
 target_compile_definitions(retcomm_core PUBLIC
-    "RETCOMM_CATALOG_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/catalog\""
     "RETCOMM_VERSION=\"${RETCOMM_VERSION}\""
     "RETCOMM_GITHUB_SLUG=\"${RETCOMM_GITHUB_SLUG}\""
+    "RETCOMM_CATALOG_GITHUB_REPO=\"${RETCOMM_CATALOG_GITHUB_REPO}\""
+    "RETCOMM_CATALOG_DOWNLOAD_URL=\"${RETCOMM_CATALOG_DOWNLOAD_URL}\""
 )
 target_link_libraries(retcomm_core PUBLIC CURL::libcurl)
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
@@ -156,11 +161,6 @@ else()
 endif()
 
 install(TARGETS retcomm RUNTIME DESTINATION bin)
-if(RETCOMM_BUNDLE_CATALOG)
-    # Release layout: catalog/ next to binaries (also under share/ for FHS).
-    install(DIRECTORY catalog/ DESTINATION catalog)
-endif()
-install(DIRECTORY catalog/ DESTINATION share/retcomm/catalog)
 install(FILES assets/retcomm.svg DESTINATION share/icons/hicolor/scalable/apps
         RENAME retcomm.svg)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/retcomm.png")

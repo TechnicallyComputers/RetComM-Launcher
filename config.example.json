@@ -1,6 +1,6 @@
 {
-  "library_root": "/mnt/crucial4tb/Emulation/roms",
-  "bios_root": "/mnt/crucial4tb/Emulation/bios",
+  "library_root": "D:/Emulation/roms",
+  "bios_root": "D:/Emulation/bios",
   "platform_folders": {
     "snes": ["snes"],
     "n64": ["n64"],
@@ -10,8 +10,13 @@
   },
   "exclude_dirs": ["torrents", "emulators"],
   "prefer_local_boxart": false,
+  "catalog": {
+    "url": "https://github.com/TechnicallyComputers/retcomm-catalog/releases/latest/download/catalog.zip",
+    "github_repo": "TechnicallyComputers/retcomm-catalog",
+    "auto_update": true
+  },
   "romm": {
-    "base_url": "https://your-romm.example",
+    "base_url": "https://your-romm.example.com",
     "api_token": "",
     "sync_boxart": false
   }

@@ -1,7 +1,31 @@
-# Catalog schema
+# Catalog
 
-RetComM ships a directory of JSON manifests. `index.json` lists title ids;
-each `titles/<id>.json` describes one supported recomp/decomp.
+RetComM does **not** ship title manifests. The canonical list lives in
+[`retcomm-catalog`](https://github.com/TechnicallyComputers/retcomm-catalog).
+The launcher downloads `catalog.zip` from the latest release into an on-device
+cache and refreshes it from there.
+
+| Source | Location |
+|---|---|
+| On-device cache | `~/.local/share/retcomm/catalog/` |
+| Optional override | `--catalog DIR` or `$RETCOMM_CATALOG` |
+
+Refresh with `retcomm catalog update` / `--force`, or **Refresh catalog** in the
+hub. On first run (empty cache), the launcher always fetches the catalog (needs
+network). When `catalog.auto_update` is true (default), a stale cache is
+refreshed on startup (about every 24 hours).
+
+Optional `config.json`:
+
+```json
+"catalog": {
+  "url": "https://github.com/TechnicallyComputers/retcomm-catalog/releases/latest/download/catalog.zip",
+  "github_repo": "TechnicallyComputers/retcomm-catalog",
+  "auto_update": true
+}
+```
+
+**Resolution order:** `--catalog DIR` → `$RETCOMM_CATALOG` → on-device cache.
 
 ## `index.json`
 
@@ -89,8 +113,14 @@ subset without schema churn:
 
 ## Adding a title
 
-1. Create `catalog/titles/<id>.json`.
-2. Append `"<id>"` to `catalog/index.json` → `titles`.
+Submit via the
+[catalog submission form](https://technicallycomputers.github.io/retcomm-catalog/submit/)
+(GitHub login; maintainers approve before publish), or open a PR on
+[`retcomm-catalog`](https://github.com/TechnicallyComputers/retcomm-catalog)
+(not this repo):
+
+1. Create `titles/<id>.json` in that repo.
+2. Append `"<id>"` to `index.json` → `titles`.
 3. Fill `rom_identity` from the game's launcher gate / README baserom table
    (prefer publishing every digest you know; leave unused keys as `[]`).
 4. Point `release.github` at the shipping repo once releases exist.

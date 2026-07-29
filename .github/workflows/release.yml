@@ -1,15 +1,19 @@
 name: Release
 
+# Manual only — does not run on push/PR. Creates tag v<version> and publishes
+# GitHub Release assets after a successful multi-platform build.
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       version:
-        description: "Version label (e.g. 0.1.0). Tags use the tag without leading v."
+        description: "Semver without leading v (e.g. 0.1.2). Empty = RETCOMM_VERSION from CMakeLists.txt"
         required: false
         default: ""
+      prerelease:
+        description: "Mark GitHub release as prerelease"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -22,20 +26,33 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
     steps:
+      - uses: actions/checkout@v4
+
       - id: v
         shell: bash
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.version }}" ]]; then
+          set -euo pipefail
+          if [[ -n "${{ inputs.version }}" ]]; then
             VER="${{ inputs.version }}"
-          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
-            VER="${{ github.ref_name }}"
-            VER="${VER#v}"
           else
-            VER="0.0.0-ci.${{ github.run_number }}"
+            VER="$(sed -n 's/.*set(RETCOMM_VERSION "\([^"]*\)".*/\1/p' CMakeLists.txt | head -1)"
+            if [[ -z "$VER" ]]; then
+              echo "Could not read RETCOMM_VERSION from CMakeLists.txt" >&2
+              exit 1
+            fi
           fi
+          # Normalize: strip a leading v if the operator typed one.
+          VER="${VER#v}"
+          if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
+            echo "Invalid version: ${VER} (expected semver like 0.1.2)" >&2
+            exit 1
+          fi
+          TAG="v${VER}"
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
-          echo "Building RetComM ${VER}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Building RetComM ${VER} (tag ${TAG})"
 
   linux:
     needs: version
@@ -77,8 +94,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$PWD/out" \
             -DCMAKE_PREFIX_PATH="$HOME/sdl3" \
-            -DRETCOMM_VERSION="${{ needs.version.outputs.version }}" \
-            -DRETCOMM_BUNDLE_CATALOG=ON
+            -DRETCOMM_VERSION="${{ needs.version.outputs.version }}"
           cmake --build build -j"$(nproc)"
           cmake --install build
           # Bundle SDL3 next to binaries for the portable zip / AppImage.
@@ -131,8 +147,7 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="${RETCOMM_VCPKG}/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_TARGET_TRIPLET=x64-windows \
             -DCMAKE_INSTALL_PREFIX="$PWD/out" \
-            -DRETCOMM_VERSION="${{ needs.version.outputs.version }}" \
-            -DRETCOMM_BUNDLE_CATALOG=ON
+            -DRETCOMM_VERSION="${{ needs.version.outputs.version }}"
           cmake --build build --config Release -j
           cmake --install build --config Release
 
@@ -190,7 +205,6 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$PWD/out" \
             -DRETCOMM_VERSION="${{ needs.version.outputs.version }}" \
-            -DRETCOMM_BUNDLE_CATALOG=ON \
             -DCMAKE_OSX_ARCHITECTURES="${{ matrix.arch }}"
           cmake --build build -j"$(sysctl -n hw.ncpu)"
           cmake --install build
@@ -211,8 +225,11 @@ jobs:
   publish:
     needs: [version, linux, windows, macos]
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -222,12 +239,34 @@ jobs:
           mkdir -p dist
           find artifacts -type f \( -name '*.AppImage' -o -name '*.zip' \) -exec cp -v {} dist/ \;
           ls -lah dist/
+          test -n "$(ls -A dist)" || { echo "No release artifacts found" >&2; exit 1; }
+
+      - name: Ensure release tag exists
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            echo "Tag ${TAG} already exists locally (from fetch)."
+          elif git ls-remote --tags origin "refs/tags/${TAG}" | grep -q .; then
+            echo "Tag ${TAG} already exists on origin."
+            git fetch origin "refs/tags/${TAG}:refs/tags/${TAG}"
+          else
+            echo "Creating annotated tag ${TAG} at ${GITHUB_SHA}"
+            git tag -a "${TAG}" "${GITHUB_SHA}" -m "RetComM Launcher ${VERSION}"
+            git push origin "refs/tags/${TAG}"
+          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ needs.version.outputs.tag }}
           name: RetComM Launcher ${{ needs.version.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ inputs.prerelease }}
           generate_release_notes: true
           files: dist/*
         env:

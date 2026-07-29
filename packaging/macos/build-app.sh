@@ -20,13 +20,7 @@ mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources" "${OUT_DIR}"
 
 install -m 755 "${PREFIX}/bin/retcomm" "${APP}/Contents/MacOS/retcomm"
 install -m 755 "${PREFIX}/bin/retcomm-hub" "${APP}/Contents/MacOS/retcomm-hub"
-
-# Catalog beside the hub binary (resolve_catalog_dir).
-if [[ -d "${PREFIX}/catalog" ]]; then
-  cp -a "${PREFIX}/catalog" "${APP}/Contents/MacOS/catalog"
-elif [[ -d "${PREFIX}/share/retcomm/catalog" ]]; then
-  cp -a "${PREFIX}/share/retcomm/catalog" "${APP}/Contents/MacOS/catalog"
-fi
+# Title catalog is fetched on-device (~/.local/share/retcomm/catalog); not bundled.
 
 sed "s|@VERSION@|${VERSION}|g" "${ROOT}/packaging/macos/Info.plist.in" \
   > "${APP}/Contents/Info.plist"

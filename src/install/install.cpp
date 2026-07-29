@@ -231,8 +231,10 @@ bool extract_archive(const fs::path& archive, const fs::path& dest, std::string*
     std::string err;
 
     // Prefer bsdtar (libarchive) — handles zip/tar/7z well on many systems.
+    // --no-same-owner avoids failures when the archive records UIDs we can't set.
     if (run_cmd("command -v bsdtar >/dev/null 2>&1") == 0) {
-        const std::string cmd = "bsdtar -xf " + shell_quote(archive) + " -C " + shell_quote(dest);
+        const std::string cmd = "bsdtar --no-same-owner -xf " + shell_quote(archive) +
+                                " -C " + shell_quote(dest);
         if (run_cmd(cmd, &err) == 0) return true;
     }
     if (ends_with_ci(name, ".zip") && run_cmd("command -v unzip >/dev/null 2>&1") == 0) {

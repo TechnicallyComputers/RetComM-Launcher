@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # AppImage entry — launch the hub UI (CLI is still on PATH as retcomm).
+# Title catalog is maintained under ~/.local/share/retcomm/catalog (fetched on use).
 set -euo pipefail
 HERE="$(dirname "$(readlink -f "$0")")"
 export PATH="${HERE}/usr/bin:${PATH}"
-export RETCOMM_CATALOG="${HERE}/usr/share/retcomm/catalog"
 # Prefer bundled libs when present.
 if [[ -d "${HERE}/usr/lib" ]]; then
   export LD_LIBRARY_PATH="${HERE}/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

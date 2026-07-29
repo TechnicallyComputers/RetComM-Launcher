@@ -19,7 +19,7 @@ each recomp/decomp exe    →  recomp-ui (settings + PLAY)
 
 | Piece | State |
 |---|---|
-| Title catalog (JSON manifests) | Working (27 titles) |
+| Title catalog (JSON manifests) | Working (remote cache + bundled fallback) |
 | CLI: `list` / `scan` / `status` / `config` | Working |
 | RomM-style library scan (platform folders) | Working |
 | Local ROM scan + CRC/SHA-1 match | Working |
@@ -48,7 +48,12 @@ installs need `wine` or `wine64` on `PATH`.
 
 ### Release packages (CI)
 
-Push a `v*` tag (or run the **Release** workflow manually) to build:
+Releases are **manual only** (Actions → **Release** → Run workflow). The workflow
+does not run on push. It builds all platforms, creates tag `v<version>` if needed,
+and publishes a GitHub Release with the zips/AppImage.
+
+- **Version** input empty → uses `RETCOMM_VERSION` from `CMakeLists.txt`
+- Optional **prerelease** checkbox for pre-release tags
 
 | Artifact | Platform |
 |---|---|
@@ -64,8 +69,12 @@ Packaging scripts live under `packaging/`; the generic icon is `assets/retcomm.s
 ## Quick start
 
 ```sh
-# List supported titles shipped in catalog/
+# List supported titles (from on-device catalog cache)
 ./build/retcomm list
+
+# Refresh title list from retcomm-catalog (fetched on first run; auto-update on by default)
+./build/retcomm catalog update
+# ./build/retcomm catalog update --force
 
 # Configure a RomM/ES-style library (see config.example.json)
 mkdir -p ~/.config/retcomm
@@ -129,8 +138,7 @@ to ignore the cache, rehash everything, drop vanished files, and rebuild matches
 ## Layout
 
 ```
-catalog/                shipped title manifests + index
-docs/                   architecture + catalog schema
+docs/                   architecture + catalog schema notes
 src/                    CLI + core libraries
 include/retcomm/        public headers
 third_party/            nlohmann/json + stb
@@ -139,12 +147,40 @@ packaging/              AppImage, macOS .app, Windows zip helpers
 .github/workflows/      Release CI
 ```
 
+## Catalog
+
+Supported titles are maintained in
+[`retcomm-catalog`](https://github.com/TechnicallyComputers/retcomm-catalog)
+— not in this repo. The launcher downloads `catalog.zip` from the latest release
+into `~/.local/share/retcomm/catalog/` and keeps that cache on-device. First run
+(or an empty cache) always fetches; afterward, `auto_update` refreshes about
+every 24 hours.
+
+```sh
+./build/retcomm catalog update
+./build/retcomm catalog update --force   # ignore 24h freshness
+```
+
+In **retcomm-hub**, use **Refresh catalog**. Optional `config.json` block:
+
+```json
+"catalog": {
+  "url": "https://github.com/TechnicallyComputers/retcomm-catalog/releases/latest/download/catalog.zip",
+  "github_repo": "TechnicallyComputers/retcomm-catalog",
+  "auto_update": true
+}
+```
+
+Overrides: `--catalog DIR`, `$RETCOMM_CATALOG`. Resolution order: override →
+env → on-device cache.
+
 ## Data dirs
 
 | Role | Linux |
 |---|---|
 | Config | `~/.config/retcomm/` |
 | Installs + state | `~/.local/share/retcomm/` |
+| Catalog cache | `~/.local/share/retcomm/catalog/` |
 | Catalog override | `$RETCOMM_CATALOG` or `--catalog DIR` |
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and

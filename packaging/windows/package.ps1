@@ -28,11 +28,7 @@ Get-ChildItem -Path $PrefixBin -Filter "*.dll" -ErrorAction SilentlyContinue | F
     Copy-Item $_.FullName $Stage -Force
 }
 
-$CatalogSrc = Join-Path $Prefix "catalog"
-if (-not (Test-Path $CatalogSrc)) {
-    $CatalogSrc = Join-Path $Prefix "share\retcomm\catalog"
-}
-Copy-Item -Recurse $CatalogSrc (Join-Path $Stage "catalog")
+# Title catalog is fetched on-device; not bundled in the zip.
 
 function Copy-RuntimeDlls([string]$Dir) {
     if (-not $Dir -or -not (Test-Path $Dir)) { return 0 }

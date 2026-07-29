@@ -16,15 +16,17 @@ struct Paths {
     fs::path config_path;         // config_dir/config.json
     fs::path library_index_path;  // data_dir/library-index.json
     fs::path bios_index_path;     // data_dir/bios-index.json
+    fs::path catalog_dir;         // data_dir/catalog (remote catalog cache)
 };
 
 Paths default_paths();
 void ensure_dirs(const Paths& p);
 
-// Resolve catalog directory: --catalog, $RETCOMM_CATALOG, then next to the exe
-// (../catalog when running from build/), then compile-time RETCOMM_CATALOG_DIR.
+// Resolve catalog directory: --catalog, $RETCOMM_CATALOG, then on-device cache
+// under paths->catalog_dir (~/.local/share/retcomm/catalog). No bundled catalog.
 fs::path resolve_catalog_dir(const fs::path& exe_dir,
-                             const fs::path& override_dir = {});
+                             const fs::path& override_dir = {},
+                             const Paths* paths = nullptr);
 
 std::string host_os_key(); // "linux" | "windows" | "macos"
 

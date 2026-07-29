@@ -5,6 +5,7 @@
 #include "retcomm/romm_saves.hpp"
 #include "retcomm/romscan.hpp"
 #include "retcomm/self_update.hpp"
+#include "retcomm/catalog_sync.hpp"
 
 #include <cstring>
 #include <sstream>
@@ -576,6 +577,29 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     set_status("RetComM update failed");
                 break;
             }
+            case HubJob::RefreshCatalog: {
+                set_status("Refreshing catalog…");
+                append_log("Catalog refresh: url=" +
+                           (cfg.catalog.url.empty() ? default_catalog_download_url()
+                                                    : cfg.catalog.url));
+                auto cr = sync_remote_catalog(paths, cfg, true);
+                append_log(cr.message);
+                if (!cr.ok) {
+                    set_status("Catalog refresh failed");
+                    break;
+                }
+                try {
+                    catalog = load_catalog(paths.catalog_dir);
+                    append_log("Catalog loaded: " + paths.catalog_dir.string() + " (" +
+                               std::to_string(catalog.titles.size()) + " titles)");
+                    set_status("Catalog refreshed (" + std::to_string(catalog.titles.size()) +
+                               " titles)");
+                } catch (const std::exception& e) {
+                    append_log(std::string("catalog reload failed: ") + e.what());
+                    set_status("Catalog refresh failed — reload error");
+                }
+                break;
+            }
             case HubJob::None:
                 break;
             }
@@ -622,7 +646,47 @@ void HubModel::open_settings() {
     }
     settings.dirty = false;
     show_romm_settings = false;
+    show_setup = false;
     show_settings = true;
+}
+
+void HubModel::open_setup() {
+    // Reuse the same draft buffers as Library settings.
+    cfg = load_app_config(paths.config_path);
+    copy_buf(settings.library_root, sizeof(settings.library_root), cfg.library_root.string());
+    copy_buf(settings.bios_root, sizeof(settings.bios_root), cfg.bios_root.string());
+    copy_buf(settings.exclude_dirs, sizeof(settings.exclude_dirs), join_csv(cfg.exclude_dirs));
+    settings.prefer_local_boxart = cfg.prefer_local_boxart;
+    settings.platform_folders.clear();
+    settings.dirty = false;
+    show_settings = false;
+    show_romm_settings = false;
+    show_setup = true;
+}
+
+void HubModel::apply_pending_folder_pick() {
+    std::string path;
+    FolderPickTarget target = FolderPickTarget::None;
+    {
+        std::lock_guard<std::mutex> lock(folder_pick_mu);
+        if (folder_pick_path.empty()) return;
+        path = std::move(folder_pick_path);
+        folder_pick_path.clear();
+        target = folder_pick_target;
+        folder_pick_target = FolderPickTarget::None;
+        folder_pick_busy = false;
+    }
+    if (path.empty() || target == FolderPickTarget::None) return;
+
+    if (target == FolderPickTarget::LibraryRoot) {
+        copy_buf(settings.library_root, sizeof(settings.library_root), path);
+        settings.dirty = true;
+        set_status("Library folder selected");
+    } else if (target == FolderPickTarget::BiosRoot) {
+        copy_buf(settings.bios_root, sizeof(settings.bios_root), path);
+        settings.dirty = true;
+        set_status("BIOS folder selected");
+    }
 }
 
 void HubModel::add_platform_folder_row() {
@@ -640,12 +704,15 @@ bool HubModel::save_settings(std::string* error) {
     next.exclude_dirs = split_csv(settings.exclude_dirs);
     next.prefer_local_boxart = settings.prefer_local_boxart;
 
-    next.platform_folders.clear();
-    for (const auto& row : settings.platform_folders) {
-        if (row.platform[0] == '\0') continue;
-        auto folders = split_csv(row.folders);
-        if (folders.empty()) continue;
-        next.platform_folders[row.platform] = std::move(folders);
+    // Setup wizard leaves platform_folders empty — keep whatever was already in cfg.
+    if (!settings.platform_folders.empty()) {
+        next.platform_folders.clear();
+        for (const auto& row : settings.platform_folders) {
+            if (row.platform[0] == '\0') continue;
+            auto folders = split_csv(row.folders);
+            if (folders.empty()) continue;
+            next.platform_folders[row.platform] = std::move(folders);
+        }
     }
     next = normalize_config(std::move(next));
 

@@ -36,6 +36,7 @@ enum class HubJob : int {
     SyncRommSaves,
     SyncRommStates,
     SelfUpdate,
+    RefreshCatalog,
 };
 
 struct TitleRow {
@@ -92,6 +93,13 @@ struct RommSettingsDraft {
     bool dirty = false;
 };
 
+// Target buffer for an in-flight SDL folder dialog (callback may be off-thread).
+enum class FolderPickTarget : int {
+    None = 0,
+    LibraryRoot,
+    BiosRoot,
+};
+
 struct HubModel {
     Paths paths;
     AppConfig cfg;
@@ -104,6 +112,7 @@ struct HubModel {
     int selected = 0;
     bool show_settings = false;
     bool show_romm_settings = false;
+    bool show_setup = false; // first-time library/BIOS wizard
     SettingsDraft settings;
     RommSettingsDraft romm_settings;
 
@@ -118,6 +127,12 @@ struct HubModel {
     std::thread worker;
     std::string launcher_version; // display: installed/current tag
 
+    // Native folder picker (SDL_ShowOpenFolderDialog) — apply on main thread.
+    std::mutex folder_pick_mu;
+    FolderPickTarget folder_pick_target = FolderPickTarget::None;
+    std::string folder_pick_path;
+    bool folder_pick_busy = false;
+
     void refresh_rows(bool check_updates);
     void append_log(const std::string& line);
     void set_status(const std::string& s);
@@ -125,6 +140,7 @@ struct HubModel {
     void join_worker();
 
     void open_settings();
+    void open_setup();
     bool save_settings(std::string* error = nullptr);
     void add_platform_folder_row();
 
@@ -134,6 +150,9 @@ struct HubModel {
     // Persist preferred managed save for a title (empty clears).
     bool set_title_preferred_save(const std::string& title_id, const std::string& save_id,
                                   std::string* error = nullptr);
+
+    // Apply a completed folder pick into settings drafts (call from UI thread).
+    void apply_pending_folder_pick();
 };
 
 } // namespace retcomm::hub

@@ -56,6 +56,7 @@ Paths default_paths() {
     p.config_path = p.config_dir / "config.json";
     p.library_index_path = p.data_dir / "library-index.json";
     p.bios_index_path = p.data_dir / "bios-index.json";
+    p.catalog_dir = p.data_dir / "catalog";
     return p;
 }
 
@@ -74,28 +75,27 @@ void ensure_dirs(const Paths& p) {
                                      ec.message());
 }
 
-fs::path resolve_catalog_dir(const fs::path& exe_dir, const fs::path& override_dir) {
+fs::path resolve_catalog_dir(const fs::path& /*exe_dir*/, const fs::path& override_dir,
+                             const Paths* paths) {
     if (!override_dir.empty()) return override_dir;
 
     if (const char* env = std::getenv("RETCOMM_CATALOG")) {
         return fs::path(env);
     }
 
-    const fs::path beside = exe_dir / "catalog";
-    if (fs::is_directory(beside)) return beside;
-
-    const fs::path parent = exe_dir.parent_path() / "catalog";
-    if (fs::is_directory(parent)) return parent;
-
-#ifdef RETCOMM_CATALOG_DIR
-    {
-        const fs::path baked(RETCOMM_CATALOG_DIR);
-        if (fs::is_directory(baked)) return baked;
+    if (paths) {
+        std::error_code ec;
+        if (fs::is_regular_file(paths->catalog_dir / "index.json", ec))
+            return paths->catalog_dir;
+        throw std::runtime_error(
+            "catalog cache missing at " + paths->catalog_dir.string() +
+            "; run `retcomm catalog update` (needs network) or set "
+            "RETCOMM_CATALOG / --catalog");
     }
-#endif
 
     throw std::runtime_error(
-        "catalog not found; pass --catalog DIR or set RETCOMM_CATALOG");
+        "catalog not found; run `retcomm catalog update` or pass --catalog / "
+        "RETCOMM_CATALOG");
 }
 
 std::string host_os_key() {

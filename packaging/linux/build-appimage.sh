@@ -18,7 +18,7 @@ TOOL_DIR="${OUT_DIR}/tools"
 rm -rf "${APPDIR}"
 mkdir -p "${APPDIR}/usr" "${TOOL_DIR}" "${OUT_DIR}"
 
-# Copy staged install (bin + share/catalog + optional lib).
+# Copy staged install (bin + optional lib/share icons). Catalog is on-device only.
 cp -a "${PREFIX}/." "${APPDIR}/usr/"
 
 # Desktop + icon at AppDir root (linuxdeploy / appimagetool convention).
@@ -36,18 +36,6 @@ if [[ -f "${ROOT}/assets/retcomm.svg" ]]; then
     "${APPDIR}/usr/share/icons/hicolor/scalable/apps/retcomm.svg"
 fi
 
-# Ensure catalog is at the FHS path AppRun expects.
-if [[ -d "${APPDIR}/usr/catalog" && ! -d "${APPDIR}/usr/share/retcomm/catalog" ]]; then
-  mkdir -p "${APPDIR}/usr/share/retcomm"
-  mv "${APPDIR}/usr/catalog" "${APPDIR}/usr/share/retcomm/catalog"
-fi
-# Also keep a copy beside binaries for resolve_catalog_dir(exe_dir/catalog).
-if [[ -d "${APPDIR}/usr/share/retcomm/catalog" ]]; then
-  mkdir -p "${APPDIR}/usr/bin"
-  rm -rf "${APPDIR}/usr/bin/catalog"
-  cp -a "${APPDIR}/usr/share/retcomm/catalog" "${APPDIR}/usr/bin/catalog"
-fi
-
 sed "s|@VERSION@|${VERSION}|g" "${ROOT}/packaging/linux/AppRun.in" > "${APPDIR}/AppRun"
 chmod 755 "${APPDIR}/AppRun"
 
@@ -62,6 +50,10 @@ fi
 # Plugin optional — linuxdeploy still copies DT_NEEDED libs without it.
 export LDAI_OUTPUT="${OUT_DIR}/RetComM-Launcher-${VERSION}-linux-${ARCH}.AppImage"
 export LINUXDEPLOY_OUTPUT_VERSION="${VERSION}"
+
+# linuxdeploy ships an old binutils strip that rejects modern ELF (RELR / .relr.dyn)
+# from current glibc toolchains (e.g. CachyOS / Arch). Skip strip; size cost is fine.
+export NO_STRIP="${NO_STRIP:-1}"
 
 # AppImage runtime extraction needs FUSE; --appimage-extract-and-run avoids that in CI.
 LD_RUN=("${LINUXDEPLOY}" --appimage-extract-and-run)

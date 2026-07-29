@@ -1,6 +1,7 @@
 #include "retcomm/app_state.hpp"
 #include "retcomm/bios_index.hpp"
 #include "retcomm/catalog.hpp"
+#include "retcomm/catalog_sync.hpp"
 #include "retcomm/config.hpp"
 #include "retcomm/install.hpp"
 #include "retcomm/launch.hpp"
@@ -50,6 +51,7 @@ void print_help(const char* argv0) {
         << "      --detach                 Don't wait for the game to exit\n"
         << "      --dry-run                Print argv/cwd only\n"
         << "  romm                         Show RomM config / stub ping\n"
+        << "  catalog update [--force]     Download/update remote catalog cache\n"
         << "  help                         This message\n\n"
         << "ROM scan uses config library_root (platform folders only).\n"
         << "BIOS scan uses config bios_root (flat + per-system folders).\n"
@@ -114,6 +116,8 @@ int cmd_status(const retcomm::Paths& paths, const retcomm::AppConfig& cfg,
               << bios_idx.titles.size() << " bound titles, " << bios_idx.files.size()
               << " files)\n"
               << "catalog: " << cat.root.string() << "\n"
+              << "catalog cache: " << paths.catalog_dir.string()
+              << (retcomm::catalog_cache_valid(paths) ? " (valid)\n" : " (empty)\n")
               << "library: "
               << (cfg.library_root.empty() ? "(unset)" : cfg.library_root.string())
               << "\n"
@@ -162,7 +166,12 @@ int cmd_config(const retcomm::Paths& paths, const retcomm::AppConfig& cfg) {
     }
     std::cout << "\n"
               << "romm: "
-              << (cfg.romm.enabled() ? cfg.romm.base_url : "(not configured)") << "\n\n"
+              << (cfg.romm.enabled() ? cfg.romm.base_url : "(not configured)") << "\n"
+              << "catalog url: "
+              << (cfg.catalog.url.empty() ? retcomm::default_catalog_download_url()
+                                          : cfg.catalog.url)
+              << "\n"
+              << "catalog auto_update: " << (cfg.catalog.auto_update ? "true" : "false") << "\n\n"
               << "Example config.json:\n"
               << "{\n"
               << "  \"library_root\": \"/mnt/crucial4tb/Emulation/roms\",\n"
@@ -176,6 +185,11 @@ int cmd_config(const retcomm::Paths& paths, const retcomm::AppConfig& cfg) {
               << "  \"romm\": {\n"
               << "    \"base_url\": \"https://your-romm.example\",\n"
               << "    \"api_token\": \"…\"\n"
+              << "  },\n"
+              << "  \"catalog\": {\n"
+              << "    \"url\": \"https://github.com/TechnicallyComputers/retcomm-catalog/releases/latest/download/catalog.zip\",\n"
+              << "    \"github_repo\": \"TechnicallyComputers/retcomm-catalog\",\n"
+              << "    \"auto_update\": true\n"
               << "  }\n"
               << "}\n";
     return 0;
@@ -559,6 +573,24 @@ int cmd_launch(const retcomm::Paths& paths, const retcomm::Catalog& cat,
     return result.exit_code;
 }
 
+int cmd_catalog_update(const retcomm::Paths& paths, const retcomm::AppConfig& cfg,
+                       bool force) {
+    try {
+        retcomm::ensure_dirs(paths);
+    } catch (const std::exception& e) {
+        std::cerr << "data dir error: " << e.what() << "\n";
+        return 1;
+    }
+    const auto result = retcomm::sync_remote_catalog(paths, cfg, force);
+    if (result.ok) {
+        std::cout << result.message << "\n";
+        if (!result.synced_at.empty()) std::cout << "  synced_at: " << result.synced_at << "\n";
+        return 0;
+    }
+    std::cerr << result.message << "\n";
+    return 1;
+}
+
 int cmd_romm(const retcomm::Paths& paths, const retcomm::AppConfig& cfg) {
     std::cout << "config: " << paths.config_path.string() << "\n";
     if (!cfg.romm.enabled()) {
@@ -598,17 +630,46 @@ int main(int argc, char** argv) {
 
     retcomm::Paths paths = retcomm::default_paths();
     retcomm::AppConfig cfg = retcomm::load_app_config(paths.config_path);
+
+    const std::string& cmd = args[0];
+    if (cmd == "catalog") {
+        if (args.size() < 2 || args[1] != "update") {
+            std::cerr << "usage: retcomm catalog update [--force]\n";
+            return 2;
+        }
+        bool force = false;
+        for (size_t i = 2; i < args.size(); ++i) {
+            if (args[i] == "--force")
+                force = true;
+            else {
+                std::cerr << "unexpected catalog arg: " << args[i] << "\n";
+                return 2;
+            }
+        }
+        return cmd_catalog_update(paths, cfg, force);
+    }
+
+    if (catalog_override.empty()) {
+        try {
+            retcomm::ensure_dirs(paths);
+            const auto sync = retcomm::maybe_auto_update_catalog(paths, cfg);
+            if (!sync.ok && !sync.skipped)
+                std::cerr << "catalog auto-update: " << sync.message << "\n";
+        } catch (const std::exception& e) {
+            std::cerr << "catalog auto-update: " << e.what() << "\n";
+        }
+    }
+
     retcomm::Catalog catalog;
     try {
         const fs::path cat_dir =
-            retcomm::resolve_catalog_dir(exe_dir_from(argv[0]), catalog_override);
+            retcomm::resolve_catalog_dir(exe_dir_from(argv[0]), catalog_override, &paths);
         catalog = retcomm::load_catalog(cat_dir);
     } catch (const std::exception& e) {
         std::cerr << "catalog error: " << e.what() << "\n";
         return 1;
     }
 
-    const std::string& cmd = args[0];
     try {
         if (cmd == "list") return cmd_list(catalog);
         if (cmd == "status") return cmd_status(paths, cfg, catalog);

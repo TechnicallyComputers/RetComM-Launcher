@@ -286,10 +286,6 @@ bool schedule_apply_and_restart(const fs::path& staging_bin_dir, const fs::path&
             << (dest_dir / "retcomm.exe").string() << "\"\r\n"
             << "copy /Y \"" << (staging_bin_dir / hub_name.filename().string()).string() << "\" \""
             << (dest_dir / hub_name.filename().string()).string() << "\"\r\n"
-            << "if exist \"" << (staging_bin_dir / "catalog").string() << "\" (\r\n"
-            << "  xcopy /E /I /Y \"" << (staging_bin_dir / "catalog").string() << "\" \""
-            << (dest_dir / "catalog").string() << "\\\"\r\n"
-            << ")\r\n"
             << "start \"\" \"" << (dest_dir / hub_name.filename().string()).string() << "\"\r\n";
     }
     const std::string cmd = "cmd /C start \"\" /MIN \"" + script.string() + "\"";
@@ -321,10 +317,6 @@ bool schedule_apply_and_restart(const fs::path& staging_bin_dir, const fs::path&
             << "mkdir -p \"$dest\"\n"
             << "install -m 755 \"$staging/retcomm\" \"$dest/retcomm\"\n"
             << "install -m 755 \"$staging/$hub\" \"$dest/$hub\"\n"
-            << "if [[ -d \"$staging/catalog\" ]]; then\n"
-            << "  rm -rf \"$dest/catalog\"\n"
-            << "  cp -a \"$staging/catalog\" \"$dest/catalog\"\n"
-            << "fi\n"
             << "exec \"$dest/$hub\"\n";
     }
     make_executable(script);
@@ -444,17 +436,7 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
     fs::copy_file(hub, bin_stage / hub_name, fs::copy_options::overwrite_existing, ec);
     if (!cli.empty())
         fs::copy_file(cli, bin_stage / cli_name, fs::copy_options::overwrite_existing, ec);
-    const fs::path cat = find_named_file(staging, "index.json");
-    if (!cat.empty() && cat.parent_path().filename() == "catalog") {
-        fs::copy(cat.parent_path(), bin_stage / "catalog",
-                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-    } else {
-        const fs::path cat_dir = staging / "catalog";
-        if (fs::is_directory(cat_dir, ec)) {
-            fs::copy(cat_dir, bin_stage / "catalog",
-                     fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-        }
-    }
+    // Title catalog stays in the user data cache; release zips do not ship it.
 
     fs::path dest_dir;
     const fs::path exe = current_executable_path();

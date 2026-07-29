@@ -5,12 +5,14 @@
 #include "retcomm/config.hpp"
 #include "retcomm/paths.hpp"
 #include "retcomm/self_update.hpp"
+#include "retcomm/catalog_sync.hpp"
 
 #include "imgui.h"
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_sdl3.h"
 
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_dialog.h>
 #include <SDL3/SDL_opengl.h>
 
 #include <algorithm>
@@ -26,10 +28,69 @@ namespace {
 
 using retcomm::hub::BoxartCache;
 using retcomm::hub::BoxartTexture;
+using retcomm::hub::FolderPickTarget;
 using retcomm::hub::HubJob;
 using retcomm::hub::HubModel;
 using retcomm::hub::Theme;
 using retcomm::hub::TitleRow;
+
+void SDLCALL on_folder_dialog(void* userdata, const char* const* filelist, int /*filter*/) {
+    auto* hub = static_cast<HubModel*>(userdata);
+    if (!hub) return;
+    std::lock_guard<std::mutex> lock(hub->folder_pick_mu);
+    hub->folder_pick_busy = false;
+    if (!filelist) {
+        hub->folder_pick_target = FolderPickTarget::None;
+        hub->folder_pick_path.clear();
+        return; // error
+    }
+    if (!filelist[0]) {
+        hub->folder_pick_target = FolderPickTarget::None;
+        hub->folder_pick_path.clear();
+        return; // canceled
+    }
+    hub->folder_pick_path = filelist[0];
+}
+
+void begin_folder_pick(HubModel& hub, SDL_Window* window, FolderPickTarget target,
+                       const char* current_path) {
+    {
+        std::lock_guard<std::mutex> lock(hub.folder_pick_mu);
+        if (hub.folder_pick_busy) return;
+        hub.folder_pick_busy = true;
+        hub.folder_pick_target = target;
+        hub.folder_pick_path.clear();
+    }
+    const char* start = nullptr;
+    if (current_path && current_path[0] != '\0') start = current_path;
+    SDL_ShowOpenFolderDialog(on_folder_dialog, &hub, window, start, false);
+}
+
+// Path field + native Browse button. Returns true if the text field changed.
+bool path_field_with_browse(const char* label, const char* input_id, char* buf, size_t buf_n,
+                            HubModel& hub, SDL_Window* window, FolderPickTarget target,
+                            const Theme& th) {
+    ImGui::TextColored(th.text_muted, "%s", label);
+    const float browse_w = 96.f;
+    const float gap = ImGui::GetStyle().ItemSpacing.x;
+    const float input_w = ImGui::GetContentRegionAvail().x - browse_w - gap;
+    bool changed = false;
+    if (input_w > 80.f) ImGui::SetNextItemWidth(input_w);
+    changed = ImGui::InputText(input_id, buf, buf_n);
+    ImGui::SameLine();
+    bool busy = false;
+    {
+        std::lock_guard<std::mutex> lock(hub.folder_pick_mu);
+        busy = hub.folder_pick_busy;
+    }
+    ImGui::BeginDisabled(busy);
+    ImGui::PushID(input_id);
+    if (ImGui::Button("Browse", ImVec2(browse_w, 0)))
+        begin_folder_pick(hub, window, target, buf);
+    ImGui::PopID();
+    ImGui::EndDisabled();
+    return changed;
+}
 
 const char* chip_label(const TitleRow& r) {
     if (r.update_available) return "UPDATE";
@@ -338,7 +399,7 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
     ImGui::EndChild();
 }
 
-void draw_settings_panel(HubModel& hub, const Theme& th) {
+void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     ImGui::BeginChild("settings", ImVec2(0, 0), ImGuiChildFlags_Borders);
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
     ImGui::TextUnformatted("LIBRARY SETTINGS");
@@ -346,14 +407,15 @@ void draw_settings_panel(HubModel& hub, const Theme& th) {
     ImGui::TextWrapped("Paths and platform folder names written to config.json.");
     ImGui::Separator();
 
-    ImGui::TextColored(th.text_muted, "ROM library root");
-    if (ImGui::InputText("##library_root", hub.settings.library_root,
-                         sizeof(hub.settings.library_root)))
+    if (path_field_with_browse("ROM library root", "##library_root", hub.settings.library_root,
+                               sizeof(hub.settings.library_root), hub, window,
+                               FolderPickTarget::LibraryRoot, th))
         hub.settings.dirty = true;
 
     ImGui::Dummy(ImVec2(0, 6));
-    ImGui::TextColored(th.text_muted, "BIOS root");
-    if (ImGui::InputText("##bios_root", hub.settings.bios_root, sizeof(hub.settings.bios_root)))
+    if (path_field_with_browse("BIOS root", "##bios_root", hub.settings.bios_root,
+                               sizeof(hub.settings.bios_root), hub, window,
+                               FolderPickTarget::BiosRoot, th))
         hub.settings.dirty = true;
 
     ImGui::Dummy(ImVec2(0, 6));
@@ -361,6 +423,62 @@ void draw_settings_panel(HubModel& hub, const Theme& th) {
     if (ImGui::InputText("##exclude_dirs", hub.settings.exclude_dirs,
                          sizeof(hub.settings.exclude_dirs)))
         hub.settings.dirty = true;
+
+    ImGui::Dummy(ImVec2(0, 12));
+    ImGui::Separator();
+    ImGui::TextColored(th.text_muted, "Library scans");
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextWrapped(
+        "Scan uses the saved library/BIOS roots (Save above first if you changed paths). "
+        "Full rescan clears the index cache and re-hashes everything.");
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, 6));
+    {
+        const bool busy = hub.job_running.load();
+        ImGui::BeginDisabled(busy);
+        if (ImGui::Button("Scan ROMs", ImVec2(160, 0))) hub.start_job(HubJob::ScanRoms);
+        ImGui::SameLine();
+        if (ImGui::Button("Full Rescan ROMs", ImVec2(180, 0)))
+            ImGui::OpenPopup("Full ROM rescan###confirm_full_rom_rescan");
+        if (ImGui::Button("Scan BIOS", ImVec2(160, 0))) hub.start_job(HubJob::ScanBios);
+        ImGui::SameLine();
+        if (ImGui::Button("Full Rescan BIOS", ImVec2(180, 0)))
+            ImGui::OpenPopup("Full BIOS rescan###confirm_full_bios_rescan");
+        ImGui::EndDisabled();
+    }
+    // Confirmation modals (outside BeginDisabled so they stay interactive).
+    if (ImGui::BeginPopupModal("Full ROM rescan###confirm_full_rom_rescan", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 360.f);
+        ImGui::TextWrapped(
+            "This clears the library index cache and re-hashes every candidate ROM under "
+            "your library root. On a large collection it can take a long time.");
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 8));
+        if (accent_button("Rescan", th, ImVec2(120, 0))) {
+            hub.start_job(HubJob::FullScanRoms);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    if (ImGui::BeginPopupModal("Full BIOS rescan###confirm_full_bios_rescan", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 360.f);
+        ImGui::TextWrapped(
+            "This clears the BIOS index cache and re-hashes every candidate dump under "
+            "your BIOS root.");
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 8));
+        if (accent_button("Rescan", th, ImVec2(120, 0))) {
+            hub.start_job(HubJob::FullScanBios);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
 
     ImGui::Dummy(ImVec2(0, 10));
     ImGui::Separator();
@@ -372,6 +490,20 @@ void draw_settings_panel(HubModel& hub, const Theme& th) {
         "On: use sibling/library images next to ROMs when present, otherwise fall back to "
         "the remote source.");
     ImGui::PopStyleColor();
+
+    ImGui::Dummy(ImVec2(0, 8));
+    {
+        const bool busy = hub.job_running.load();
+        ImGui::BeginDisabled(busy);
+        if (ImGui::Button("Resync Boxart", ImVec2(200, 0)))
+            hub.start_job(HubJob::FetchBoxart, {}, true);
+        ImGui::EndDisabled();
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Clears the cover cache and re-downloads art for every catalog title "
+            "(Libretro thumbnails, or RomM when Sync Boxart is enabled). Not run on startup.");
+        ImGui::PopStyleColor();
+    }
 
     ImGui::Dummy(ImVec2(0, 10));
     ImGui::TextColored(th.text_muted, "Platform folders");
@@ -428,6 +560,72 @@ void draw_settings_panel(HubModel& hub, const Theme& th) {
     ImGui::Dummy(ImVec2(0, 8));
     ImGui::TextColored(th.text_muted, "%s", hub.paths.config_path.string().c_str());
     ImGui::EndChild();
+}
+
+void draw_setup_wizard(HubModel& hub, const Theme& th, SDL_Window* window) {
+    if (!hub.show_setup) return;
+
+    ImGui::OpenPopup("Welcome to RetComM###setup_wizard");
+    ImGui::SetNextWindowSize(ImVec2(560.f, 0.f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                            ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("Welcome to RetComM###setup_wizard", nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+
+    ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 520.f);
+    ImGui::TextWrapped(
+        "Set your ROM library and BIOS folders. RetComM scans these paths to match "
+        "supported titles. You can change them later under Library settings.");
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy(ImVec2(0, 12));
+
+    if (path_field_with_browse("ROM library root", "##setup_library_root",
+                               hub.settings.library_root, sizeof(hub.settings.library_root), hub,
+                               window, FolderPickTarget::LibraryRoot, th))
+        hub.settings.dirty = true;
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextWrapped("Required — EmulationStation / RomM-style root (e.g. …/roms).");
+    ImGui::PopStyleColor();
+
+    ImGui::Dummy(ImVec2(0, 10));
+    if (path_field_with_browse("BIOS root", "##setup_bios_root", hub.settings.bios_root,
+                               sizeof(hub.settings.bios_root), hub, window,
+                               FolderPickTarget::BiosRoot, th))
+        hub.settings.dirty = true;
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextWrapped("Optional — system BIOS / firmware dumps (e.g. …/bios).");
+    ImGui::PopStyleColor();
+
+    const bool library_ok = hub.settings.library_root[0] != '\0';
+    ImGui::Dummy(ImVec2(0, 16));
+    ImGui::BeginDisabled(!library_ok);
+    if (accent_button("Continue", th, ImVec2(160, 0))) {
+        std::string err;
+        if (!hub.save_settings(&err)) {
+            hub.append_log("setup save failed: " + err);
+            hub.set_status("Setup save failed");
+        } else {
+            hub.show_setup = false;
+            hub.set_status("Setup complete");
+            hub.append_log("First-time setup saved");
+            // One background job at a time — scan ROMs; user can Scan BIOS after.
+            hub.start_job(HubJob::ScanRoms);
+        }
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Skip for now", ImVec2(140, 0))) {
+        hub.show_setup = false;
+        hub.set_status("Setup skipped — set library root in Library settings");
+        hub.append_log("First-time setup skipped");
+    }
+    if (!library_ok) {
+        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::TextColored(th.warn, "Choose a ROM library folder to continue.");
+    }
+
+    ImGui::EndPopup();
 }
 
 void draw_romm_settings_panel(HubModel& hub, const Theme& th) {
@@ -545,15 +743,9 @@ void draw_sidebar_actions(HubModel& hub, const Theme& th) {
     if (ImGui::Button("Library settings", ImVec2(-1, 0))) hub.open_settings();
     if (ImGui::Button("RomM Sync Settings", ImVec2(-1, 0))) hub.open_romm_settings();
     ImGui::Dummy(ImVec2(0, 4));
-    if (ImGui::Button("Scan ROMs", ImVec2(-1, 0))) hub.start_job(HubJob::ScanRoms);
-    if (ImGui::Button("Full Rescan ROMs", ImVec2(-1, 0)))
-        ImGui::OpenPopup("Full ROM rescan###confirm_full_rom_rescan");
-    if (ImGui::Button("Scan BIOS", ImVec2(-1, 0))) hub.start_job(HubJob::ScanBios);
-    if (ImGui::Button("Full Rescan BIOS", ImVec2(-1, 0)))
-        ImGui::OpenPopup("Full BIOS rescan###confirm_full_bios_rescan");
     if (ImGui::Button("Check updates", ImVec2(-1, 0))) hub.start_job(HubJob::CheckUpdates);
-    if (ImGui::Button("Fetch boxart", ImVec2(-1, 0)))
-        hub.start_job(HubJob::FetchBoxart); // fill missing only; use RomM Resync to replace
+    if (ImGui::Button("Refresh catalog", ImVec2(-1, 0)))
+        hub.start_job(HubJob::RefreshCatalog);
     if (ImGui::Button("Refresh", ImVec2(-1, 0))) {
         hub.refresh_rows(false);
         hub.set_status("Refreshed");
@@ -570,40 +762,6 @@ void draw_sidebar_actions(HubModel& hub, const Theme& th) {
     }
     ImGui::PopStyleColor();
     ImGui::EndDisabled();
-
-    // Confirmation modals (must be outside BeginDisabled so they stay interactive).
-    if (ImGui::BeginPopupModal("Full ROM rescan###confirm_full_rom_rescan", nullptr,
-                               ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 360.f);
-        ImGui::TextWrapped(
-            "This clears the library index cache and re-hashes every candidate ROM under "
-            "your library root. On a large collection it can take a long time.");
-        ImGui::PopTextWrapPos();
-        ImGui::Dummy(ImVec2(0, 8));
-        if (accent_button("Rescan", th, ImVec2(120, 0))) {
-            hub.start_job(HubJob::FullScanRoms);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-    if (ImGui::BeginPopupModal("Full BIOS rescan###confirm_full_bios_rescan", nullptr,
-                               ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 360.f);
-        ImGui::TextWrapped(
-            "This clears the BIOS index cache and re-hashes every candidate dump under "
-            "your BIOS root.");
-        ImGui::PopTextWrapPos();
-        ImGui::Dummy(ImVec2(0, 8));
-        if (accent_button("Rescan", th, ImVec2(120, 0))) {
-            hub.start_job(HubJob::FullScanBios);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
 
     ImGui::Dummy(ImVec2(0, 8));
     std::string status;
@@ -684,17 +842,27 @@ int main(int argc, char** argv) {
     hub.cfg = retcomm::load_app_config(hub.paths.config_path);
     try {
         retcomm::ensure_dirs(hub.paths);
-        const fs::path cat =
-            retcomm::resolve_catalog_dir(fs::path(argv[0]).parent_path());
+        const auto sync = retcomm::maybe_auto_update_catalog(hub.paths, hub.cfg);
+        if (!sync.ok && !sync.skipped)
+            hub.append_log(std::string("catalog auto-update: ") + sync.message);
+        else if (sync.ok && !sync.skipped)
+            hub.append_log(sync.message);
+        const fs::path cat = retcomm::resolve_catalog_dir(fs::path(argv[0]).parent_path(), {},
+                                                          &hub.paths);
         hub.catalog = retcomm::load_catalog(cat);
+        hub.append_log("Catalog: " + cat.string() + " (" +
+                       std::to_string(hub.catalog.titles.size()) + " titles)");
     } catch (const std::exception& e) {
         hub.append_log(std::string("catalog error: ") + e.what());
     }
     hub.launcher_version = retcomm::retcomm_installed_tag(hub.paths);
     hub.refresh_rows(false);
-    hub.set_status("Ready");
-    // Fill missing covers in the background (Libretro by default, RomM if Sync Boxart).
-    hub.start_job(HubJob::FetchBoxart);
+    if (hub.cfg.library_root.empty()) {
+        hub.open_setup();
+        hub.set_status("First-time setup — choose your ROM library folder");
+    } else {
+        hub.set_status("Ready");
+    }
 
     retcomm::hub::BoxartCache boxart;
     bool running = true;
@@ -708,6 +876,8 @@ int main(int argc, char** argv) {
                 running = false;
         }
         if (hub.request_exit.load()) running = false;
+
+        hub.apply_pending_folder_pick();
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
@@ -734,7 +904,7 @@ int main(int argc, char** argv) {
         ImGui::SameLine();
         if (hub.show_settings) {
             ImGui::BeginChild("settings_host", ImVec2(0, 0), ImGuiChildFlags_None);
-            draw_settings_panel(hub, th);
+            draw_settings_panel(hub, th, window);
             ImGui::EndChild();
         } else if (hub.show_romm_settings) {
             ImGui::BeginChild("romm_settings_host", ImVec2(0, 0), ImGuiChildFlags_None);
@@ -754,6 +924,7 @@ int main(int argc, char** argv) {
 
         ImGui::EndChild(); // body
         draw_log(hub, th);
+        draw_setup_wizard(hub, th, window);
         ImGui::End();
 
         ImGui::Render();

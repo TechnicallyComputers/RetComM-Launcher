@@ -11,6 +11,12 @@ namespace retcomm {
 
 namespace fs = std::filesystem;
 
+struct CatalogConfig {
+    std::string url;         // catalog.zip download URL (empty = built-in default)
+    std::string github_repo; // owner/repo for display (empty = built-in default)
+    bool auto_update = true; // refresh cache on startup when missing/stale
+};
+
 // User config (~/.config/retcomm/config.json). RomM/ES-style library layout:
 //   <library_root>/<platform_folder>/...
 struct AppConfig {
@@ -23,6 +29,7 @@ struct AppConfig {
     // When true, sibling / library-folder covers may override remote boxart.
     // Default false: always use RomM or Libretro (per romm.sync_boxart).
     bool prefer_local_boxart = false;
+    CatalogConfig catalog;
     RommConfig romm;
 
     // Resolve folder names for a catalog platform (defaults + overrides).

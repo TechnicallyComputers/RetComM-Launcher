@@ -2,6 +2,7 @@
 /build-*/
 /dist/
 /out/
+/out-*/
 /.cache/
 /cmake-build-*/
 *.user

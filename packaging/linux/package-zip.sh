@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Flat zip for self-update: retcomm, retcomm-hub, catalog/ at archive root.
+# Flat zip for self-update: retcomm + retcomm-hub at archive root.
+# Title catalog is fetched on-device (not bundled).
 #
 # Usage:
 #   packaging/linux/package-zip.sh <install-prefix> <version> [arch]
@@ -17,11 +18,6 @@ mkdir -p "${STAGE}" "${OUT_DIR}"
 
 install -m 755 "${PREFIX}/bin/retcomm" "${STAGE}/retcomm"
 install -m 755 "${PREFIX}/bin/retcomm-hub" "${STAGE}/retcomm-hub"
-if [[ -d "${PREFIX}/catalog" ]]; then
-  cp -a "${PREFIX}/catalog" "${STAGE}/catalog"
-else
-  cp -a "${PREFIX}/share/retcomm/catalog" "${STAGE}/catalog"
-fi
 
 # Ship bundled libs next to binaries when the install prefix has them.
 if [[ -d "${PREFIX}/lib" ]]; then
