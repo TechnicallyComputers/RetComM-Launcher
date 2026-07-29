@@ -50,6 +50,10 @@ cmake --build build -j && cmake --install build
 
 Self-update replaces the running AppImage in place (`APPIMAGE` env).
 
+When launching a title, RetComM strips AppImage `LD_LIBRARY_PATH` / `APPDIR`
+from the child environment so native recomp binaries load their own (or system)
+libs instead of the launcher’s bundled SDL.
+
 ## macOS
 
 ```sh

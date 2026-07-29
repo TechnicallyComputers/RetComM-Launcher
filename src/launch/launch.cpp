@@ -16,6 +16,7 @@
 #endif
 #include <windows.h>
 #else
+#include <cstring>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -376,6 +377,65 @@ bool spawn_process(const LaunchPlan& plan, bool detach, int* exit_code, std::str
 
 #else
 
+// AppImage AppRun sets LD_LIBRARY_PATH to the mount's usr/lib. Native recomp
+// titles inherit that via execv and load the wrong SDL/curl — ROM preselect /
+// verify then fails. Wine PE launches are mostly unaffected. Undo AppImage
+// env only in the child (parent RetComM still needs its bundled libs).
+void sanitize_env_for_external_child() {
+#if defined(__linux__)
+    const char* appdir = std::getenv("APPDIR");
+    const char* appimage = std::getenv("APPIMAGE");
+    if (!appdir && !appimage) return;
+
+    auto path_is_appimage = [&](const std::string& p) -> bool {
+        if (p.empty()) return false;
+        if (appdir && p.rfind(appdir, 0) == 0) return true;
+        if (p.find("/tmp/.mount_") != std::string::npos) return true;
+        if (p.find(".AppDir") != std::string::npos) return true;
+        if (appimage) {
+            // Extract-and-run trees often sit next to the AppImage path.
+            const std::string ai(appimage);
+            if (!ai.empty() && p.rfind(ai, 0) == 0) return true;
+        }
+        return false;
+    };
+
+    auto filter_path_env = [&](const char* key) {
+        const char* raw = std::getenv(key);
+        if (!raw || !*raw) return;
+        std::string kept;
+        const char* start = raw;
+        while (*start) {
+            const char* colon = std::strchr(start, ':');
+            const std::string part =
+                colon ? std::string(start, colon) : std::string(start);
+            if (!part.empty() && !path_is_appimage(part)) {
+                if (!kept.empty()) kept.push_back(':');
+                kept += part;
+            }
+            if (!colon) break;
+            start = colon + 1;
+        }
+        if (kept.empty())
+            ::unsetenv(key);
+        else
+            ::setenv(key, kept.c_str(), 1);
+    };
+
+    filter_path_env("LD_LIBRARY_PATH");
+    filter_path_env("LD_PRELOAD");
+    filter_path_env("XDG_DATA_DIRS");
+    filter_path_env("PATH"); // drop AppImage usr/bin so wine/system tools win
+
+    ::unsetenv("APPDIR");
+    ::unsetenv("APPIMAGE");
+    ::unsetenv("ARGV0");
+    ::unsetenv("OWNDIR");
+#else
+    // macOS / other Unix: nothing AppImage-specific.
+#endif
+}
+
 bool spawn_process(const LaunchPlan& plan, bool detach, int* exit_code, std::string* error) {
     std::vector<char*> av;
     av.reserve(plan.argv.size() + 1);
@@ -388,6 +448,7 @@ bool spawn_process(const LaunchPlan& plan, bool detach, int* exit_code, std::str
         return false;
     }
     if (pid == 0) {
+        sanitize_env_for_external_child();
         if (!plan.cwd.empty()) {
             if (chdir(plan.cwd.c_str()) != 0) {
                 // Still try exec — titles usually anchor on exe dir.
