@@ -82,6 +82,7 @@ void HubModel::set_status(const std::string& s) {
 
 void HubModel::refresh_rows(bool check_updates) {
     library = load_library_index(paths.library_index_path);
+    romm_roms = load_romm_rom_index(paths.romm_rom_index_path);
     app_state = load_app_state(paths.state_path);
     bios = load_bios_index(paths.bios_index_path);
 
@@ -115,6 +116,13 @@ void HubModel::refresh_rows(bool check_updates) {
         const auto rom = library.preferred_rom(t.id);
         row.has_rom = !rom.empty();
         row.rom_path = rom.string();
+        {
+            const auto it = romm_roms.by_title.find(t.id);
+            if (it != romm_roms.by_title.end() && it->second.available) {
+                row.has_romm = true;
+                row.romm_file_name = it->second.file_name;
+            }
+        }
         if (!t.rom_identity.filenames.empty())
             row.suggested_rom = t.rom_identity.filenames.front();
 
@@ -550,7 +558,32 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 save_library_index(paths.library_index_path, library);
                 append_log("ROM scan after download: " + std::to_string(scan.matches.size()) +
                            " matches");
+                // Mark available in RomM index cache.
+                {
+                    romm_roms = load_romm_rom_index(paths.romm_rom_index_path);
+                    RommRomIndexEntry e;
+                    e.available = true;
+                    e.file_name = fr.remote_name;
+                    e.matched_by = fr.matched_by;
+                    e.checked_at = "";
+                    romm_roms.by_title[title_id] = std::move(e);
+                    save_romm_rom_index(paths.romm_rom_index_path, romm_roms, nullptr);
+                }
                 set_status("RomM ROM ready: " + title_id);
+                break;
+            }
+            case HubJob::ScanRommRoms: {
+                set_status("Scanning RomM for catalog ROMs…");
+                auto sr = scan_romm_rom_index(paths, cfg, catalog, [this](const std::string& s) {
+                    set_status(s);
+                });
+                append_log(sr.message);
+                if (sr.ok) {
+                    romm_roms = load_romm_rom_index(paths.romm_rom_index_path);
+                    set_status(sr.message);
+                } else {
+                    set_status("RomM scan failed");
+                }
                 break;
             }
             case HubJob::FetchRommBios: {
@@ -686,6 +719,7 @@ void HubModel::open_settings() {
     copy_buf(settings.saves_root, sizeof(settings.saves_root), cfg.saves_root.string());
     copy_buf(settings.exclude_dirs, sizeof(settings.exclude_dirs), join_csv(cfg.exclude_dirs));
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
+    settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
 
     settings.platform_folders.clear();
     // Prefer catalog platforms, then any extra keys already in config.
@@ -719,6 +753,7 @@ void HubModel::open_setup() {
     copy_buf(settings.saves_root, sizeof(settings.saves_root), cfg.saves_root.string());
     copy_buf(settings.exclude_dirs, sizeof(settings.exclude_dirs), join_csv(cfg.exclude_dirs));
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
+    settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
     settings.platform_folders.clear();
     settings.dirty = false;
     show_settings = false;
@@ -770,6 +805,7 @@ bool HubModel::save_settings(std::string* error) {
     next.saves_root = settings.saves_root;
     next.exclude_dirs = split_csv(settings.exclude_dirs);
     next.prefer_local_boxart = settings.prefer_local_boxart;
+    next.filter_unsupported_titles = settings.filter_unsupported_titles;
 
     // Setup wizard leaves platform_folders empty — keep whatever was already in cfg.
     if (!settings.platform_folders.empty()) {
@@ -786,10 +822,30 @@ bool HubModel::save_settings(std::string* error) {
     if (!save_app_config(paths.config_path, next, error)) return false;
     cfg = std::move(next);
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
+    settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
     settings.dirty = false;
     set_status("Saved library settings");
     append_log("Wrote " + paths.config_path.string());
     refresh_rows(false);
+    // If the filter hid the current selection, jump to the first visible row.
+    if (cfg.filter_unsupported_titles) {
+        std::lock_guard<std::mutex> lock(mu);
+        auto visible = [&](const TitleRow& r) {
+            if (r.has_rom || r.has_romm || r.installed || r.install_dir_present) return true;
+            return false;
+        };
+        bool ok = selected >= 0 && selected < static_cast<int>(rows.size()) &&
+                  visible(rows[static_cast<size_t>(selected)]);
+        if (!ok) {
+            selected = 0;
+            for (int i = 0; i < static_cast<int>(rows.size()); ++i) {
+                if (visible(rows[static_cast<size_t>(i)])) {
+                    selected = i;
+                    break;
+                }
+            }
+        }
+    }
     return true;
 }
 

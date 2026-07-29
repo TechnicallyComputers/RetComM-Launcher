@@ -8,6 +8,7 @@
 #include "retcomm/launch.hpp"
 #include "retcomm/library_index.hpp"
 #include "retcomm/paths.hpp"
+#include "retcomm/romm_fetch.hpp"
 
 #include <atomic>
 #include <mutex>
@@ -33,6 +34,7 @@ enum class HubJob : int {
     FetchBoxart,
     FetchRommRom,
     FetchRommBios,
+    ScanRommRoms,
     SyncRommSaves,
     SyncRommStates,
     SelfUpdate,
@@ -53,6 +55,8 @@ struct TitleRow {
     std::string latest_tag;
     bool update_available = false;
     bool has_rom = false;
+    bool has_romm = false; // cached RomM identity match (may not be on disk yet)
+    std::string romm_file_name; // remote dump name when has_romm
     bool needs_bios = false;
     bool has_bios = false;
     std::string rom_path;
@@ -167,6 +171,7 @@ struct SettingsDraft {
     char saves_root[1024]{};
     char exclude_dirs[1024]{}; // comma-separated
     bool prefer_local_boxart = false;
+    bool filter_unsupported_titles = false;
     std::vector<PlatformFolderEdit> platform_folders;
     bool dirty = false;
 };
@@ -186,16 +191,26 @@ enum class FolderPickTarget : int {
     SavesRoot,
 };
 
+// Center library panel: platforms list → titles for a platform (or all).
+enum class LibraryNav : int {
+    Platforms = 0,
+    Titles,
+};
+
 struct HubModel {
     Paths paths;
     AppConfig cfg;
     Catalog catalog;
     LibraryIndex library;
     BiosIndex bios;
+    RommRomIndex romm_roms;
     AppState app_state;
 
     std::vector<TitleRow> rows;
     int selected = 0;
+    LibraryNav library_nav = LibraryNav::Platforms;
+    // When library_nav == Titles: empty = all platforms, else catalog platform slug.
+    std::string library_platform;
     bool show_settings = false;
     bool show_romm_settings = false;
     bool show_setup = false; // first-time library/BIOS wizard

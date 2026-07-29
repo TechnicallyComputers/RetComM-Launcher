@@ -106,6 +106,11 @@ Companion-app style: base URL + API token in config. List platforms/ROMs and
 assets (saves/states). Map RomM platforms onto catalog `platform` slugs.
 Local-only mode must work with RomM unset.
 
+**Filter Unsupported Titles** (`filter_unsupported_titles` in config) hides
+catalog rows with neither a local ROM nor a cached RomM identity match.
+**Scan RomM library** writes `romm-rom-index.json` so remote-only titles can
+show an **ON ROMM** chip and remain visible when the filter is on.
+
 ## Growth path
 
 1. ~~Catalog + scan + CLI stubs~~

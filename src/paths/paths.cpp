@@ -56,6 +56,7 @@ Paths default_paths() {
     p.config_path = p.config_dir / "config.json";
     p.library_index_path = p.data_dir / "library-index.json";
     p.bios_index_path = p.data_dir / "bios-index.json";
+    p.romm_rom_index_path = p.data_dir / "romm-rom-index.json";
     p.catalog_dir = p.data_dir / "catalog";
     return p;
 }

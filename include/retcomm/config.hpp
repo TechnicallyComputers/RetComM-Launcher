@@ -41,6 +41,9 @@ struct AppConfig {
     // When true, sibling / library-folder covers may override remote boxart.
     // Default false: always use RomM or Libretro (per romm.sync_boxart).
     bool prefer_local_boxart = false;
+    // Hide catalog titles with no local ROM and no cached RomM match.
+    // Installed / partial installs stay visible.
+    bool filter_unsupported_titles = false;
     CatalogConfig catalog;
     RommConfig romm;
     NetplayConfig netplay;

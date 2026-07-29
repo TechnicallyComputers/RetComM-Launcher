@@ -6,6 +6,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <ctime>
+#include <fstream>
+#include <iomanip>
+#include <sstream>
 #include <system_error>
 #include <vector>
 
@@ -219,14 +224,35 @@ RommFetchResult fail(const std::string& msg) {
     return r;
 }
 
-} // namespace
+std::string iso_utc_now() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t t = std::chrono::system_clock::to_time_t(now);
+    std::tm tm{};
+#if defined(_WIN32)
+    gmtime_s(&tm, &t);
+#else
+    gmtime_r(&t, &tm);
+#endif
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%SZ");
+    return oss.str();
+}
 
-RommFetchResult fetch_rom_from_romm(const AppConfig& cfg, const Title& title,
+RommRomMatch match_rom_on_romm_impl(const AppConfig& cfg, const Title& title,
                                     RommProgressFn on_progress) {
-    if (!cfg.romm.enabled()) return fail("RomM not configured (set base_url)");
-    if (cfg.romm.api_token.empty()) return fail("RomM api_token is empty");
-    if (cfg.library_root.empty()) return fail("library_root is empty — set it in Library settings");
-    if (!title.has_rom_identity()) return fail("catalog title has no rom_identity");
+    RommRomMatch out;
+    if (!cfg.romm.enabled()) {
+        out.message = "RomM not configured (set base_url)";
+        return out;
+    }
+    if (cfg.romm.api_token.empty()) {
+        out.message = "RomM api_token is empty";
+        return out;
+    }
+    if (!title.has_rom_identity()) {
+        out.message = "catalog title has no rom_identity";
+        return out;
+    }
 
     const std::string base = normalize_base(cfg.romm.base_url);
     const auto headers = auth_headers(cfg.romm);
@@ -234,7 +260,6 @@ RommFetchResult fetch_rom_from_romm(const AppConfig& cfg, const Title& title,
     std::string search = title.name;
     if (search.empty()) search = title.id;
     if (!title.rom_identity.filenames.empty()) {
-        // Prefer filename stem for search when the display name is ambiguous.
         const auto& fn = title.rom_identity.filenames.front();
         const auto dot = fn.find_last_of('.');
         const std::string stem = dot == std::string::npos ? fn : fn.substr(0, dot);
@@ -246,11 +271,15 @@ RommFetchResult fetch_rom_from_romm(const AppConfig& cfg, const Title& title,
         base + "/api/roms?limit=40&search_term=" + url_encode(search);
     json root;
     std::string err;
-    if (!http_get_json(search_url, headers, root, &err))
-        return fail("RomM search failed: " + err);
+    if (!http_get_json(search_url, headers, root, &err)) {
+        out.message = "RomM search failed: " + err;
+        return out;
+    }
 
-    if (!root.contains("items") || !root.at("items").is_array() || root.at("items").empty())
-        return fail("RomM: no ROM results for \"" + search + "\"");
+    if (!root.contains("items") || !root.at("items").is_array() || root.at("items").empty()) {
+        out.message = "RomM: no ROM results for \"" + search + "\"";
+        return out;
+    }
 
     struct Ranked {
         int id = 0;
@@ -265,7 +294,6 @@ RommFetchResult fetch_rom_from_romm(const AppConfig& cfg, const Title& title,
         if (r.id <= 0) continue;
         r.name = item.value("fs_name", item.value("name", ""));
         r.pre = platform_score(title, item.value("platform_slug", ""));
-        // Prefer list-level hash hits before fetching details.
         const auto list_hit =
             score_hashes(title.rom_identity, item.value("sha1_hash", ""),
                          item.value("crc_hash", ""), item.value("fs_size_bytes", 0ull),
@@ -288,7 +316,6 @@ RommFetchResult fetch_rom_from_romm(const AppConfig& cfg, const Title& title,
         const std::string plat = detail.value("platform_slug", "");
         const int plat_bonus = platform_score(title, plat);
 
-        // ROM-level identity
         {
             auto hit = score_hashes(title.rom_identity, detail.value("sha1_hash", ""),
                                     detail.value("crc_hash", ""),
@@ -302,14 +329,12 @@ RommFetchResult fetch_rom_from_romm(const AppConfig& cfg, const Title& title,
                 best.file_id = 0;
                 best.file_name = detail.value("fs_name", "");
                 best.size = detail.value("fs_size_bytes", 0ull);
-                // Strong hash match: stop early.
                 if (hit.matched_by == "sha1" || hit.matched_by == "md5" ||
                     hit.matched_by == "crc32")
                     break;
             }
         }
 
-        // Per-file identity (multi-disc / cue+bin / folder dumps)
         if (detail.contains("files") && detail.at("files").is_array()) {
             for (const auto& f : detail.at("files")) {
                 if (!f.is_object()) continue;
@@ -331,44 +356,171 @@ RommFetchResult fetch_rom_from_romm(const AppConfig& cfg, const Title& title,
         }
     }
 
-    // Require a real identity match — don't download on platform+name alone.
     if (best.rom_id <= 0 || best.file_name.empty() ||
         (best.matched_by != "sha1" && best.matched_by != "crc32" && best.matched_by != "size" &&
-         best.matched_by != "filename")) {
-        return fail("RomM: no file matching catalog rom_identity for \"" + title.name + "\"");
+         best.matched_by != "filename" && best.matched_by != "md5")) {
+        out.message = "RomM: no file matching catalog rom_identity for \"" + title.name + "\"";
+        return out;
     }
-    // Filename-only matches are soft — only accept when size also lined up earlier,
-    // or when catalog has no hashes at all.
     if (best.matched_by == "filename") {
         const bool has_hashes =
             !title.rom_identity.sha1.empty() || !title.rom_identity.crc32.empty() ||
-            !title.rom_identity.sha256.empty();
-        if (has_hashes)
-            return fail("RomM: found name match \"" + best.file_name +
-                        "\" but hashes do not match catalog rom_identity");
+            !title.rom_identity.sha256.empty() || !title.rom_identity.md5.empty();
+        if (has_hashes) {
+            out.message = "RomM: found name match \"" + best.file_name +
+                          "\" but hashes do not match catalog rom_identity";
+            return out;
+        }
     }
 
+    out.available = true;
+    out.rom_id = best.rom_id;
+    out.file_id = best.file_id;
+    out.file_name = best.file_name;
+    out.matched_by = best.matched_by;
+    out.message = "matched " + best.file_name + " via " + best.matched_by;
+    return out;
+}
+
+} // namespace
+
+RommRomMatch match_rom_on_romm(const AppConfig& cfg, const Title& title,
+                               RommProgressFn on_progress) {
+    return match_rom_on_romm_impl(cfg, title, on_progress);
+}
+
+RommRomIndex load_romm_rom_index(const fs::path& path) {
+    RommRomIndex idx;
+    std::ifstream in(path);
+    if (!in) return idx;
+    try {
+        json j;
+        in >> j;
+        idx.schema_version = j.value("schema_version", 1);
+        if (!j.contains("titles") || !j.at("titles").is_object()) return idx;
+        for (auto it = j.at("titles").begin(); it != j.at("titles").end(); ++it) {
+            if (!it.value().is_object()) continue;
+            RommRomIndexEntry e;
+            e.available = it.value().value("available", false);
+            e.rom_id = it.value().value("rom_id", 0);
+            e.file_id = it.value().value("file_id", 0);
+            e.file_name = it.value().value("file_name", "");
+            e.matched_by = it.value().value("matched_by", "");
+            e.checked_at = it.value().value("checked_at", "");
+            idx.by_title[it.key()] = std::move(e);
+        }
+    } catch (...) {
+        return RommRomIndex{};
+    }
+    return idx;
+}
+
+bool save_romm_rom_index(const fs::path& path, const RommRomIndex& index, std::string* error) {
+    std::error_code ec;
+    fs::create_directories(path.parent_path(), ec);
+    json titles = json::object();
+    for (const auto& [id, e] : index.by_title) {
+        titles[id] = {{"available", e.available},
+                      {"rom_id", e.rom_id},
+                      {"file_id", e.file_id},
+                      {"file_name", e.file_name},
+                      {"matched_by", e.matched_by},
+                      {"checked_at", e.checked_at}};
+    }
+    json j = {{"schema_version", index.schema_version}, {"titles", titles}};
+    std::ofstream out(path);
+    if (!out) {
+        if (error) *error = "cannot write " + path.string();
+        return false;
+    }
+    out << j.dump(2) << "\n";
+    return static_cast<bool>(out);
+}
+
+RommRomScanResult scan_romm_rom_index(const Paths& paths, const AppConfig& cfg,
+                                      const Catalog& catalog, RommProgressFn on_progress) {
+    RommRomScanResult result;
+    if (!cfg.romm.enabled()) {
+        result.message = "RomM not configured (set base_url)";
+        return result;
+    }
+    if (cfg.romm.api_token.empty()) {
+        result.message = "RomM api_token is empty";
+        return result;
+    }
+
+    RommRomIndex idx;
+    const std::string checked = iso_utc_now();
+    for (const auto& t : catalog.titles) {
+        if (!t.has_rom_identity()) {
+            ++result.skipped;
+            continue;
+        }
+        progress(on_progress, "RomM scan: " + t.name + "…");
+        auto match = match_rom_on_romm_impl(cfg, t, on_progress);
+        RommRomIndexEntry e;
+        e.checked_at = checked;
+        if (match.available) {
+            e.available = true;
+            e.rom_id = match.rom_id;
+            e.file_id = match.file_id;
+            e.file_name = match.file_name;
+            e.matched_by = match.matched_by;
+            ++result.matched;
+        } else {
+            e.available = false;
+            if (match.message.find("search failed") != std::string::npos ||
+                match.message.find("api_token") != std::string::npos) {
+                ++result.errors;
+                result.message = match.message;
+                // Abort on hard API failures so we don't wipe the index.
+                return result;
+            }
+            ++result.missing;
+        }
+        idx.by_title[t.id] = std::move(e);
+    }
+
+    std::string err;
+    if (!save_romm_rom_index(paths.romm_rom_index_path, idx, &err)) {
+        result.message = err;
+        return result;
+    }
+    result.ok = true;
+    std::ostringstream oss;
+    oss << "RomM library scan: " << result.matched << " available, " << result.missing
+        << " missing, " << result.skipped << " skipped (no rom_identity)";
+    result.message = oss.str();
+    return result;
+}
+
+RommFetchResult fetch_rom_from_romm(const AppConfig& cfg, const Title& title,
+                                    RommProgressFn on_progress) {
+    if (cfg.library_root.empty()) return fail("library_root is empty — set it in Library settings");
+
+    const RommRomMatch match = match_rom_on_romm_impl(cfg, title, on_progress);
+    if (!match.available) return fail(match.message.empty() ? "RomM: no match" : match.message);
+
+    const std::string base = normalize_base(cfg.romm.base_url);
     const fs::path dest_dir =
         ensure_platform_dir(cfg.library_root, cfg.folders_for_platform(title.platform));
     if (dest_dir.empty())
         return fail("cannot create library folder under " + cfg.library_root.string());
 
-    const fs::path dest = dest_dir / best.file_name;
+    const fs::path dest = dest_dir / match.file_name;
     std::string url;
-    if (best.file_id > 0) {
-        url = base + "/api/roms/" + std::to_string(best.file_id) + "/files/content/" +
-              url_encode_path_segment(best.file_name);
+    if (match.file_id > 0) {
+        url = base + "/api/roms/" + std::to_string(match.file_id) + "/files/content/" +
+              url_encode_path_segment(match.file_name);
     } else {
-        url = base + "/api/roms/" + std::to_string(best.rom_id) + "/content/" +
-              url_encode_path_segment(best.file_name);
+        url = base + "/api/roms/" + std::to_string(match.rom_id) + "/content/" +
+              url_encode_path_segment(match.file_name);
     }
 
-    progress(on_progress, "RomM: downloading " + best.file_name + " (" + best.matched_by +
+    progress(on_progress, "RomM: downloading " + match.file_name + " (" + match.matched_by +
                               ")…");
     std::string dl_err;
-    auto dl_headers = auth_headers(cfg.romm);
-    // Prefer raw bytes over Accept: application/json for content endpoints.
-    dl_headers.clear();
+    std::vector<std::pair<std::string, std::string>> dl_headers;
     if (!cfg.romm.api_token.empty())
         dl_headers.emplace_back("Authorization", "Bearer " + cfg.romm.api_token);
 
@@ -376,10 +528,9 @@ RommFetchResult fetch_rom_from_romm(const AppConfig& cfg, const Title& title,
     if (!http_download(url, dest, &dl_err, dl_headers,
                        [&](std::uint64_t got, std::uint64_t total) {
                            if (total == 0) {
-                               // Coarse byte updates for unknown totals.
                                if (got == 0 || (got & ((1u << 20) - 1)) == 0) {
                                    progress(on_progress,
-                                            "RomM: downloading " + best.file_name + "… " +
+                                            "RomM: downloading " + match.file_name + "… " +
                                                 std::to_string(got >> 20) + " MiB");
                                }
                                return;
@@ -387,7 +538,7 @@ RommFetchResult fetch_rom_from_romm(const AppConfig& cfg, const Title& title,
                            const int pct = static_cast<int>((got * 100) / total);
                            if (pct == last_pct || (pct != 100 && pct % 5 != 0)) return;
                            last_pct = pct;
-                           progress(on_progress, "RomM: downloading " + best.file_name + "… " +
+                           progress(on_progress, "RomM: downloading " + match.file_name + "… " +
                                                      std::to_string(pct) + "%");
                        })) {
         return fail("RomM download failed: " + dl_err);
@@ -398,10 +549,11 @@ RommFetchResult fetch_rom_from_romm(const AppConfig& cfg, const Title& title,
     RommFetchResult r;
     r.ok = true;
     r.saved_path = dest;
-    r.matched_by = best.matched_by;
-    r.remote_name = best.file_name;
-    r.bytes = ec ? best.size : static_cast<std::uint64_t>(sz);
-    r.message = "Downloaded " + best.file_name + " via " + best.matched_by + " → " + dest.string();
+    r.matched_by = match.matched_by;
+    r.remote_name = match.file_name;
+    r.bytes = ec ? 0 : static_cast<std::uint64_t>(sz);
+    r.message =
+        "Downloaded " + match.file_name + " via " + match.matched_by + " → " + dest.string();
     return r;
 }
 

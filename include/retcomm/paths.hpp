@@ -16,6 +16,7 @@ struct Paths {
     fs::path config_path;         // config_dir/config.json
     fs::path library_index_path;  // data_dir/library-index.json
     fs::path bios_index_path;     // data_dir/bios-index.json
+    fs::path romm_rom_index_path; // data_dir/romm-rom-index.json (RomM availability cache)
     fs::path catalog_dir;         // data_dir/catalog (remote catalog cache)
 };
 

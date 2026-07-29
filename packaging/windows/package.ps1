@@ -109,6 +109,14 @@ if (Test-Path $IcoSrc) {
 if (Test-Path (Join-Path $Root "assets\retcomm.png")) {
     Copy-Item (Join-Path $Root "assets\retcomm.png") (Join-Path $Stage "retcomm.png") -Force
 }
+# Hub UI fonts next to the exes (fonts/LatoLatin-*.ttf).
+$FontsSrc = Join-Path $Prefix "share\retcomm\fonts"
+if (-not (Test-Path $FontsSrc)) { $FontsSrc = Join-Path $Root "assets\fonts" }
+if (Test-Path $FontsSrc) {
+    $FontsDst = Join-Path $Stage "fonts"
+    New-Item -ItemType Directory -Force -Path $FontsDst | Out-Null
+    Copy-Item (Join-Path $FontsSrc "*") $FontsDst -Force
+}
 
 # --- Portable single-exe (stub + appended zip trailer; zip is temporary only) ---
 if (-not $PortableStub) {

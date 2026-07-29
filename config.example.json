@@ -11,6 +11,7 @@
   },
   "exclude_dirs": ["torrents", "emulators"],
   "prefer_local_boxart": false,
+  "filter_unsupported_titles": false,
   "catalog": {
     "url": "https://github.com/TechnicallyComputers/retcomm-catalog/releases/latest/download/catalog.zip",
     "github_repo": "TechnicallyComputers/retcomm-catalog",

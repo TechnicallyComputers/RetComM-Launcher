@@ -27,7 +27,7 @@ struct Theme {
     float spacing_lg = 24.f;
     float radius_sm = 6.f;
     float radius_lg = 14.f;
-    float row_height = 52.f;
+    float row_height = 64.f; // library cards; draw_library may size from text + pad
 };
 
 inline Theme crt_theme() {

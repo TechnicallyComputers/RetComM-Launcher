@@ -21,6 +21,14 @@ mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources" "${OUT_DIR}"
 install -m 755 "${PREFIX}/bin/retcomm" "${APP}/Contents/MacOS/retcomm"
 install -m 755 "${PREFIX}/bin/retcomm-hub" "${APP}/Contents/MacOS/retcomm-hub"
 # Title catalog is fetched on-device (~/.local/share/retcomm/catalog); not bundled.
+# Hub fonts (Lato); also under share/retcomm/fonts when installed via CMake prefix.
+if [[ -d "${PREFIX}/share/retcomm/fonts" ]]; then
+  mkdir -p "${APP}/Contents/Resources/fonts"
+  cp -a "${PREFIX}/share/retcomm/fonts/." "${APP}/Contents/Resources/fonts/"
+elif [[ -d "${ROOT}/assets/fonts" ]]; then
+  mkdir -p "${APP}/Contents/Resources/fonts"
+  cp -a "${ROOT}/assets/fonts/." "${APP}/Contents/Resources/fonts/"
+fi
 
 sed "s|@VERSION@|${VERSION}|g" "${ROOT}/packaging/macos/Info.plist.in" \
   > "${APP}/Contents/Info.plist"

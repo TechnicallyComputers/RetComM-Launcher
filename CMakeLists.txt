@@ -189,6 +189,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/retcomm.png")
     install(FILES assets/retcomm.png DESTINATION share/icons/hicolor/512x512/apps
             RENAME retcomm.png)
 endif()
+# Hub UI fonts (Lato Latin — same face as recomp-ui).
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/LatoLatin-Regular.ttf")
+    install(FILES
+        assets/fonts/LatoLatin-Regular.ttf
+        assets/fonts/LatoLatin-Bold.ttf
+        assets/fonts/NOTICE.md
+        DESTINATION share/retcomm/fonts)
+endif()
 
 # Windows: ship vcpkg/shared runtime DLLs next to the installed exes.
 if(WIN32)

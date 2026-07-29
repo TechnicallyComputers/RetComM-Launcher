@@ -20,6 +20,9 @@ Writes `assets/retcomm.png` at **512×512** (linuxdeploy’s max allowed size;
 1024 is rejected) and `.ico` when ImageMagick is available, from
 `assets/retcomm.svg`.
 
+Hub UI fonts live in `assets/fonts/` (Lato Latin, same face as recomp-ui) and
+install to `share/retcomm/fonts` (Windows stage / macOS Resources also copy them).
+
 ## Linux
 
 ### Local AppImage (one shot)
