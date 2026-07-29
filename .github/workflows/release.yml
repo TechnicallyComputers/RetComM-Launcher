@@ -139,26 +139,19 @@ jobs:
       - name: Package zip
         shell: pwsh
         run: |
-          # Manifest mode (vcpkg.json + toolchain) installs under the CMake build dir:
-          #   ${CMAKE_BINARY_DIR}/vcpkg_installed/<triplet>/bin
-          $candidates = @(
-            (Join-Path $env:GITHUB_WORKSPACE "build\vcpkg_installed\x64-windows\bin"),
-            (Join-Path $env:GITHUB_WORKSPACE "vcpkg_installed\x64-windows\bin"),
-            (Join-Path $env:RETCOMM_VCPKG "installed\x64-windows\bin")
-          )
-          Write-Host "Looking for vcpkg bin among:"
-          $candidates | ForEach-Object { Write-Host "  $_  exists=$(Test-Path $_)" }
-          $bin = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-          if (-not $bin) {
-            Get-ChildItem -Path (Join-Path $env:GITHUB_WORKSPACE "build") -Recurse -Filter "SDL3.dll" -ErrorAction SilentlyContinue |
-              Select-Object -First 10 FullName | ForEach-Object { Write-Host "found SDL3.dll: $($_.FullName)" }
-            throw "vcpkg bin dir not found (expected build/vcpkg_installed/x64-windows/bin)"
-          }
-          Write-Host "Using VcpkgBin=$bin"
+          # CMake install ships TARGET_RUNTIME_DLLS into out/bin. Also pass the
+          # MSVC Release dir where vcpkg applocal copies SDL3/libcurl during build.
+          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "build\Release"
+          Write-Host "out/bin DLLs:"
+          Get-ChildItem (Join-Path $env:GITHUB_WORKSPACE "out\bin") -Filter "*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  $($_.Name)" }
+          Write-Host "build/Release DLLs:"
+          Get-ChildItem $releaseDir -Filter "*.dll" -ErrorAction SilentlyContinue |
+            ForEach-Object { Write-Host "  $($_.Name)" }
           ./packaging/windows/package.ps1 `
-            -Prefix "$PWD/out" `
+            -Prefix (Join-Path $env:GITHUB_WORKSPACE "out") `
             -Version "${{ needs.version.outputs.version }}" `
-            -VcpkgBin $bin `
+            -VcpkgBin $releaseDir `
             -Arch x64
           Get-ChildItem dist
 
