@@ -857,8 +857,14 @@ int main(int argc, char** argv) {
         const fs::path cat = retcomm::resolve_catalog_dir(fs::path(argv[0]).parent_path(), {},
                                                           &hub.paths);
         hub.catalog = retcomm::load_catalog(cat);
-        hub.append_log("Catalog: " + cat.string() + " (" +
-                       std::to_string(hub.catalog.titles.size()) + " titles)");
+        std::string cat_log = "Catalog: " + cat.string() + " (" +
+                              std::to_string(hub.catalog.titles.size()) + " titles";
+        if (!hub.catalog.release_tag.empty())
+            cat_log += ", " + hub.catalog.release_tag;
+        if (!hub.catalog.catalog_date.empty())
+            cat_log += ", " + hub.catalog.catalog_date;
+        cat_log += ")";
+        hub.append_log(cat_log);
     } catch (const std::exception& e) {
         hub.append_log(std::string("catalog error: ") + e.what());
     }

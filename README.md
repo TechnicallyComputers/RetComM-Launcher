@@ -151,14 +151,15 @@ packaging/              AppImage, macOS .app, Windows zip helpers
 
 Supported titles are maintained in
 [`retcomm-catalog`](https://github.com/TechnicallyComputers/retcomm-catalog)
-— not in this repo. The launcher downloads `catalog.zip` from the latest release
-into `~/.local/share/retcomm/catalog/` and keeps that cache on-device. First run
-(or an empty cache) always fetches; afterward, `auto_update` refreshes about
-every 24 hours.
+— not in this repo. The launcher downloads `catalog.zip` from the latest
+**dated** GitHub release into `~/.local/share/retcomm/catalog/` and keeps that
+cache on-device. First run (or an empty cache) always fetches; afterward,
+`auto_update` checks the latest release tag/date on startup and downloads only
+when it changed (stored in `catalog-state.json`).
 
 ```sh
 ./build/retcomm catalog update
-./build/retcomm catalog update --force   # ignore 24h freshness
+./build/retcomm catalog update --force   # always re-download
 ```
 
 In **retcomm-hub**, use **Refresh catalog**. Optional `config.json` block:

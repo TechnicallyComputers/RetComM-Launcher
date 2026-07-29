@@ -195,6 +195,8 @@ Catalog load_catalog(const fs::path& catalog_dir) {
     cat.root = catalog_dir;
     cat.schema_version = index.value("schema_version", 1);
     cat.name = index.value("name", "catalog");
+    cat.catalog_date = index.value("catalog_date", "");
+    cat.release_tag = index.value("release_tag", "");
     const auto platform_bios = parse_platform_bios_defaults(index);
 
     if (!index.contains("titles") || !index.at("titles").is_array())

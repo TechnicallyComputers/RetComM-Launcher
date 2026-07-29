@@ -12,8 +12,10 @@ cache and refreshes it from there.
 
 Refresh with `retcomm catalog update` / `--force`, or **Refresh catalog** in the
 hub. On first run (empty cache), the launcher always fetches the catalog (needs
-network). When `catalog.auto_update` is true (default), a stale cache is
-refreshed on startup (about every 24 hours).
+network). When `catalog.auto_update` is true (default), startup queries the
+catalog repo’s **latest GitHub release** and compares its tag / date to
+`catalog-state.json`. The zip is downloaded only when that identity changed —
+otherwise the local cache is kept.
 
 Optional `config.json`:
 
@@ -33,6 +35,8 @@ Optional `config.json`:
 {
   "schema_version": 1,
   "name": "RetComM supported titles",
+  "catalog_date": "2026-07-29",
+  "release_tag": "v2026.07.29.12",
   "platform_defaults": {
     "gba": { "bios_identity": { "required": true, "crc32": ["81977335"], "…": "…" } },
     "psx": { "bios_identity": { "required": true, "crc32": ["37157331"], "…": "…" } }
@@ -43,6 +47,8 @@ Optional `config.json`:
 
 | Field | Type | Notes |
 |---|---|---|
+| `catalog_date` | string | `YYYY-MM-DD` from publish CI |
+| `release_tag` | string | GitHub release tag for this zip |
 | `platform_defaults` | object | Optional per-platform defaults keyed by catalog `platform` |
 | `platform_defaults.<platform>.bios_identity` | object | Applied to titles on that platform that omit `bios_identity` |
 
@@ -117,7 +123,8 @@ subset without schema churn:
 
 Submit via the
 [catalog submission form](https://technicallycomputers.github.io/retcomm-catalog/submit/)
-(GitHub login; maintainers approve before publish), or open a PR on
+(GitHub login; maintainers add the **`approved`** label to merge the title and
+publish `catalog.zip`), or open a PR on
 [`retcomm-catalog`](https://github.com/TechnicallyComputers/retcomm-catalog)
 (not this repo):
 

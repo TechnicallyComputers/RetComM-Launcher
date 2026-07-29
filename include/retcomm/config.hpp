@@ -14,7 +14,7 @@ namespace fs = std::filesystem;
 struct CatalogConfig {
     std::string url;         // catalog.zip download URL (empty = built-in default)
     std::string github_repo; // owner/repo for display (empty = built-in default)
-    bool auto_update = true; // refresh cache on startup when missing/stale
+    bool auto_update = true; // check latest release on startup; download if tag/date changed
 };
 
 // User config (~/.config/retcomm/config.json). RomM/ES-style library layout:
