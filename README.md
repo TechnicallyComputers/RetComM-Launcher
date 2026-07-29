@@ -131,3 +131,7 @@ third_party/            nlohmann/json (single header)
 
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
 [`docs/CATALOG.md`](docs/CATALOG.md).
+
+## License
+
+RetComM Launcher is released under the [MIT License](LICENSE).
