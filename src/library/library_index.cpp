@@ -143,7 +143,9 @@ LibraryFile* LibraryIndex::find_path_mut(const std::string& path) {
 
 bool LibraryIndex::is_fresh(const LibraryFile& f, std::uint64_t size,
                             std::int64_t mtime_sec) const {
-    return f.size == size && f.mtime_sec == mtime_sec;
+    // Require at least one digest so empty stub rows never count as cache hits.
+    return f.size == size && f.mtime_sec == mtime_sec &&
+           (!f.crc32.empty() || !f.md5.empty() || !f.sha1.empty() || !f.sha256.empty());
 }
 
 const LibraryTitleBind* LibraryIndex::find_title(const std::string& title_id) const {

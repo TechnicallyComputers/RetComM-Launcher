@@ -90,6 +90,8 @@ jobs:
 
       - name: Configure & build RetComM
         run: |
+          test -f assets/fonts/LatoLatin-Regular.ttf
+          test -f assets/fonts/LatoLatin-Bold.ttf
           cmake -G Ninja -S . -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$PWD/out" \
@@ -97,6 +99,10 @@ jobs:
             -DRETCOMM_VERSION="${{ needs.version.outputs.version }}"
           cmake --build build -j"$(nproc)"
           cmake --install build
+          # Hub fonts must be in the install prefix for AppImage packaging.
+          test -f out/share/retcomm/fonts/LatoLatin-Regular.ttf
+          test -f out/share/retcomm/fonts/LatoLatin-Bold.ttf
+          ls -lah out/share/retcomm/fonts/
           # Bundle SDL3 next to binaries for the AppImage.
           mkdir -p out/lib
           cp -a "$HOME/sdl3/lib/"*.so* out/lib/
@@ -142,6 +148,7 @@ jobs:
       - name: Configure & build
         shell: bash
         run: |
+          test -f assets/fonts/LatoLatin-Regular.ttf
           cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
             -DCMAKE_TOOLCHAIN_FILE="${RETCOMM_VCPKG}/scripts/buildsystems/vcpkg.cmake" \
             -DVCPKG_TARGET_TRIPLET=x64-windows \
@@ -149,6 +156,7 @@ jobs:
             -DRETCOMM_VERSION="${{ needs.version.outputs.version }}"
           cmake --build build --config Release -j
           cmake --install build --config Release
+          test -f out/share/retcomm/fonts/LatoLatin-Regular.ttf
 
       - name: Install Inno Setup
         shell: pwsh
@@ -219,6 +227,7 @@ jobs:
 
       - name: Configure & build
         run: |
+          test -f assets/fonts/LatoLatin-Regular.ttf
           cmake -G Ninja -S . -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="$PWD/out" \
@@ -226,6 +235,7 @@ jobs:
             -DCMAKE_OSX_ARCHITECTURES="${{ matrix.arch }}"
           cmake --build build -j"$(sysctl -n hw.ncpu)"
           cmake --install build
+          test -f out/share/retcomm/fonts/LatoLatin-Regular.ttf
           # Smoke-check hub linked.
           file out/bin/retcomm-hub
           otool -L out/bin/retcomm-hub | head
@@ -235,6 +245,8 @@ jobs:
           ./packaging/macos/build-app.sh "$PWD/out" "${{ needs.version.outputs.version }}" "${{ matrix.arch }}"
           ls -lah dist/
           test -f "dist/RetComM-Launcher-${{ needs.version.outputs.version }}-macos-${{ matrix.arch }}.dmg"
+          test -d "dist/RetComM Launcher.app/Contents/Resources/fonts"
+          test -f "dist/RetComM Launcher.app/Contents/Resources/fonts/LatoLatin-Regular.ttf"
 
       - uses: actions/upload-artifact@v4
         with:

@@ -189,8 +189,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/retcomm.png")
     install(FILES assets/retcomm.png DESTINATION share/icons/hicolor/512x512/apps
             RENAME retcomm.png)
 endif()
-# Hub UI fonts (Lato Latin — same face as recomp-ui).
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/LatoLatin-Regular.ttf")
+# Hub UI fonts (Lato Latin — same face as recomp-ui). Required when hub is built.
+set(RETCOMM_FONT_REGULAR "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/LatoLatin-Regular.ttf")
+if(TARGET retcomm-hub AND NOT EXISTS "${RETCOMM_FONT_REGULAR}")
+    message(FATAL_ERROR
+        "retcomm-hub needs ${RETCOMM_FONT_REGULAR} (and LatoLatin-Bold.ttf). "
+        "Commit assets/fonts/ so AppImage/DMG/Windows packages ship the UI face.")
+endif()
+if(EXISTS "${RETCOMM_FONT_REGULAR}")
     install(FILES
         assets/fonts/LatoLatin-Regular.ttf
         assets/fonts/LatoLatin-Bold.ttf

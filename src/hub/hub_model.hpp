@@ -238,6 +238,9 @@ struct HubModel {
     void refresh_rows(bool check_updates);
     void append_log(const std::string& line);
     void set_status(const std::string& s);
+    // Download covers for catalog titles missing from the active cache (or all when force).
+    // Safe to call from the hub worker thread.
+    void fetch_boxart_for_catalog(bool force = false);
     bool start_job(HubJob j, const std::string& title_id = {}, bool force_boxart = false);
     void join_worker();
 

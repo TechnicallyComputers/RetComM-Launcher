@@ -7,6 +7,8 @@
 #include "retcomm/self_update.hpp"
 #include "retcomm/catalog_sync.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <sstream>
 #include <unordered_set>
@@ -226,6 +228,19 @@ void HubModel::refresh_rows(bool check_updates) {
         next.push_back(std::move(row));
     }
 
+    std::sort(next.begin(), next.end(), [](const TitleRow& a, const TitleRow& b) {
+        const size_t n = std::min(a.name.size(), b.name.size());
+        for (size_t i = 0; i < n; ++i) {
+            const auto ca =
+                static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(a.name[i])));
+            const auto cb =
+                static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(b.name[i])));
+            if (ca != cb) return ca < cb;
+        }
+        if (a.name.size() != b.name.size()) return a.name.size() < b.name.size();
+        return a.id < b.id;
+    });
+
     if (state_dirty) save_app_state(paths.state_path, app_state, nullptr);
 
     std::lock_guard<std::mutex> lock(mu);
@@ -243,6 +258,51 @@ void HubModel::refresh_rows(bool check_updates) {
             }
         }
     }
+}
+
+void HubModel::fetch_boxart_for_catalog(bool force) {
+    const char* src = active_boxart_source(cfg);
+    set_status(std::string(force ? "Resyncing boxart (" : "Fetching boxart (") + src + ")…");
+    append_log(std::string("Boxart: source=") + src +
+               (cfg.romm.sync_boxart ? (" @ " + cfg.romm.base_url) : "") +
+               (cfg.prefer_local_boxart ? " (prefer local)" : "") +
+               (force ? " (force resync)" : ""));
+    if (force) {
+        clear_boxart_cache(paths, cfg);
+        append_log(std::string("Boxart: cleared cache ") + boxart_cache_dir(paths, cfg).string());
+    }
+    size_t fetched = 0, skipped = 0, failed = 0;
+    const size_t total = catalog.titles.size();
+    size_t i = 0;
+    for (const auto& t : catalog.titles) {
+        ++i;
+        const fs::path rom = library.preferred_rom(t.id);
+        const std::string suggested =
+            t.rom_identity.filenames.empty() ? "" : t.rom_identity.filenames.front();
+        {
+            std::ostringstream st;
+            st << "Boxart (" << src << "): " << i << "/" << total << " — " << t.name;
+            set_status(st.str());
+        }
+        auto fr = ensure_remote_boxart(paths, cfg, t, rom, suggested, force);
+        if (fr.ok) {
+            if (fr.source == "local" || fr.source == "cache" || fr.message == "already present")
+                ++skipped;
+            else {
+                ++fetched;
+                append_log("Boxart [" + fr.source + "] " + t.id + ": " + fr.message);
+            }
+        } else {
+            ++failed;
+            if (should_log_progress(i, total, 5) || failed <= 8)
+                append_log("Boxart miss " + t.id + ": " + fr.message);
+        }
+    }
+    std::ostringstream oss;
+    oss << "Boxart: fetched " << fetched << ", already had " << skipped << ", missed " << failed
+        << " (" << src << ")";
+    append_log(oss.str());
+    set_status(oss.str());
 }
 
 bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxart) {
@@ -485,52 +545,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 return;
             }
             case HubJob::FetchBoxart: {
-                const char* src = active_boxart_source(cfg);
-                set_status(std::string(force_boxart ? "Resyncing boxart (" : "Fetching boxart (") +
-                           src + ")…");
-                append_log(std::string("Boxart: source=") + src +
-                           (cfg.romm.sync_boxart ? (" @ " + cfg.romm.base_url) : "") +
-                           (cfg.prefer_local_boxart ? " (prefer local)" : "") +
-                           (force_boxart ? " (force resync)" : ""));
-                if (force_boxart) {
-                    clear_boxart_cache(paths, cfg);
-                    append_log(std::string("Boxart: cleared cache ") +
-                               boxart_cache_dir(paths, cfg).string());
-                }
-                size_t fetched = 0, skipped = 0, failed = 0;
-                const size_t total = catalog.titles.size();
-                size_t i = 0;
-                for (const auto& t : catalog.titles) {
-                    ++i;
-                    const fs::path rom = library.preferred_rom(t.id);
-                    const std::string suggested =
-                        t.rom_identity.filenames.empty() ? "" : t.rom_identity.filenames.front();
-                    {
-                        std::ostringstream st;
-                        st << "Boxart (" << src << "): " << i << "/" << total << " — " << t.name;
-                        set_status(st.str());
-                    }
-                    auto fr =
-                        ensure_remote_boxart(paths, cfg, t, rom, suggested, force_boxart);
-                    if (fr.ok) {
-                        if (fr.source == "local" || fr.source == "cache" ||
-                            fr.message == "already present")
-                            ++skipped;
-                        else {
-                            ++fetched;
-                            append_log("Boxart [" + fr.source + "] " + t.id + ": " + fr.message);
-                        }
-                    } else {
-                        ++failed;
-                        if (should_log_progress(i, total, 5) || failed <= 8)
-                            append_log("Boxart miss " + t.id + ": " + fr.message);
-                    }
-                }
-                std::ostringstream oss;
-                oss << "Boxart: fetched " << fetched << ", already had " << skipped << ", missed "
-                    << failed << " (" << src << ")";
-                append_log(oss.str());
-                set_status(oss.str());
+                fetch_boxart_for_catalog(force_boxart);
                 break;
             }
             case HubJob::FetchRommRom: {
@@ -690,6 +705,12 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 } catch (const std::exception& e) {
                     append_log(std::string("catalog reload failed: ") + e.what());
                     set_status("Catalog refresh failed — reload error");
+                    break;
+                }
+                // Fill covers for any new/missing titles (skip already-cached).
+                if (!cr.skipped) {
+                    library = load_library_index(paths.library_index_path);
+                    fetch_boxart_for_catalog(false);
                 }
                 break;
             }

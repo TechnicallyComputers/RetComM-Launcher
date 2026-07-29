@@ -271,6 +271,21 @@ void walk_platform_root(const fs::path& root, const std::string& platform,
 
     if (!want_any_hash) return;
 
+    // Incremental: if cache hits already identified every title on this platform,
+    // do not re-hash remaining candidates (Full Rescan still hashes everything).
+    if (!opts.full_rescan && all_identity_titles_matched(need, platform, result)) {
+        for (const auto& path : to_hash) {
+            ++result.skipped_hash;
+            RomFile rest;
+            rest.path = path;
+            rest.platform = platform;
+            rest.ext = lower_ext(path);
+            fill_meta(rest, path);
+            result.files.push_back(std::move(rest));
+        }
+        return;
+    }
+
     // Smaller dumps first (MotK .bin before .iso) so we can early-out on match.
     std::sort(to_hash.begin(), to_hash.end(), [](const fs::path& a, const fs::path& b) {
         std::error_code ea, eb;

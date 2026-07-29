@@ -111,11 +111,18 @@ if (Test-Path (Join-Path $Root "assets\retcomm.png")) {
 }
 # Hub UI fonts next to the exes (fonts/LatoLatin-*.ttf).
 $FontsSrc = Join-Path $Prefix "share\retcomm\fonts"
-if (-not (Test-Path $FontsSrc)) { $FontsSrc = Join-Path $Root "assets\fonts" }
-if (Test-Path $FontsSrc) {
-    $FontsDst = Join-Path $Stage "fonts"
-    New-Item -ItemType Directory -Force -Path $FontsDst | Out-Null
-    Copy-Item (Join-Path $FontsSrc "*") $FontsDst -Force
+if (-not (Test-Path (Join-Path $FontsSrc "LatoLatin-Regular.ttf"))) {
+    $FontsSrc = Join-Path $Root "assets\fonts"
+}
+$FontsRegular = Join-Path $FontsSrc "LatoLatin-Regular.ttf"
+if (-not (Test-Path $FontsRegular)) {
+    throw "Hub fonts missing (expected LatoLatin-Regular.ttf under share/retcomm/fonts or assets/fonts)"
+}
+$FontsDst = Join-Path $Stage "fonts"
+New-Item -ItemType Directory -Force -Path $FontsDst | Out-Null
+Copy-Item (Join-Path $FontsSrc "*") $FontsDst -Force
+if (-not (Test-Path (Join-Path $FontsDst "LatoLatin-Regular.ttf"))) {
+    throw "Failed to stage hub fonts into $FontsDst"
 }
 
 # --- Portable single-exe (stub + appended zip trailer; zip is temporary only) ---

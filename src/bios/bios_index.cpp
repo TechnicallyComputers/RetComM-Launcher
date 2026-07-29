@@ -433,10 +433,21 @@ BiosScanResult scan_bios_roots(const Catalog& catalog, const AppConfig& cfg,
         auto itn = needs.find(f.platform);
         if (itn != needs.end()) need = &itn->second;
 
+        const bool want_crc = !need || need->want_crc;
+        const bool want_md5 = need && need->want_md5;
+        const bool want_sha1 = need && need->want_sha1;
+        const bool want_sha256 = need && need->want_sha256;
+
         bool use_cache = false;
         if (!opts.full_rescan && opts.index) {
             if (const auto* cached = opts.index->find_path(f.path)) {
-                if (opts.index->is_fresh(*cached, f.size, f.mtime_sec)) {
+                // Same rule as ROM scan: fresh size/mtime and every needed digest present.
+                const bool need_ok =
+                    (!want_crc || !cached->crc32.empty()) &&
+                    (!want_md5 || !cached->md5.empty()) &&
+                    (!want_sha1 || !cached->sha1.empty()) &&
+                    (!want_sha256 || !cached->sha256.empty());
+                if (need_ok && opts.index->is_fresh(*cached, f.size, f.mtime_sec)) {
                     f.crc32 = cached->crc32;
                     f.md5 = cached->md5;
                     f.sha1 = cached->sha1;
@@ -447,10 +458,6 @@ BiosScanResult scan_bios_roots(const Catalog& catalog, const AppConfig& cfg,
             }
         }
         if (!use_cache) {
-            const bool want_crc = !need || need->want_crc;
-            const bool want_md5 = need && need->want_md5;
-            const bool want_sha1 = need && need->want_sha1;
-            const bool want_sha256 = need && need->want_sha256;
             if (want_crc) f.crc32 = file_crc32_hex(f.path);
             if (want_md5) f.md5 = file_md5_hex(f.path);
             if (want_sha1) f.sha1 = file_sha1_hex(f.path);

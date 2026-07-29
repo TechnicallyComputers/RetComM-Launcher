@@ -21,7 +21,16 @@ Writes `assets/retcomm.png` at **512×512** (linuxdeploy’s max allowed size;
 `assets/retcomm.svg`.
 
 Hub UI fonts live in `assets/fonts/` (Lato Latin, same face as recomp-ui) and
-install to `share/retcomm/fonts` (Windows stage / macOS Resources also copy them).
+install to `share/retcomm/fonts`. Packaging **requires** them:
+
+| Artifact | Font location |
+|---|---|
+| Linux AppImage | `usr/share/retcomm/fonts` + `usr/bin/fonts` |
+| macOS `.app` / DMG | `Contents/Resources/fonts` |
+| Windows setup / portable | `fonts/` next to the exes |
+
+CI fails the release job if `LatoLatin-Regular.ttf` is missing from the install
+prefix or the final package.
 
 ## Linux
 

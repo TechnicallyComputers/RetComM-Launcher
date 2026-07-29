@@ -25,9 +25,13 @@ install -m 755 "${PREFIX}/bin/retcomm-hub" "${APP}/Contents/MacOS/retcomm-hub"
 if [[ -d "${PREFIX}/share/retcomm/fonts" ]]; then
   mkdir -p "${APP}/Contents/Resources/fonts"
   cp -a "${PREFIX}/share/retcomm/fonts/." "${APP}/Contents/Resources/fonts/"
-elif [[ -d "${ROOT}/assets/fonts" ]]; then
+elif [[ -f "${ROOT}/assets/fonts/LatoLatin-Regular.ttf" ]]; then
   mkdir -p "${APP}/Contents/Resources/fonts"
   cp -a "${ROOT}/assets/fonts/." "${APP}/Contents/Resources/fonts/"
+fi
+if [[ ! -f "${APP}/Contents/Resources/fonts/LatoLatin-Regular.ttf" ]]; then
+  echo "error: hub fonts missing in app bundle (LatoLatin-Regular.ttf)" >&2
+  exit 1
 fi
 
 sed "s|@VERSION@|${VERSION}|g" "${ROOT}/packaging/macos/Info.plist.in" \

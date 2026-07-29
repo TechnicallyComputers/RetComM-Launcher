@@ -21,6 +21,23 @@ mkdir -p "${APPDIR}/usr" "${TOOL_DIR}" "${OUT_DIR}"
 # Copy staged install (bin + optional lib/share icons). Catalog is on-device only.
 cp -a "${PREFIX}/." "${APPDIR}/usr/"
 
+# Hub fonts (Lato) — required for AppImage UI. Prefer CMake install; fall back to assets/.
+FONTS_DST="${APPDIR}/usr/share/retcomm/fonts"
+if [[ ! -f "${FONTS_DST}/LatoLatin-Regular.ttf" ]]; then
+  if [[ -f "${ROOT}/assets/fonts/LatoLatin-Regular.ttf" ]]; then
+    mkdir -p "${FONTS_DST}"
+    cp -a "${ROOT}/assets/fonts/." "${FONTS_DST}/"
+  fi
+fi
+if [[ ! -f "${FONTS_DST}/LatoLatin-Regular.ttf" ]]; then
+  echo "error: hub fonts missing (expected ${FONTS_DST}/LatoLatin-Regular.ttf or assets/fonts/)" >&2
+  echo "  cmake --install should place share/retcomm/fonts from assets/fonts/" >&2
+  exit 1
+fi
+# Also next to the binary: SDL_GetBasePath() is often …/usr/bin/ inside the AppImage.
+mkdir -p "${APPDIR}/usr/bin/fonts"
+cp -a "${FONTS_DST}/." "${APPDIR}/usr/bin/fonts/"
+
 # Desktop + icon at AppDir root (linuxdeploy / appimagetool convention).
 install -m 644 "${ROOT}/packaging/linux/retcomm.desktop" "${APPDIR}/retcomm.desktop"
 if [[ -f "${ROOT}/assets/retcomm.png" ]]; then
@@ -70,13 +87,47 @@ fi
   --output appimage
 
 # Normalize output name if linuxdeploy used a different default.
+APPIMAGE_OUT="${OUT_DIR}/RetComM-Launcher-${VERSION}-linux-${ARCH}.AppImage"
 shopt -s nullglob
 for f in "${OUT_DIR}"/*.AppImage; do
   base="$(basename "$f")"
   if [[ "${base}" != "RetComM-Launcher-${VERSION}-linux-${ARCH}.AppImage" &&
         "${base}" != linuxdeploy* ]]; then
-    mv -f "$f" "${OUT_DIR}/RetComM-Launcher-${VERSION}-linux-${ARCH}.AppImage"
+    mv -f "$f" "${APPIMAGE_OUT}"
   fi
 done
 
-echo "AppImage: ${OUT_DIR}/RetComM-Launcher-${VERSION}-linux-${ARCH}.AppImage"
+if [[ ! -f "${APPIMAGE_OUT}" ]]; then
+  echo "error: AppImage not produced at ${APPIMAGE_OUT}" >&2
+  exit 1
+fi
+
+# Verify fonts survived packaging (extract without FUSE).
+VERIFY_DIR="${OUT_DIR}/.appimage-font-check"
+rm -rf "${VERIFY_DIR}"
+mkdir -p "${VERIFY_DIR}"
+(
+  cd "${VERIFY_DIR}"
+  if "${APPIMAGE_OUT}" --appimage-extract >/dev/null 2>&1; then
+    :
+  elif "${APPIMAGE_OUT}" --appimage-extract-and-run true >/dev/null 2>&1; then
+    # Older runtimes: fall back to unsquash if available
+    if command -v unsquashfs >/dev/null 2>&1; then
+      unsquashfs -d squashfs-root "${APPIMAGE_OUT}" >/dev/null
+    fi
+  fi
+  if [[ -d squashfs-root ]]; then
+    if [[ ! -f squashfs-root/usr/share/retcomm/fonts/LatoLatin-Regular.ttf &&
+          ! -f squashfs-root/usr/bin/fonts/LatoLatin-Regular.ttf ]]; then
+      echo "error: AppImage is missing hub fonts (LatoLatin-Regular.ttf)" >&2
+      find squashfs-root/usr -name '*.ttf' 2>/dev/null || true
+      exit 1
+    fi
+    echo "fonts ok in AppImage"
+  else
+    echo "warning: could not extract AppImage to verify fonts; AppDir staging was checked" >&2
+  fi
+)
+rm -rf "${VERIFY_DIR}"
+
+echo "AppImage: ${APPIMAGE_OUT}"

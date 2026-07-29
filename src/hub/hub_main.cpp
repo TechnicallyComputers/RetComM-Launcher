@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cstdint>
 #include <filesystem>
@@ -42,7 +43,14 @@ fs::path find_hub_font_file(const char* filename) {
     };
 
     std::vector<fs::path> dirs;
-    // SDL3: cached string — do not free.
+    // AppImage runtime sets APPDIR to the mounted squashfs root.
+    if (const char* appdir = std::getenv("APPDIR")) {
+        const fs::path ad(appdir);
+        dirs.push_back(ad / "usr" / "share" / "retcomm" / "fonts");
+        dirs.push_back(ad / "usr" / "bin" / "fonts");
+        dirs.push_back(ad / "fonts");
+    }
+    // SDL3: cached string — do not free. Often …/usr/bin/ inside an AppImage.
     if (const char* base = SDL_GetBasePath()) {
         fs::path b(base);
         dirs.push_back(b);
@@ -55,6 +63,7 @@ fs::path find_hub_font_file(const char* filename) {
         for (int i = 0; i < 6 && !walk.empty(); ++i) {
             dirs.push_back(walk / "assets" / "fonts");
             dirs.push_back(walk / "fonts");
+            dirs.push_back(walk / "share" / "retcomm" / "fonts");
             walk = walk.parent_path();
         }
     }
@@ -713,7 +722,8 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
     ImGui::TextWrapped(
         "Scan uses the saved library/BIOS roots (Save above first if you changed paths). "
-        "Full rescan clears the index cache and re-hashes everything.");
+        "Normal scan reuses the index — files already hashed with unchanged size/mtime are "
+        "skipped. Full rescan clears the index and re-hashes everything.");
     ImGui::PopStyleColor();
     ImGui::Dummy(ImVec2(0, 6));
     {
@@ -788,13 +798,17 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     {
         const bool busy = hub.job_running.load();
         ImGui::BeginDisabled(busy);
-        if (ImGui::Button("Resync Boxart", ImVec2(200, 0)))
+        if (ImGui::Button("Find Missing Boxart", ImVec2(200, 0)))
+            hub.start_job(HubJob::FetchBoxart, {}, false);
+        ImGui::SameLine();
+        if (ImGui::Button("Resync All Boxart", ImVec2(200, 0)))
             hub.start_job(HubJob::FetchBoxart, {}, true);
         ImGui::EndDisabled();
         ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
         ImGui::TextWrapped(
-            "Clears the cover cache and re-downloads art for every catalog title "
-            "(Libretro thumbnails, or RomM when Sync Boxart is enabled). Not run on startup.");
+            "Find Missing downloads covers only for titles with no cached art. "
+            "Resync All clears the cover cache and re-downloads every catalog title "
+            "(Libretro thumbnails, or RomM when Sync Boxart is enabled).");
         ImGui::PopStyleColor();
     }
 
@@ -1165,13 +1179,16 @@ int main(int argc, char** argv) {
     HubModel hub;
     hub.paths = retcomm::default_paths();
     hub.cfg = retcomm::load_app_config(hub.paths.config_path);
+    bool catalog_updated = false;
     try {
         retcomm::ensure_dirs(hub.paths);
         const auto sync = retcomm::maybe_auto_update_catalog(hub.paths, hub.cfg);
         if (!sync.ok && !sync.skipped)
             hub.append_log(std::string("catalog auto-update: ") + sync.message);
-        else if (sync.ok && !sync.skipped)
+        else if (sync.ok && !sync.skipped) {
             hub.append_log(sync.message);
+            catalog_updated = true;
+        }
         const fs::path cat = retcomm::resolve_catalog_dir(fs::path(argv[0]).parent_path(), {},
                                                           &hub.paths);
         hub.catalog = retcomm::load_catalog(cat);
@@ -1194,6 +1211,8 @@ int main(int argc, char** argv) {
     } else {
         hub.set_status("Ready");
     }
+    // After a real catalog download, pull covers for titles missing from cache.
+    if (catalog_updated) hub.start_job(HubJob::FetchBoxart);
 
     retcomm::hub::BoxartCache boxart;
     bool running = true;
