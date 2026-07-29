@@ -122,16 +122,27 @@ jobs:
           chmod +x packaging/make-icons.sh
           ./packaging/make-icons.sh
 
+      # windows-latest currently ships VS 2025 (18); Ninja + MSVC avoids
+      # hard-coding a Visual Studio generator year.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Ninja
+        shell: bash
+        run: choco install ninja -y
+
       - name: Configure & build
         shell: bash
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 \
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_TOOLCHAIN_FILE="$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" \
             -DCMAKE_INSTALL_PREFIX="$PWD/out" \
             -DRETCOMM_VERSION="${{ needs.version.outputs.version }}" \
             -DRETCOMM_BUNDLE_CATALOG=ON
-          cmake --build build --config Release -j
-          cmake --install build --config Release
+          cmake --build build -j
+          cmake --install build
 
       - name: Package zip
         shell: pwsh
