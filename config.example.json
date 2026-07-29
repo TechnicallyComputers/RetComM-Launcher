@@ -20,5 +20,10 @@
     "base_url": "https://your-romm.example.com",
     "api_token": "",
     "sync_boxart": false
+  },
+  "netplay": {
+    "lobby_url": "ws://netplay.technicallycomputers.ca:8765",
+    "display_name": "",
+    "prefer_ice": false
   }
 }

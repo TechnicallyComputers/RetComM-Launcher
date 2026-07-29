@@ -302,7 +302,13 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
         ImGui::Dummy(ImVec2(0, 6));
         if (row.save_labels.empty()) {
             ImGui::TextColored(th.text_muted, "Save file");
-            ImGui::TextColored(th.text_muted, "None yet — Sync Game Saves from RomM");
+            ImGui::TextColored(th.text_muted,
+                               "None yet — Create Save, Play (auto-creates), or Sync from RomM");
+            if (ImGui::Button("Create Save", ImVec2(-1, 0))) {
+                std::string err;
+                if (!hub.create_title_save(row.id, &err))
+                    hub.append_log("Create Save failed: " + err);
+            }
         } else if (row.dual_memcard) {
             auto draw_memcard_combo = [&](const char* label, const char* combo_id, int index,
                                           bool is_card2) {
@@ -341,9 +347,15 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
             draw_memcard_combo("Memcard 1", "##memcard1", row.preferred_save_index, false);
             ImGui::Dummy(ImVec2(0, 4));
             draw_memcard_combo("Memcard 2", "##memcard2", row.preferred_save_card2_index, true);
+            if (ImGui::Button("Create Save", ImVec2(-1, 0))) {
+                std::string err;
+                if (!hub.create_title_save(row.id, &err))
+                    hub.append_log("Create Save failed: " + err);
+            }
             ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
             ImGui::TextWrapped(
-                "Play writes these into settings.toml [memcard] card1 / card2.");
+                "Saves live in the save library (or install saves/). Play binds "
+                "settings.toml [memcard] card1 / card2.");
             ImGui::PopStyleColor();
         } else {
             ImGui::TextColored(th.text_muted, "Save file");
@@ -365,8 +377,14 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
                 }
                 ImGui::EndCombo();
             }
+            if (ImGui::Button("Create Save", ImVec2(-1, 0))) {
+                std::string err;
+                if (!hub.create_title_save(row.id, &err))
+                    hub.append_log("Create Save failed: " + err);
+            }
             ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-            ImGui::TextWrapped("Play uses this managed save via --save-path.");
+            ImGui::TextWrapped(
+                "Canonical save in the save library when configured; Play passes --save-path.");
             ImGui::PopStyleColor();
         }
 
@@ -444,8 +462,8 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
                 hub.start_job(HubJob::SyncRommSaves, row.id);
             ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
             ImGui::TextWrapped(
-                "Bidirectional sync of native saves (SRAM / memcard) between this install "
-                "and RomM. Newer file wins; identical hashes are skipped.");
+                "Promotes install saves into the save library, then bidirectional sync with "
+                "RomM. Newer file wins; identical hashes are skipped.");
             ImGui::PopStyleColor();
 
             if (ImGui::Button("Sync Savestates", ImVec2(-1, 0)))

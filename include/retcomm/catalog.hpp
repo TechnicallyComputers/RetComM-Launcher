@@ -54,6 +54,18 @@ struct TitleLaunch {
     std::string macos;
 };
 
+// Optional recomp-net lobby identity. Omit in JSON when unsupported.
+struct TitleNetplay {
+    bool supported = false;
+    std::string stack;           // "recomp-net"
+    std::string game_name;       // Exact WS create/join/list wire name
+    std::string game_version;    // Lobby pin (empty → "dev" on the server)
+    int max_slots = 2;
+    std::string lobby_url;       // Optional per-title override
+    std::vector<std::string> transports; // e.g. "lan", "ice"
+    std::string match_caps_schema;       // e.g. "psx-v1", "snes-v1"
+};
+
 struct Title {
     std::string id;
     std::string name;
@@ -72,6 +84,7 @@ struct Title {
     std::vector<std::string> romm_platforms;
     std::vector<std::string> saves_sram_glob;
     std::vector<std::string> saves_memcard_glob;
+    TitleNetplay netplay;
 
     bool has_rom_identity() const;
     bool has_bios_identity() const;
@@ -86,6 +99,8 @@ struct Title {
     std::string github_owner() const;
     // Homepage when set, else https://github.com/<release.github>.
     std::string github_source_url() const;
+    // True when catalog advertises a usable recomp-net lobby identity.
+    bool supports_netplay() const;
 };
 
 struct Catalog {
@@ -98,7 +113,13 @@ struct Catalog {
     fs::path root;
 
     const Title* find(const std::string& id) const;
+    // First title whose netplay.game_name matches (exact). Prefer installed later in hub.
+    const Title* find_by_netplay_game_name(const std::string& game_name) const;
 };
+
+// Empty / whitespace → "dev". Leading 'v'/'V' stripped when the rest looks like a version.
+std::string normalize_netplay_version(std::string version);
+bool netplay_versions_equal(const std::string& a, const std::string& b);
 
 // Load index.json + titles/<id>.json. Throws std::runtime_error on hard failure.
 Catalog load_catalog(const fs::path& catalog_dir);

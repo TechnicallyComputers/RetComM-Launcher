@@ -57,7 +57,14 @@ AppConfig normalize_config(AppConfig cfg) {
             cfg.platform_folders[plat] = folders;
     }
     if (cfg.exclude_dirs.empty()) cfg.exclude_dirs = default_exclude_dirs();
+    if (cfg.netplay.lobby_url.empty()) cfg.netplay.lobby_url = kDefaultNetplayLobbyUrl;
     return cfg;
+}
+
+std::string AppConfig::resolve_netplay_lobby_url(const std::string& title_lobby_url) const {
+    if (!title_lobby_url.empty()) return title_lobby_url;
+    if (!netplay.lobby_url.empty()) return netplay.lobby_url;
+    return kDefaultNetplayLobbyUrl;
 }
 
 std::vector<std::string> AppConfig::folders_for_platform(const std::string& platform) const {
@@ -150,6 +157,13 @@ AppConfig load_app_config(const fs::path& config_path) {
             while (!cfg.romm.base_url.empty() && cfg.romm.base_url.back() == '/')
                 cfg.romm.base_url.pop_back();
         }
+
+        if (j.contains("netplay") && j.at("netplay").is_object()) {
+            const auto& n = j.at("netplay");
+            cfg.netplay.lobby_url = n.value("lobby_url", "");
+            cfg.netplay.display_name = n.value("display_name", "");
+            cfg.netplay.prefer_ice = n.value("prefer_ice", false);
+        }
     } catch (...) {
         // Keep defaults on parse errors.
     }
@@ -184,7 +198,11 @@ bool save_app_config(const fs::path& config_path, const AppConfig& cfg, std::str
               {"romm",
                {{"base_url", cfg.romm.base_url},
                 {"api_token", cfg.romm.api_token},
-                {"sync_boxart", cfg.romm.sync_boxart}}}};
+                {"sync_boxart", cfg.romm.sync_boxart}}},
+              {"netplay",
+               {{"lobby_url", cfg.netplay.lobby_url},
+                {"display_name", cfg.netplay.display_name},
+                {"prefer_ice", cfg.netplay.prefer_ice}}}};
 
     std::ofstream out(config_path);
     if (!out) {

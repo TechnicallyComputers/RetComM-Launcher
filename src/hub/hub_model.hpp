@@ -78,6 +78,82 @@ struct TitleRow {
     int preferred_save_index = -1;
     std::string preferred_save_card2; // memcard 2 id; "__blank__" = empty card
     int preferred_save_card2_index = -1; // -1 = Blank card
+
+    // Catalog netplay (recomp-net). Populated when Title::supports_netplay().
+    bool netplay_supported = false;
+    std::string netplay_game_name;
+    std::string netplay_game_version;
+    std::string netplay_lobby_url; // resolved: title override || config || default
+    int netplay_max_slots = 2;
+    bool netplay_joinable = false;     // installed + supported
+    bool netplay_version_ok = false;   // installed_tag matches catalog pin (advisory)
+};
+
+enum class NetplayView : int {
+    Hidden = 0,
+    Browser, // cross-game room list
+    Room,    // seated in a lobby
+};
+
+struct NetplayRoomRow {
+    std::string lobby_id;
+    std::string name;
+    std::string game_name;
+    std::string game_version;
+    std::string catalog_id; // resolved via game_name when possible
+    int players = 0;
+    int max_slots = 2;
+    bool has_password = false;
+    bool joinable_locally = false; // matching install available
+};
+
+struct NetplaySlot {
+    int slot = 0;
+    std::string player_id;
+    std::string display_name;
+    bool ready = false;
+};
+
+struct NetplayLobbyState {
+    NetplayView view = NetplayView::Hidden;
+    std::string lobby_url;
+    std::string display_name;
+    bool connected = false;
+    std::string status;
+    std::string filter_catalog_id; // empty = all netplay titles
+
+    std::vector<NetplayRoomRow> rooms;
+
+    // Active room (after create/join)
+    std::string lobby_id;
+    std::string room_name;
+    std::string game_name;
+    std::string game_version;
+    std::string catalog_id;
+    bool is_host = false;
+    int local_slot = -1;
+    std::string session_id;
+    std::string host_endpoint;
+    std::string guest_endpoint;
+    std::vector<NetplaySlot> slots;
+    std::string match_caps_json; // opaque server echo
+
+    // Host create draft
+    std::string create_catalog_id;
+    char create_room_name[128]{};
+    char create_password[64]{};
+    int create_udp_port = 7777;
+};
+
+// Future handoff into LaunchMode::Netplay (env + spawn).
+struct NetplayLaunchRequest {
+    std::string catalog_id;
+    bool is_host = false;
+    int local_slot = 0;
+    std::string session_id;
+    std::string peer_endpoint;
+    std::string lobby_url;
+    std::string match_caps_json;
 };
 
 struct PlatformFolderEdit {
@@ -125,6 +201,7 @@ struct HubModel {
     bool show_setup = false; // first-time library/BIOS wizard
     SettingsDraft settings;
     RommSettingsDraft romm_settings;
+    NetplayLobbyState netplay;
 
     std::mutex mu;
     std::string status;
@@ -164,6 +241,9 @@ struct HubModel {
     // Disc memcard 2. Pass kBlankMemcardId / empty for a blank card2.mcd.
     bool set_title_preferred_save_card2(const std::string& title_id, const std::string& save_id,
                                         std::string* error = nullptr);
+
+    // Mint a new empty managed save in the library (or install saves/), set preferred.
+    bool create_title_save(const std::string& title_id, std::string* error = nullptr);
 
     // Apply a completed folder pick into settings drafts (call from UI thread).
     void apply_pending_folder_pick();

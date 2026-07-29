@@ -561,10 +561,19 @@ LaunchResult launch_title(const Paths& paths, const Title& title, const LaunchOp
         return result;
     }
 
-    // Point [memcard] / cart slots at the shared saves tree (library or install)
-    // before staging rom.cfg — GBA launcher sidecars need the resolved save path.
+    // Canonicalize saves (promote install→library, mint if needed), then bind
+    // [memcard] / cart slots before staging rom.cfg.
     {
         const AppConfig cfg = load_app_config(paths.config_path);
+        auto ensured =
+            ensure_canonical_save(paths, cfg, title, opts.rom_path, /*mint_if_missing=*/true);
+        if (ensured.ok) {
+            if (result.plan.save_path.empty()) result.plan.save_path = ensured.save.host_path;
+            if (!ensured.message.empty())
+                result.plan.message += "  saves:  " + ensured.message + "\n";
+        } else if (!ensured.message.empty()) {
+            result.plan.message += "  warning: " + ensured.message + "\n";
+        }
         auto bind = bind_recomp_save_paths(paths, cfg, title, result.plan.use_wine,
                                            result.plan.save_path, opts.save_path_card2,
                                            opts.save_path_card2_blank);

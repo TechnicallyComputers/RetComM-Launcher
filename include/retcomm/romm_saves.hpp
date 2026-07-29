@@ -24,8 +24,8 @@ struct RommSaveSyncResult {
 };
 
 // Bidirectional sync of native game saves (SRAM / memcard — not emulator savestates)
-// with RomM /api/saves. Prefers config saves_root/<platform>/ when set; otherwise
-// the install's saves/ tree. Newer file wins (local mtime vs remote updated_at).
+// with RomM /api/saves. Promotes install→library first when saves_root is set,
+// then syncs the library only. Otherwise uses install saves/. Newer wins.
 RommSaveSyncResult sync_saves_with_romm(const Paths& paths, const AppConfig& cfg,
                                         const Title& title, RommProgressFn on_progress = {});
 
@@ -43,6 +43,14 @@ struct ManagedSave {
     fs::path host_path;
 };
 
+struct CanonicalSaveResult {
+    bool ok = false;
+    bool created = false; // minted a new empty file
+    int promoted = 0;     // install/preserved → library copies
+    std::string message;
+    ManagedSave save; // primary (cart battery or memcard 1)
+};
+
 // Enumerate native battery / memcard files for the title (library saves_root when
 // set, else install saves/). Empty when nothing is available yet.
 std::vector<ManagedSave> list_managed_saves(const Paths& paths, const AppConfig& cfg,
@@ -51,6 +59,22 @@ std::vector<ManagedSave> list_managed_saves(const Paths& paths, const AppConfig&
 // Resolve a managed save id (or bare filename) to a host path.
 fs::path resolve_managed_save(const Paths& paths, const AppConfig& cfg, const Title& title,
                               const std::string& save_id);
+
+// Copy install/preserved native saves into saves_root/<platform>/ when configured.
+// Renames generic slot files (save.*, card1.*) to a ROM/title stem. Returns count.
+int promote_install_saves_to_library(const Paths& paths, const AppConfig& cfg,
+                                     const Title& title, const fs::path& rom_hint = {});
+
+// Ensure a canonical library (or install) save exists: promote → reuse → mint.
+// Persists preferred_save in state.json when minting or when none was set.
+// rom_hint: preferred ROM path used for ES-DE-friendly naming.
+CanonicalSaveResult ensure_canonical_save(const Paths& paths, const AppConfig& cfg,
+                                          const Title& title, const fs::path& rom_hint = {},
+                                          bool mint_if_missing = true);
+
+// Mint a new empty managed save (unique stem), set it preferred, return it.
+CanonicalSaveResult create_managed_save(const Paths& paths, const AppConfig& cfg,
+                                        const Title& title, const fs::path& rom_hint = {});
 
 struct RecompSaveBindResult {
     bool ok = false;

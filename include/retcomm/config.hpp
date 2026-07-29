@@ -17,6 +17,17 @@ struct CatalogConfig {
     bool auto_update = true; // check latest release on startup; download if tag/date changed
 };
 
+struct NetplayConfig {
+    // Default recomp-net-server WebSocket URL (title netplay.lobby_url overrides).
+    std::string lobby_url;
+    std::string display_name; // Player name for create/join
+    bool prefer_ice = false;  // Default transport hint when hosting
+};
+
+// Built-in default when config.netplay.lobby_url is empty.
+inline constexpr const char* kDefaultNetplayLobbyUrl =
+    "ws://netplay.technicallycomputers.ca:8765";
+
 // User config (~/.config/retcomm/config.json). RomM/ES-style library layout:
 //   <library_root>/<platform_folder>/...
 struct AppConfig {
@@ -32,6 +43,10 @@ struct AppConfig {
     bool prefer_local_boxart = false;
     CatalogConfig catalog;
     RommConfig romm;
+    NetplayConfig netplay;
+
+    // Title override when set, else cfg.netplay.lobby_url, else built-in default.
+    std::string resolve_netplay_lobby_url(const std::string& title_lobby_url = {}) const;
 
     // Resolve folder names for a catalog platform (defaults + overrides).
     std::vector<std::string> folders_for_platform(const std::string& platform) const;

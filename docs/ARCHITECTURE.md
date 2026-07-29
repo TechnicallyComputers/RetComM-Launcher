@@ -82,12 +82,23 @@ sizes/filenames from catalog `bios_identity` (including
 ## Game saves
 
 Config `saves_root` (optional, prompted in first-time setup / Library Settings)
-is a shared native-save library. When set, RomM save sync and the hub save
-picker use `saves_root/<platform folder>/`. Launch binds cart `--save-path` /
-PSX `settings.toml` `[memcard]` to those files, and bridges
-`apps/<title>/current/saves/save.*` with symlinks for hosts that only look
-under the install cwd. When unset, behavior stays install-local
-`…/current/saves/`. Savestate sync remains install-local either way.
+is the **canonical** native-save library (ES-DE / other frontend layout:
+`saves_root/<platform folder>/`).
+
+Flow:
+
+1. **Promote** — install `current/saves/` and `preserved/` native files are
+   copied into the library (generic `save.*` / `card1.*` renamed to the ROM
+   stem). Bridge symlinks are skipped.
+2. **Mint / Create Save** — if none exist, Play or **Create Save** creates an
+   empty `<rom-stem>.srm` / `.mcd` in the library and sets `preferred_save`.
+3. **Bind** — launch points cart `--save-path` / PSX `[memcard]` at library
+   files and bridges `apps/<title>/current/saves/save.*` for fixed-cwd hosts.
+4. **RomM sync** — after promote, bidirectional newer-wins only against the
+   library (not the install tree).
+
+When `saves_root` is unset, behavior stays install-local `…/current/saves/`.
+Savestate sync remains install-local either way.
 
 ## RomM (optional)
 
@@ -100,7 +111,8 @@ Local-only mode must work with RomM unset.
 1. ~~Catalog + scan + CLI stubs~~
 2. ~~GitHub release download + nested extract + install.json / update check~~
 3. ~~Launch with `rom.cfg`/`disc.cfg`/`settings.toml` staging + process spawn~~
-4. Launch mode: netplay via generic lobby frontend
+4. Launch mode: netplay via generic lobby frontend (catalog `netplay` + hub
+   `NetplayLobbyState`; WS client / spawn handoff still TODO)
 5. Optional asset checksum verify
 6. RomM auth + library overlap
 7. Save/state sync into per-title paths from the manifest
@@ -112,7 +124,15 @@ Local-only mode must work with RomM unset.
 |---|---|---|
 | **default** | `--mode default` (default) | Spawn install binary with `--launcher`; stage media + `settings.toml` `[bios]`/`[disc]` for disc titles |
 | **direct** | `--mode direct` | `--no-launcher` when the title supports skipping UI |
-| **netplay** | `--mode netplay` | Reserved — not implemented yet |
+| **netplay** | `--mode netplay` | Reserved — hub lobby model exists; spawn handoff not wired yet |
+
+### Netplay data model
+
+Titles that ship recomp-net declare a catalog `netplay` block (`game_name` +
+`game_version` wire identity). Hub `TitleRow` mirrors that for library badges;
+`HubModel::netplay` (`NetplayLobbyState`) holds the cross-game room browser /
+active lobby. User defaults live in `config.json` → `netplay.lobby_url` /
+`display_name` / `prefer_ice`.
 
 Working directory is the release directory (`current/`). Cart titles get a
 positional ROM; disc titles never use a bare positional (psxrecomp treats that

@@ -513,40 +513,36 @@ RommSaveSyncResult sync_assets_with_romm(const Paths& paths, const AppConfig& cf
         library_saves = cfg.saves_dir_for_platform(title.platform, true);
         if (library_saves.empty())
             return fail("cannot create saves folder under " + cfg.saves_root.string());
+        // Install/preserved → library before RomM sees anything.
+        const int promoted = promote_install_saves_to_library(paths, cfg, title, {});
+        if (promoted > 0)
+            progress(on_progress, "RomM saves: promoted " + std::to_string(promoted) +
+                                      " local file(s) into save library…");
     }
 
     progress(on_progress, std::string("RomM ") + label + ": collecting local files…");
     std::vector<LocalSave> local;
     if (kind == SyncKind::Saves && !library_saves.empty()) {
+        // Library is the sole peer for RomM after promote.
         local = collect_local_assets(library_saves, title, kind);
-        // Also pick up legacy install / preserved saves for upload/migration.
-        auto install_saves = collect_local_assets(game_root / "saves", title, kind);
-        for (auto& s : install_saves) {
-            bool exists = false;
-            for (const auto& e : local) {
-                if (lower_copy(e.file_name) == lower_copy(s.file_name)) {
-                    exists = true;
-                    break;
+    } else if (kind == SyncKind::Saves) {
+        local = collect_local_assets(game_root / "saves", title, kind);
+        const fs::path preserved = plan.install_root / "preserved";
+        if (fs::is_directory(preserved, ec)) {
+            auto more = collect_local_assets(preserved, title, kind);
+            for (auto& s : more) {
+                bool exists = false;
+                for (const auto& e : local) {
+                    if (lower_copy(e.file_name) == lower_copy(s.file_name)) {
+                        exists = true;
+                        break;
+                    }
                 }
+                if (!exists) local.push_back(std::move(s));
             }
-            if (!exists) local.push_back(std::move(s));
         }
     } else {
         local = collect_local_assets(game_root, title, kind);
-    }
-    const fs::path preserved = plan.install_root / "preserved";
-    if (fs::is_directory(preserved, ec)) {
-        auto more = collect_local_assets(preserved, title, kind);
-        for (auto& s : more) {
-            bool exists = false;
-            for (const auto& e : local) {
-                if (lower_copy(e.file_name) == lower_copy(s.file_name)) {
-                    exists = true;
-                    break;
-                }
-            }
-            if (!exists) local.push_back(std::move(s));
-        }
     }
 
     progress(on_progress, std::string("RomM ") + label + ": listing remote for rom_id=" +
@@ -605,7 +601,11 @@ RommSaveSyncResult sync_assets_with_romm(const Paths& paths, const AppConfig& cf
             ++result.uploaded;
             ++result.conflicts;
         } else {
-            if (!download_asset(cfg, *rem, loc.path, kind, &err)) {
+            // Always land remote-wins bytes in dest_dir (library when configured).
+            const fs::path dest =
+                (!dest_dir.empty()) ? (dest_dir / loc.file_name) : loc.path;
+            fs::create_directories(dest.parent_path(), ec);
+            if (!download_asset(cfg, *rem, dest, kind, &err)) {
                 result.message = "download failed for " + rem->file_name + ": " + err;
                 return result;
             }
@@ -903,18 +903,197 @@ void append_managed_from_dir(std::vector<ManagedSave>& out, const fs::path& save
     }
 }
 
+std::string sanitize_save_stem(std::string s) {
+    // Drop directories / extension if a path snuck in.
+    s = fs::path(s).filename().string();
+    const auto dot = s.find_last_of('.');
+    if (dot != std::string::npos && dot > 0) {
+        const std::string ext = lower_copy(s.substr(dot));
+        if (is_native_save_ext(ext)) s = s.substr(0, dot);
+    }
+    for (char& c : s) {
+        const unsigned char u = static_cast<unsigned char>(c);
+        if (c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' ||
+            c == '>' || c == '|' || u < 32)
+            c = '_';
+    }
+    while (!s.empty() && (s.back() == ' ' || s.back() == '.')) s.pop_back();
+    while (!s.empty() && (s.front() == ' ' || s.front() == '.')) s.erase(s.begin());
+    return s.empty() ? "save" : s;
+}
+
+std::string save_stem_for_title(const Title& title, const fs::path& rom_hint) {
+    if (!rom_hint.empty()) return sanitize_save_stem(rom_hint.filename().string());
+    if (!title.name.empty()) return sanitize_save_stem(title.name);
+    return sanitize_save_stem(title.id);
+}
+
+std::string default_native_ext(const Title& title) {
+    const auto exts = native_exts_for_title(title);
+    if (is_disc_platform(title.platform) || !title.saves_memcard_glob.empty()) {
+        if (exts.count(".mcd")) return ".mcd";
+        if (exts.count(".mcr")) return ".mcr";
+        if (exts.count(".mcs")) return ".mcs";
+        return ".mcd";
+    }
+    if (exts.count(".srm")) return ".srm";
+    if (exts.count(".sav")) return ".sav";
+    if (!exts.empty()) return *exts.begin();
+    return ".srm";
+}
+
+bool path_under_dir(const fs::path& file, const fs::path& dir) {
+    std::error_code ec;
+    const fs::path a = fs::weakly_canonical(file, ec);
+    const fs::path b = fs::weakly_canonical(dir, ec);
+    if (ec || a.empty() || b.empty()) return false;
+    const std::string as = a.generic_string();
+    const std::string bs = b.generic_string();
+    if (as.size() < bs.size()) return false;
+    if (as.compare(0, bs.size(), bs) != 0) return false;
+    return as.size() == bs.size() || as[bs.size()] == '/';
+}
+
+bool is_install_bridge_symlink(const fs::path& path, const fs::path& library_dir) {
+    std::error_code ec;
+    if (!fs::is_symlink(path, ec)) return false;
+    const std::string stem = lower_copy(path.stem().string());
+    if (stem != "save" && stem != "card1" && stem != "card2") return false;
+    if (library_dir.empty()) return true;
+    const fs::path target = fs::weakly_canonical(path, ec);
+    return !ec && !target.empty() && path_under_dir(target, library_dir);
+}
+
+fs::path unique_library_dest(const fs::path& library_dir, const std::string& stem,
+                             const std::string& ext) {
+    std::error_code ec;
+    fs::path dest = library_dir / (stem + ext);
+    if (!fs::exists(dest, ec)) return dest;
+    for (int n = 2; n < 1000; ++n) {
+        dest = library_dir / (stem + "-" + std::to_string(n) + ext);
+        if (!fs::exists(dest, ec)) return dest;
+    }
+    return library_dir / (stem + "-new" + ext);
+}
+
+ManagedSave managed_from_path(const fs::path& path) {
+    ManagedSave m;
+    m.label = path.filename().string();
+    m.id = "saves/" + m.label;
+    m.host_path = path;
+    return m;
+}
+
+bool mint_empty_save_file(const fs::path& dest, std::string* error) {
+    std::error_code ec;
+    fs::create_directories(dest.parent_path(), ec);
+    if (ec) {
+        if (error) *error = "cannot create saves dir: " + ec.message();
+        return false;
+    }
+    if (fs::exists(dest, ec)) {
+        if (error) *error = "save already exists: " + dest.filename().string();
+        return false;
+    }
+    std::ofstream out(dest, std::ios::binary);
+    if (!out) {
+        if (error) *error = "cannot create " + dest.string();
+        return false;
+    }
+    return true;
+}
+
+int promote_files_into_library(const fs::path& src_dir, const fs::path& library_dir,
+                               const Title& title, const std::string& stem,
+                               bool remove_src_after) {
+    if (src_dir.empty() || library_dir.empty() || src_dir == library_dir) return 0;
+    const auto exts = native_exts_for_title(title);
+    std::error_code ec;
+    if (!fs::is_directory(src_dir, ec)) return 0;
+    int promoted = 0;
+    for (auto it = fs::directory_iterator(src_dir, ec);
+         !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        if (!it->is_regular_file(ec) && !it->is_symlink(ec)) continue;
+        const fs::path src = it->path();
+        if (is_install_bridge_symlink(src, library_dir)) continue;
+        // Broken bridge links — drop them.
+        if (it->is_symlink(ec) && !fs::exists(src, ec)) {
+            fs::remove(src, ec);
+            continue;
+        }
+        const std::string rel = "saves/" + src.filename().generic_string();
+        if (!path_matches_native_glob(rel, title, exts) &&
+            !path_matches_native_glob(src.filename().generic_string(), title, exts))
+            continue;
+
+        const std::string ext = lower_copy(src.extension().string());
+        std::string dest_stem = sanitize_save_stem(src.stem().string());
+        const std::string low = lower_copy(dest_stem);
+        if (low == "save" || low == "card1" || low == "card2") dest_stem = stem;
+
+        fs::path dest = library_dir / (dest_stem + ext);
+        if (fs::exists(dest, ec)) {
+            const std::string src_md5 = file_md5_hex(src);
+            const std::string dst_md5 = file_md5_hex(dest);
+            if (!src_md5.empty() && src_md5 == dst_md5) {
+                if (remove_src_after && !path_under_dir(src, library_dir)) fs::remove(src, ec);
+                continue;
+            }
+            if (file_mtime_sec(src) >= file_mtime_sec(dest)) {
+                fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
+                if (!ec) {
+                    ++promoted;
+                    if (remove_src_after && !path_under_dir(src, library_dir)) fs::remove(src, ec);
+                }
+                continue;
+            }
+            // Keep both — promote under a unique name.
+            dest = unique_library_dest(library_dir, dest_stem, ext);
+        }
+
+        fs::create_directories(library_dir, ec);
+        if (it->is_symlink(ec)) {
+            // Materialize symlink target bytes into the library.
+            fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
+        } else {
+            fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
+        }
+        if (ec) continue;
+        ++promoted;
+        if (remove_src_after && !path_under_dir(src, library_dir)) fs::remove(src, ec);
+    }
+    return promoted;
+}
+
 } // namespace
+
+int promote_install_saves_to_library(const Paths& paths, const AppConfig& cfg, const Title& title,
+                                     const fs::path& rom_hint) {
+    if (cfg.saves_root.empty()) return 0;
+    const fs::path library = title_saves_dir(paths, cfg, title, true);
+    if (library.empty()) return 0;
+    const std::string stem = save_stem_for_title(title, rom_hint);
+    int n = 0;
+    const fs::path game_root = resolve_game_root(paths, title);
+    if (!game_root.empty())
+        n += promote_files_into_library(game_root / "saves", library, title, stem, true);
+    const auto plan = inspect_install(paths, title);
+    if (!plan.install_root.empty())
+        n += promote_files_into_library(plan.install_root / "preserved", library, title, stem,
+                                        false);
+    return n;
+}
 
 std::vector<ManagedSave> list_managed_saves(const Paths& paths, const AppConfig& cfg,
                                             const Title& title) {
     std::vector<ManagedSave> out;
     const auto exts = native_exts_for_title(title);
+    // When a shared library is configured it is the only listing source (install
+    // leftovers are promoted via ensure/sync). Without saves_root, use install.
     const fs::path primary = title_saves_dir(paths, cfg, title, false);
     append_managed_from_dir(out, primary, title, exts);
-    if (!cfg.saves_root.empty()) {
-        const fs::path game_root = resolve_game_root(paths, title);
-        if (!game_root.empty())
-            append_managed_from_dir(out, game_root / "saves", title, exts);
+    if (cfg.saves_root.empty()) {
+        // primary already is install saves/; nothing else.
     }
     std::sort(out.begin(), out.end(), [](const ManagedSave& a, const ManagedSave& b) {
         const int ka = managed_save_sort_key(a);
@@ -923,6 +1102,101 @@ std::vector<ManagedSave> list_managed_saves(const Paths& paths, const AppConfig&
         return lower_copy(a.label) < lower_copy(b.label);
     });
     return out;
+}
+
+CanonicalSaveResult ensure_canonical_save(const Paths& paths, const AppConfig& cfg,
+                                          const Title& title, const fs::path& rom_hint,
+                                          bool mint_if_missing) {
+    CanonicalSaveResult r;
+    r.promoted = promote_install_saves_to_library(paths, cfg, title, rom_hint);
+
+    const fs::path saves_dir = title_saves_dir(paths, cfg, title, true);
+    if (saves_dir.empty()) {
+        r.message = "cannot resolve saves directory";
+        return r;
+    }
+
+    AppState st = load_app_state(paths.state_path);
+    const std::string pref = preferred_save_for(st, title.id);
+    if (!pref.empty()) {
+        const fs::path hit = resolve_managed_save(paths, cfg, title, pref);
+        if (!hit.empty()) {
+            r.ok = true;
+            r.save = managed_from_path(hit);
+            r.message = r.promoted > 0
+                            ? ("promoted " + std::to_string(r.promoted) + " save(s); using " +
+                               r.save.label)
+                            : ("using " + r.save.label);
+            return r;
+        }
+    }
+
+    auto saves = list_managed_saves(paths, cfg, title);
+    if (!saves.empty()) {
+        r.ok = true;
+        r.save = saves.front();
+        if (pref.empty()) {
+            set_preferred_save(st, title.id, r.save.id);
+            std::string err;
+            save_app_state(paths.state_path, st, &err);
+        }
+        r.message = r.promoted > 0
+                        ? ("promoted " + std::to_string(r.promoted) + " save(s); preferred " +
+                           r.save.label)
+                        : ("preferred " + r.save.label);
+        return r;
+    }
+
+    if (!mint_if_missing) {
+        r.message = r.promoted > 0 ? ("promoted " + std::to_string(r.promoted) +
+                                      " save(s); none available")
+                                   : "no managed saves yet";
+        return r;
+    }
+
+    const std::string stem = save_stem_for_title(title, rom_hint);
+    const std::string ext = default_native_ext(title);
+    const fs::path dest = unique_library_dest(saves_dir, stem, ext);
+    std::string err;
+    if (!mint_empty_save_file(dest, &err)) {
+        r.message = err;
+        return r;
+    }
+    r.ok = true;
+    r.created = true;
+    r.save = managed_from_path(dest);
+    set_preferred_save(st, title.id, r.save.id);
+    save_app_state(paths.state_path, st, &err);
+    r.message = "created " + r.save.label +
+                (cfg.saves_root.empty() ? " in install saves/" : " in save library");
+    return r;
+}
+
+CanonicalSaveResult create_managed_save(const Paths& paths, const AppConfig& cfg,
+                                        const Title& title, const fs::path& rom_hint) {
+    CanonicalSaveResult r;
+    r.promoted = promote_install_saves_to_library(paths, cfg, title, rom_hint);
+    const fs::path saves_dir = title_saves_dir(paths, cfg, title, true);
+    if (saves_dir.empty()) {
+        r.message = "cannot resolve saves directory";
+        return r;
+    }
+    const std::string stem = save_stem_for_title(title, rom_hint);
+    const std::string ext = default_native_ext(title);
+    const fs::path dest = unique_library_dest(saves_dir, stem, ext);
+    std::string err;
+    if (!mint_empty_save_file(dest, &err)) {
+        r.message = err;
+        return r;
+    }
+    r.ok = true;
+    r.created = true;
+    r.save = managed_from_path(dest);
+    AppState st = load_app_state(paths.state_path);
+    set_preferred_save(st, title.id, r.save.id);
+    save_app_state(paths.state_path, st, &err);
+    r.message = "created " + r.save.label;
+    return r;
 }
 
 fs::path resolve_managed_save(const Paths& paths, const AppConfig& cfg, const Title& title,
@@ -1007,28 +1281,12 @@ RecompSaveBindResult bind_recomp_save_paths(const Paths& paths, const AppConfig&
             if (preferred.parent_path() == saves_dir)
                 activate_cart_default_slot(preferred, saves_dir, nullptr);
         } else if (!batteries.empty()) {
-            auto seed_default = [&](const char* dest_name) {
-                const fs::path dest = saves_dir / dest_name;
-                if (fs::is_regular_file(dest, ec) || fs::is_symlink(dest, ec)) {
-                    const auto sz = fs::is_symlink(dest, ec) ? 1 : fs::file_size(dest, ec);
-                    if (!ec && sz > 0) return;
-                }
-                fs::path src;
-                for (const auto& b : batteries) {
-                    if (lower_copy(b.filename().string()) == lower_copy(dest_name)) continue;
-                    src = b;
-                    break;
-                }
-                if (src.empty()) return;
-                fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
-                if (!ec) {
-                    notes << "seeded " << dest_name << " from " << src.filename().string()
-                          << "; ";
-                    activate_cart_default_slot(dest, install_saves, nullptr);
-                }
-            };
-            seed_default("save.srm");
-            seed_default("save.sav");
+            // Fallback: first battery in the managed dir (should be rare after ensure).
+            r.active_save = batteries.front();
+            std::string act;
+            if (activate_cart_default_slot(r.active_save, install_saves, &act))
+                notes << "active save " << r.active_save.filename().string()
+                      << (act.empty() ? "" : (" (" + act + ")")) << "; ";
         }
     }
 
@@ -1085,8 +1343,12 @@ RecompSaveBindResult bind_recomp_save_paths(const Paths& paths, const AppConfig&
         if (card1.empty()) {
             if (!memcards.empty())
                 card1 = memcards.front();
-            else
-                card1 = saves_dir / "card1.mcd";
+            else {
+                // Prefer an ES-DE-style stem name over generic card1.mcd.
+                // (ensure_canonical_save normally mints this before bind.)
+                const std::string stem = title.id.empty() ? "card1" : title.id;
+                card1 = saves_dir / (stem + ".mcd");
+            }
         }
         if (card2.empty()) {
             // No explicit card2 preference — keep prior valid card2, else auto-pick.

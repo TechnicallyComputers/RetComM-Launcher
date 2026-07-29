@@ -87,6 +87,7 @@ void HubModel::refresh_rows(bool check_updates) {
 
     std::vector<TitleRow> next;
     next.reserve(catalog.titles.size());
+    bool state_dirty = false;
     for (const auto& t : catalog.titles) {
         TitleRow row;
         row.id = t.id;
@@ -120,6 +121,20 @@ void HubModel::refresh_rows(bool check_updates) {
         row.author = t.github_owner();
         row.github_url = t.github_source_url();
         row.author_notes = t.author_notes;
+
+        row.netplay_supported = t.supports_netplay();
+        if (row.netplay_supported) {
+            row.netplay_game_name = t.netplay.game_name;
+            row.netplay_game_version = t.netplay.game_version;
+            row.netplay_lobby_url = cfg.resolve_netplay_lobby_url(t.netplay.lobby_url);
+            row.netplay_max_slots = t.netplay.max_slots;
+            row.netplay_joinable = row.installed;
+            row.netplay_version_ok =
+                row.installed &&
+                (row.installed_tag.empty() ||
+                 netplay_versions_equal(row.installed_tag, t.netplay.game_version));
+        }
+
         {
             const fs::path art = resolve_boxart_path(cfg, t, rom, row.suggested_rom, paths);
             if (!art.empty()) row.boxart_path = art.string();
@@ -157,10 +172,15 @@ void HubModel::refresh_rows(bool check_updates) {
             };
 
             row.preferred_save = preferred_save_for(app_state, t.id);
+            const bool had_preferred = !row.preferred_save.empty();
             row.preferred_save_index = resolve_index(row.preferred_save);
             if (row.preferred_save_index < 0 && !row.save_ids.empty()) {
                 row.preferred_save_index = 0;
                 row.preferred_save = row.save_ids[0];
+                if (!had_preferred) {
+                    set_preferred_save(app_state, t.id, row.preferred_save);
+                    state_dirty = true;
+                }
             }
 
             if (row.dual_memcard) {
@@ -197,6 +217,8 @@ void HubModel::refresh_rows(bool check_updates) {
 
         next.push_back(std::move(row));
     }
+
+    if (state_dirty) save_app_state(paths.state_path, app_state, nullptr);
 
     std::lock_guard<std::mutex> lock(mu);
     // Preserve selection by id when possible.
@@ -292,14 +314,17 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 if (t->has_bios_identity())
                     opts.bios_path = bios.preferred_bios(title_id);
                 {
+                    // Promote install→library and mint a canonical save when needed.
+                    auto ensured = ensure_canonical_save(paths, cfg, *t, opts.rom_path, true);
+                    if (!ensured.message.empty()) append_log(ensured.message);
                     app_state = load_app_state(paths.state_path);
-                    const std::string save_id = preferred_save_for(app_state, title_id);
-                    if (!save_id.empty()) {
-                        opts.save_path = resolve_managed_save(paths, cfg, *t, save_id);
-                        if (opts.save_path.empty()) opts.save_path = save_id;
-                    } else {
-                        const auto saves = list_managed_saves(paths, cfg, *t);
-                        if (!saves.empty()) opts.save_path = saves.front().host_path;
+                    if (ensured.ok) opts.save_path = ensured.save.host_path;
+                    else {
+                        const std::string save_id = preferred_save_for(app_state, title_id);
+                        if (!save_id.empty()) {
+                            opts.save_path = resolve_managed_save(paths, cfg, *t, save_id);
+                            if (opts.save_path.empty()) opts.save_path = save_id;
+                        }
                     }
                     if (title_uses_memcards(*t)) {
                         const std::string card2_id = preferred_save_card2_for(app_state, title_id);
@@ -858,6 +883,25 @@ bool HubModel::set_title_preferred_save_card2(const std::string& title_id,
         }
         break;
     }
+    return true;
+}
+
+bool HubModel::create_title_save(const std::string& title_id, std::string* error) {
+    const Title* t = catalog.find(title_id);
+    if (!t) {
+        if (error) *error = "unknown title: " + title_id;
+        return false;
+    }
+    const fs::path rom = library.preferred_rom(title_id);
+    auto created = create_managed_save(paths, cfg, *t, rom);
+    if (!created.ok) {
+        if (error) *error = created.message.empty() ? "could not create save" : created.message;
+        return false;
+    }
+    append_log(created.message);
+    set_status("Created save " + created.save.label);
+    app_state = load_app_state(paths.state_path);
+    refresh_rows(false);
     return true;
 }
 

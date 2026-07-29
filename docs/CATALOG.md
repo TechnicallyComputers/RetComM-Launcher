@@ -92,6 +92,15 @@ Title manifests may still set `bios_identity` to override the default, or
 | `romm.platforms` | string[] | RomM platform slugs |
 | `romm.igdb_ids` | number[] | Optional |
 | `saves` | object | Optional paths relative to install for sync later |
+| `netplay` | object | Optional; omit when the title has no recomp-net lobby |
+| `netplay.supported` | bool | Must be `true` to advertise |
+| `netplay.stack` | string | Currently only `"recomp-net"` |
+| `netplay.game_name` | string | Exact WS lobby wire name (may differ from catalog `name`) |
+| `netplay.game_version` | string | Lobby pin (align with baked `PSX_GAME_VERSION` / `SNES_GAME_VERSION`) |
+| `netplay.max_slots` | number | Optional; default `2` |
+| `netplay.lobby_url` | string | Optional per-title WS override |
+| `netplay.transports` | string[] | Optional hints: `"lan"`, `"ice"`, … |
+| `netplay.match_caps_schema` | string | Optional host-settings family id (`psx-v1`, `snes-v1`) |
 
 A title is considered to have a ROM identity when **any** of `crc32`, `md5`,
 `sha1`, `sha256`, or `disc_serials` is non-empty. Matching succeeds if **any**

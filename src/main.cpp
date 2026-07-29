@@ -545,19 +545,13 @@ int cmd_launch(const retcomm::Paths& paths, const retcomm::Catalog& cat,
         bios_source = "--bios";
     }
     if (opts.save_path.empty()) {
-        auto st = retcomm::load_app_state(paths.state_path);
-        const std::string save_id = retcomm::preferred_save_for(st, id);
-        if (!save_id.empty()) {
-            opts.save_path = retcomm::resolve_managed_save(paths, cfg, *t, save_id);
-            if (opts.save_path.empty()) opts.save_path = save_id;
-            if (!opts.save_path.empty()) save_source = "state.json";
-        } else {
-            const auto saves = retcomm::list_managed_saves(paths, cfg, *t);
-            if (!saves.empty()) {
-                opts.save_path = saves.front().host_path;
-                save_source = "saves/";
-            }
+        auto ensured =
+            retcomm::ensure_canonical_save(paths, cfg, *t, opts.rom_path, /*mint=*/true);
+        if (ensured.ok) {
+            opts.save_path = ensured.save.host_path;
+            save_source = ensured.created ? "created" : "canonical";
         }
+        auto st = retcomm::load_app_state(paths.state_path);
         if (retcomm::title_uses_memcards(*t)) {
             const std::string card2_id = retcomm::preferred_save_card2_for(st, id);
             if (card2_id == retcomm::kBlankMemcardId) {

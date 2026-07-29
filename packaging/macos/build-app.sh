@@ -110,12 +110,18 @@ hdiutil create \
   -ov \
   "${RW_DMG}" >/dev/null
 
-ATTACH_OUT="$(hdiutil attach -readwrite -noverify -noautoopen "${RW_DMG}")"
-MOUNT_DIR="$(echo "${ATTACH_OUT}" | awk 'END { print $NF }')"
-DEVICE="$(echo "${ATTACH_OUT}" | awk 'NR==1 { print $1 }')"
-if [[ -z "${MOUNT_DIR}" || ! -d "${MOUNT_DIR}" ]]; then
-  echo "error: failed to mount temporary DMG" >&2
-  echo "${ATTACH_OUT}" >&2
+# Explicit mountpoint — volume names with spaces break `awk '{print $NF}'` parsing
+# of hdiutil attach output (/Volumes/RetComM Launcher → "Launcher").
+MOUNT_DIR="${OUT_DIR}/dmg-mount"
+rm -rf "${MOUNT_DIR}"
+mkdir -p "${MOUNT_DIR}"
+if ! hdiutil attach -readwrite -noverify -noautoopen \
+    -mountpoint "${MOUNT_DIR}" "${RW_DMG}" >/dev/null; then
+  echo "error: failed to mount temporary DMG at ${MOUNT_DIR}" >&2
+  exit 1
+fi
+if [[ ! -d "${MOUNT_DIR}" ]]; then
+  echo "error: mountpoint missing after attach: ${MOUNT_DIR}" >&2
   exit 1
 fi
 
@@ -141,12 +147,12 @@ tell application "Finder"
 end tell
 EOF
 sync
-hdiutil detach "${DEVICE}" >/dev/null || hdiutil detach "${MOUNT_DIR}" >/dev/null
+hdiutil detach "${MOUNT_DIR}" >/dev/null || hdiutil detach -force "${MOUNT_DIR}" >/dev/null
 set -e
 
 hdiutil convert "${RW_DMG}" -format UDZO -imagekey zlib-level=9 -o "${DMG}" >/dev/null
 rm -f "${RW_DMG}"
-rm -rf "${STAGE}"
+rm -rf "${STAGE}" "${MOUNT_DIR}"
 
 echo "App: ${APP}"
 echo "Zip: ${ZIP}"

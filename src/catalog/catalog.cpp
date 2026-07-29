@@ -4,6 +4,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cctype>
 #include <fstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -117,6 +118,24 @@ Title parse_title(const json& j) {
         t.saves_memcard_glob = string_array(s, "memcard_glob");
     }
 
+    if (j.contains("netplay") && j.at("netplay").is_object()) {
+        const auto& n = j.at("netplay");
+        t.netplay.supported = n.value("supported", false);
+        t.netplay.stack = n.value("stack", "");
+        t.netplay.game_name = n.value("game_name", "");
+        t.netplay.game_version = n.value("game_version", "");
+        t.netplay.max_slots = n.value("max_slots", 2);
+        if (t.netplay.max_slots < 2) t.netplay.max_slots = 2;
+        t.netplay.lobby_url = n.value("lobby_url", "");
+        t.netplay.transports = string_array(n, "transports");
+        t.netplay.match_caps_schema = n.value("match_caps_schema", "");
+        // Incomplete / unknown stack → treat as unsupported.
+        if (!t.netplay.supported || t.netplay.stack != "recomp-net" ||
+            t.netplay.game_name.empty()) {
+            t.netplay.supported = false;
+        }
+    }
+
     if (t.id.empty()) throw std::runtime_error("title missing id");
     return t;
 }
@@ -176,9 +195,41 @@ std::string Title::github_source_url() const {
     return "https://github.com/" + release.github;
 }
 
+bool Title::supports_netplay() const {
+    return netplay.supported && netplay.stack == "recomp-net" && !netplay.game_name.empty();
+}
+
+std::string normalize_netplay_version(std::string version) {
+    while (!version.empty() &&
+           std::isspace(static_cast<unsigned char>(version.front())))
+        version.erase(version.begin());
+    while (!version.empty() &&
+           std::isspace(static_cast<unsigned char>(version.back())))
+        version.pop_back();
+    if (version.empty()) return "dev";
+    // Strip a single leading 'v' when the rest looks like a version (digit / digit.).
+    if ((version[0] == 'v' || version[0] == 'V') && version.size() > 1) {
+        const unsigned char c = static_cast<unsigned char>(version[1]);
+        if (std::isdigit(c)) version.erase(version.begin());
+    }
+    return version;
+}
+
+bool netplay_versions_equal(const std::string& a, const std::string& b) {
+    return normalize_netplay_version(a) == normalize_netplay_version(b);
+}
+
 const Title* Catalog::find(const std::string& id) const {
     for (const auto& t : titles) {
         if (t.id == id) return &t;
+    }
+    return nullptr;
+}
+
+const Title* Catalog::find_by_netplay_game_name(const std::string& game_name) const {
+    if (game_name.empty()) return nullptr;
+    for (const auto& t : titles) {
+        if (t.supports_netplay() && t.netplay.game_name == game_name) return &t;
     }
     return nullptr;
 }
