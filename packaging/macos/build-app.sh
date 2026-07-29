@@ -38,10 +38,9 @@ elif [[ -f "${ROOT}/assets/retcomm.png" ]]; then
   ICONSET="${OUT_DIR}/retcomm.iconset"
   rm -rf "${ICONSET}"
   mkdir -p "${ICONSET}"
-  # Generate standard iconset sizes from the 512/1024 master.
+  # Generate standard iconset sizes from the 512 master PNG.
   sips -z 16 16     "${ROOT}/assets/retcomm.png" --out "${ICONSET}/icon_16x16.png" >/dev/null
-  sips -z 32 32     "${ROOT}/assets/retcomm.png" --out "${ICONSET}/diana@2x_32.png" >/dev/null
-  cp "${ICONSET}/diana@2x_32.png" "${ICONSET}/icon_16x16@2x.png"
+  sips -z 32 32     "${ROOT}/assets/retcomm.png" --out "${ICONSET}/icon_16x16@2x.png" >/dev/null
   sips -z 32 32     "${ROOT}/assets/retcomm.png" --out "${ICONSET}/icon_32x32.png" >/dev/null
   sips -z 64 64     "${ROOT}/assets/retcomm.png" --out "${ICONSET}/icon_32x32@2x.png" >/dev/null
   sips -z 128 128   "${ROOT}/assets/retcomm.png" --out "${ICONSET}/icon_128x128.png" >/dev/null

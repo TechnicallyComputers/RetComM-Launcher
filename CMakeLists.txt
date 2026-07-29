@@ -164,6 +164,6 @@ install(DIRECTORY catalog/ DESTINATION share/retcomm/catalog)
 install(FILES assets/retcomm.svg DESTINATION share/icons/hicolor/scalable/apps
         RENAME retcomm.svg)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/retcomm.png")
-    install(FILES assets/retcomm.png DESTINATION share/icons/hicolor/256x256/apps
+    install(FILES assets/retcomm.png DESTINATION share/icons/hicolor/512x512/apps
             RENAME retcomm.png)
 endif()

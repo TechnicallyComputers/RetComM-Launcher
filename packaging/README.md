@@ -8,7 +8,8 @@ Helpers used by [`.github/workflows/release.yml`](../.github/workflows/release.y
 ./packaging/make-icons.sh
 ```
 
-Writes `assets/retcomm.png` (and `.ico` when ImageMagick is available) from
+Writes `assets/retcomm.png` at **512×512** (linuxdeploy’s max allowed size;
+1024 is rejected) and `.ico` when ImageMagick is available, from
 `assets/retcomm.svg`.
 
 ## Linux

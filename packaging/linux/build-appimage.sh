@@ -24,10 +24,11 @@ cp -a "${PREFIX}/." "${APPDIR}/usr/"
 # Desktop + icon at AppDir root (linuxdeploy / appimagetool convention).
 install -m 644 "${ROOT}/packaging/linux/retcomm.desktop" "${APPDIR}/retcomm.desktop"
 if [[ -f "${ROOT}/assets/retcomm.png" ]]; then
+  # Must be a linuxdeploy-allowed size (max 512x512). make-icons.sh writes 512.
   install -m 644 "${ROOT}/assets/retcomm.png" "${APPDIR}/retcomm.png"
-  mkdir -p "${APPDIR}/usr/share/icons/hicolor/256x256/apps"
+  mkdir -p "${APPDIR}/usr/share/icons/hicolor/512x512/apps"
   install -m 644 "${ROOT}/assets/retcomm.png" \
-    "${APPDIR}/usr/share/icons/hicolor/256x256/apps/retcomm.png"
+    "${APPDIR}/usr/share/icons/hicolor/512x512/apps/retcomm.png"
 fi
 if [[ -f "${ROOT}/assets/retcomm.svg" ]]; then
   mkdir -p "${APPDIR}/usr/share/icons/hicolor/scalable/apps"
