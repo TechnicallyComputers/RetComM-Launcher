@@ -168,7 +168,8 @@ jobs:
         include:
           - os: macos-14
             arch: arm64
-          - os: macos-13
+          # macos-13 was retired Dec 2025; macos-15-intel is the last hosted x86_64 image.
+          - os: macos-15-intel
             arch: x86_64
     runs-on: ${{ matrix.os }}
     steps:
