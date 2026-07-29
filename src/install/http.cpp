@@ -56,8 +56,11 @@ CURL* make_easy(const std::string& url) {
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "retcomm-launcher");
     curl_easy_setopt(curl, CURLOPT_FAILONERROR, 0L);
-#if LIBCURL_VERSION_NUM >= 0x074700
+#if LIBCURL_VERSION_NUM >= 0x075500
+    // CURLOPT_PROTOCOLS_STR since 7.85.0
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
+#else
+    curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
 #endif
     return curl;
 }
