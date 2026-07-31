@@ -1,6 +1,7 @@
 /build/
 /build-*/
 /dist/
+/.tmp-xdg/
 /out/
 /out-*/
 /.cache/

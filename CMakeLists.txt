@@ -38,6 +38,7 @@ set(RETCOMM_CORE_SOURCES
     src/bios/bios_index.cpp
     src/install/http.cpp
     src/install/install.cpp
+    src/build/build.cpp
     src/update/self_update.cpp
     src/launch/launch.cpp
     src/romm/romm.cpp

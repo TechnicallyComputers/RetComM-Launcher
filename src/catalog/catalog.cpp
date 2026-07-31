@@ -136,6 +136,49 @@ Title parse_title(const json& j) {
         }
     }
 
+    if (j.contains("build") && j.at("build").is_object()) {
+        const auto& b = j.at("build");
+        t.build.enabled = b.value("enabled", false);
+        if (b.contains("source") && b.at("source").is_object()) {
+            const auto& s = b.at("source");
+            t.build.source.github = s.value("github", "");
+            t.build.source.ref = s.value("ref", "");
+        }
+        auto parse_pack = [](const json& p, TitleBuildPack& out) {
+            out.id = p.value("id", "");
+            out.github = p.value("github", "");
+            if (p.contains("asset_glob") && p.at("asset_glob").is_object()) {
+                const auto& g = p.at("asset_glob");
+                out.asset_glob_linux = g.value("linux", "");
+                out.asset_glob_windows = g.value("windows", "");
+                out.asset_glob_macos = g.value("macos", "");
+            }
+        };
+        if (b.contains("sdk") && b.at("sdk").is_object())
+            parse_pack(b.at("sdk"), t.build.sdk);
+        if (b.contains("toolchain") && b.at("toolchain").is_object())
+            parse_pack(b.at("toolchain"), t.build.toolchain);
+        if (b.contains("generate") && b.at("generate").is_object()) {
+            const auto& g = b.at("generate");
+            t.build.generate.engine = g.value("engine", t.build.generate.engine);
+            t.build.generate.cfg_dir = g.value("cfg_dir", t.build.generate.cfg_dir);
+            t.build.generate.out_dir = g.value("out_dir", t.build.generate.out_dir);
+            t.build.generate.funcs_h = g.value("funcs_h", t.build.generate.funcs_h);
+            t.build.generate.cfg_roots = g.value("cfg_roots", t.build.generate.cfg_roots);
+            t.build.generate.config = g.value("config", t.build.generate.config);
+        }
+        if (b.contains("cmake") && b.at("cmake").is_object()) {
+            const auto& c = b.at("cmake");
+            t.build.cmake.build_dir = c.value("build_dir", t.build.cmake.build_dir);
+            t.build.cmake.target = c.value("target", "");
+            t.build.cmake.config = c.value("config", t.build.cmake.config);
+        }
+        if (t.build.source.github.empty())
+            t.build.source.github = t.release.github;
+        if (t.build.cmake.target.empty())
+            t.build.cmake.target = t.launch_binary_for_host();
+    }
+
     if (t.id.empty()) throw std::runtime_error("title missing id");
     return t;
 }
@@ -197,6 +240,35 @@ std::string Title::github_source_url() const {
 
 bool Title::supports_netplay() const {
     return netplay.supported && netplay.stack == "recomp-net" && !netplay.game_name.empty();
+}
+
+const std::string& TitleBuildPack::asset_glob_for_os(const std::string& os) const {
+    if (os == "windows") return asset_glob_windows;
+    if (os == "macos") return asset_glob_macos;
+    return asset_glob_linux;
+}
+
+const std::string& TitleBuildPack::asset_glob_for_host() const {
+    return asset_glob_for_os(host_os_key());
+}
+
+bool Title::supports_local_build() const {
+    if (!build.enabled) return false;
+    if (build.source.ref.empty()) return false;
+    const std::string src_gh =
+        build.source.github.empty() ? release.github : build.source.github;
+    if (src_gh.empty()) return false;
+    if (build.sdk.id.empty() || build.sdk.github.empty()) return false;
+    if (build.sdk.asset_glob_for_host().empty()) return false;
+    if (build.toolchain.id.empty() || build.toolchain.github.empty()) return false;
+    if (build.toolchain.asset_glob_for_host().empty()) return false;
+    if (build.cmake.target.empty() && launch_binary_for_host().empty()) return false;
+    return true;
+}
+
+bool Title::supports_prebuilt_install() const {
+    return !release.github.empty() && !asset_glob_for_host().empty() &&
+           !launch_binary_for_host().empty();
 }
 
 std::string normalize_netplay_version(std::string version) {

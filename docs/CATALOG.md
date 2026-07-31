@@ -86,6 +86,10 @@ Title manifests may still set `bios_identity` to override the default, or
 | `release.github` | string | `owner/repo` |
 | `release.allow_prerelease` | bool | Allow GitHub pre-releases when no stable latest exists |
 | `release.asset_glob` | object | Per-OS glob: `linux`, `windows`, `macos` (launcher also accepts synonyms, e.g. `*windows*` ↔ `win64` / `win-x64`) |
+| `build` | object | Optional local generate + cmake recipe; when `enabled`, Install prefers build over zip |
+| `build.source` | object | `github` + `ref` for the source zipball |
+| `build.sdk` / `build.toolchain` | object | Pack id, github, per-OS `asset_glob` |
+| `build.generate` / `build.cmake` | object | generate engine (`snesrecomp` / `psxrecomp`) + cmake target |
 | `install_dir_name` | string | Folder under `apps/` |
 | `launch` | object | Relative binary names: `linux`, `windows`, `macos` |
 | `romm` | object | Optional match hints |

@@ -25,6 +25,11 @@ struct InstallRecord {
     std::string runtime;   // "native" | "wine"
     std::string installed_at;
     std::string release_url;
+    // "zip" (prebuilt release) or "build" (local generate + cmake). Empty → zip.
+    std::string method;
+    std::string source_ref;     // build.source.ref when method=build
+    std::string sdk_tag;        // snesrecomp tools pack tag
+    std::string toolchain_tag;  // toolchain pack tag
 };
 
 struct InstallPlan {
@@ -50,6 +55,8 @@ struct InstallOptions {
     bool allow_prerelease = false;
     // On Linux/macOS: download the Windows asset and record runtime=wine.
     bool use_wine = false;
+    // When the title supports local build, force the prebuilt zip path instead.
+    bool prefer_prebuilt = false;
 };
 
 struct InstallResult {

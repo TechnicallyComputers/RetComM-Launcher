@@ -1,6 +1,7 @@
 #include "hub/hub_model.hpp"
 #include "hub/hub_boxart.hpp"
 
+#include "retcomm/build.hpp"
 #include "retcomm/romm_fetch.hpp"
 #include "retcomm/romm_saves.hpp"
 #include "retcomm/romscan.hpp"
@@ -112,6 +113,8 @@ void HubModel::refresh_rows(bool check_updates) {
         if (plan.record) row.runtime = plan.record->runtime;
         row.can_wine_install =
             host_supports_wine() && t.supports_wine_install() && host_os_key() != "windows";
+        row.supports_local_build = t.supports_local_build();
+        row.can_prebuilt_install = t.supports_prebuilt_install();
         row.has_rom_identity = t.has_rom_identity();
         row.romm_ready = cfg.romm.enabled() && !cfg.romm.api_token.empty();
 
@@ -323,10 +326,14 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
 
             switch (j) {
             case HubJob::Install:
+            case HubJob::InstallPrebuilt:
             case HubJob::InstallWine: {
                 const bool wine = (j == HubJob::InstallWine);
-                set_status(std::string(wine ? "Installing (Wine) " : "Installing ") + title_id +
-                           "…");
+                const bool prebuilt = (j == HubJob::InstallPrebuilt) || wine;
+                set_status(std::string(wine         ? "Installing (Wine) "
+                                       : prebuilt   ? "Installing prebuilt "
+                                       : "Building ") +
+                           title_id + "…");
                 const auto* t = find_title();
                 if (!t) {
                     append_log("unknown title: " + title_id);
@@ -336,9 +343,14 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 opts.force = false;
                 opts.check_latest = true;
                 opts.use_wine = wine;
-                auto r = install_title(paths, *t, opts);
+                opts.prefer_prebuilt = prebuilt;
+                BuildOptions bopts;
+                bopts.rom_path = library.preferred_rom(title_id);
+                bopts.on_progress = [this](const std::string& msg, float) { set_status(msg); };
+                auto r = install_title_auto(paths, *t, opts, bopts);
                 append_log(r.message);
-                set_status(r.ok ? ("Installed " + title_id) : ("Install failed: " + title_id));
+                set_status(r.ok ? ((prebuilt ? "Installed " : "Built ") + title_id)
+                                : ("Install failed: " + title_id));
                 break;
             }
             case HubJob::Update: {
@@ -348,7 +360,10 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     append_log("unknown title: " + title_id);
                     break;
                 }
-                auto r = update_title(paths, *t, {});
+                BuildOptions bopts;
+                bopts.rom_path = library.preferred_rom(title_id);
+                bopts.on_progress = [this](const std::string& msg, float) { set_status(msg); };
+                auto r = update_title_auto(paths, *t, {}, bopts);
                 append_log(r.message);
                 set_status(r.ok ? ("Updated " + title_id) : ("Update failed: " + title_id));
                 break;

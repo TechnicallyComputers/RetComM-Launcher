@@ -52,6 +52,8 @@ Paths default_paths() {
     p.config_dir = xdg_config_home() / "retcomm";
     p.data_dir = xdg_data_home() / "retcomm";
     p.apps_dir = p.data_dir / "apps";
+    p.toolchains_dir = p.data_dir / "toolchains";
+    p.sdks_dir = p.data_dir / "sdks";
     p.state_path = p.data_dir / "state.json";
     p.config_path = p.config_dir / "config.json";
     p.library_index_path = p.data_dir / "library-index.json";
@@ -73,6 +75,14 @@ void ensure_dirs(const Paths& p) {
     ec.clear();
     fs::create_directories(p.apps_dir, ec);
     if (ec) throw std::runtime_error("cannot create " + p.apps_dir.string() + ": " +
+                                     ec.message());
+    ec.clear();
+    fs::create_directories(p.toolchains_dir, ec);
+    if (ec) throw std::runtime_error("cannot create " + p.toolchains_dir.string() + ": " +
+                                     ec.message());
+    ec.clear();
+    fs::create_directories(p.sdks_dir, ec);
+    if (ec) throw std::runtime_error("cannot create " + p.sdks_dir.string() + ": " +
                                      ec.message());
 }
 

@@ -66,6 +66,50 @@ struct TitleNetplay {
     std::string match_caps_schema;       // e.g. "psx-v1", "snes-v1"
 };
 
+// Optional local generate + cmake recipe. When enabled, Hub Install prefers
+// build_title over a prebuilt zip (third parties omit this and stay zip-only).
+struct TitleBuildSource {
+    std::string github; // owner/repo (defaults to release.github when empty)
+    std::string ref;    // tag / branch / commit for the source zipball
+};
+
+struct TitleBuildPack {
+    std::string id;
+    std::string github; // owner/repo for pack releases
+    std::string asset_glob_linux;
+    std::string asset_glob_windows;
+    std::string asset_glob_macos;
+    const std::string& asset_glob_for_os(const std::string& os) const;
+    const std::string& asset_glob_for_host() const;
+};
+
+struct TitleBuildGenerate {
+    // "snesrecomp" | "psxrecomp" — empty ⇒ derive from title.platform
+    std::string engine;
+    // snesrecomp generate
+    std::string cfg_dir = "recomp";
+    std::string out_dir = "src/gen";
+    std::string funcs_h = "recomp/funcs.h";
+    bool cfg_roots = true;
+    // psxrecomp generate
+    std::string config = "game.toml";
+};
+
+struct TitleBuildCmake {
+    std::string build_dir = "build";
+    std::string target;
+    std::string config = "Release";
+};
+
+struct TitleBuild {
+    bool enabled = false;
+    TitleBuildSource source;
+    TitleBuildPack sdk;
+    TitleBuildPack toolchain;
+    TitleBuildGenerate generate;
+    TitleBuildCmake cmake;
+};
+
 struct Title {
     std::string id;
     std::string name;
@@ -85,6 +129,7 @@ struct Title {
     std::vector<std::string> saves_sram_glob;
     std::vector<std::string> saves_memcard_glob;
     TitleNetplay netplay;
+    TitleBuild build;
 
     bool has_rom_identity() const;
     bool has_bios_identity() const;
@@ -101,6 +146,10 @@ struct Title {
     std::string github_source_url() const;
     // True when catalog advertises a usable recomp-net lobby identity.
     bool supports_netplay() const;
+    // True when catalog declares a usable local generate+build recipe.
+    bool supports_local_build() const;
+    // True when a prebuilt GitHub release zip can still be installed.
+    bool supports_prebuilt_install() const;
 };
 
 struct Catalog {

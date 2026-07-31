@@ -607,9 +607,24 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
             if (!retcomm::open_path_in_file_manager(row.install_root, &err))
                 hub.append_log("Open Folder failed: " + err);
         }
-        if (accent_button(row.install_dir_present ? "Retry Install" : "Install", th,
-                          ImVec2(-1, 0)))
-            hub.start_job(HubJob::Install, row.id);
+        if (row.supports_local_build) {
+            if (!row.has_rom) {
+                ImGui::PushStyleColor(ImGuiCol_Text, th.warn);
+                ImGui::TextWrapped(
+                    "Match a verified ROM in your library before Build & Install.");
+                ImGui::PopStyleColor();
+            }
+            if (accent_button(row.install_dir_present ? "Retry Build & Install" : "Build & Install",
+                              th, ImVec2(-1, 0)))
+                hub.start_job(HubJob::Install, row.id);
+            if (row.can_prebuilt_install &&
+                ImGui::Button("Install prebuilt", ImVec2(-1, 0)))
+                hub.start_job(HubJob::InstallPrebuilt, row.id);
+        } else {
+            if (accent_button(row.install_dir_present ? "Retry Install" : "Install", th,
+                              ImVec2(-1, 0)))
+                hub.start_job(HubJob::Install, row.id);
+        }
         if (row.can_wine_install) {
             if (ImGui::Button("Install with WINE", ImVec2(-1, 0)))
                 hub.start_job(HubJob::InstallWine, row.id);

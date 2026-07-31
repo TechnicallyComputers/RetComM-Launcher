@@ -50,19 +50,44 @@ CLI / (future) ImGui hub
 ```
 ~/.local/share/retcomm/
   apps/<install_dir_name>/
-    install.json                       # tag, asset, relative binary, timestamps
+    install.json                       # method zip|build, tag, binary, pack pins
     current -> releases/<tag>/         # symlink (or junction on Windows)
     releases/<tag>/
       <binary + assets>
-      ...
+    src/<ref>/                         # game source when method=build
+  toolchains/<id>/<tag>/               # managed C/cmake packs
+  sdks/<id>/<tag>/                     # snesrecomp tools packs
   library-index.json
   state.json                           # reserved (hub-wide prefs / last launch)
 ```
 
-Install flow: GitHub Releases API → pick host `asset_glob` → download → extract
-(`bsdtar` / `unzip` / `7z`) → unwrap nested archives (double-zip common) → locate
-catalog `launch` binary → write `install.json` → point `current`. Update checks
-compare `install.json` tag to `/releases/latest`.
+### Prebuilt zip (`method: zip`)
+
+GitHub Releases API → pick host `asset_glob` → download → extract
+(`bsdtar` / `unzip` / `7z`) → unwrap nested archives → locate catalog `launch`
+binary → write `install.json` → point `current`. Used for third-party titles
+without a `build` recipe, or when the user chooses **Install prebuilt** /
+`retcomm install --prebuilt`.
+
+### Local generate + build (`method: build`)
+
+When catalog `build.enabled` is set, Hub **Build & Install** / `retcomm install`
+(and `retcomm build`) is primary:
+
+1. Require a library ROM matching `rom_identity`.
+2. Ensure toolchain + SDK packs (or `RETCOMM_TOOLCHAIN_DIR` /
+   `RETCOMM_SDK_DIR` overrides). Toolchains come from
+   `TechnicallyComputers/retcomm-toolchains` (`cmake-clang-v1`).
+3. Fetch game source zipball at `build.source.ref` (or `RETCOMM_SOURCE_DIR`).
+4. Run SDK CLI `generate --json-progress` (`snesrecomp_cli.py` or
+   `psxrecomp_cli.py` per `build.generate.engine` / platform).
+5. `cmake -S … -B …` then `cmake --build --target …`.
+6. Stage binary + `assets/` into `releases/build-<ref>/` and link `current`.
+
+Smoke-test pack download: `retcomm pack ensure toolchain` (or
+`retcomm pack ensure toolchain --title metal-warriors-snes`).
+
+Launch always uses `current/` — same `launch_title` path for zip and build.
 
 Uninstall (`uninstall` / `remove`) deletes `releases/`, `current`, and
 `install.json`. By default it stashes memcards / SRAM / savestates (catalog

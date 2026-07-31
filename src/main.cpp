@@ -1,5 +1,6 @@
 #include "retcomm/app_state.hpp"
 #include "retcomm/bios_index.hpp"
+#include "retcomm/build.hpp"
 #include "retcomm/catalog.hpp"
 #include "retcomm/catalog_sync.hpp"
 #include "retcomm/config.hpp"
@@ -35,10 +36,19 @@ void print_help(const char* argv0) {
         << "  bios scan [--full] [--bios-dir DIR]  Scan BIOS tree, match titles that need BIOS\n"
         << "  bios list                    Show indexed title → BIOS bindings\n"
         << "  library [--check-updates]    Indexed title → ROM + install + BIOS status\n"
-        << "  install <title-id> [opts]    Download/extract latest GitHub release\n"
-        << "      --force                  Reinstall even if same tag\n"
+        << "  install <title-id> [opts]    Build locally when catalog has build recipe;\n"
+        << "                               otherwise download prebuilt GitHub release\n"
+        << "      --force                  Reinstall / rebuild even if same pin\n"
+        << "      --prebuilt               Force zip install (skip local generate+build)\n"
         << "      --wine                   Linux/macOS: install Windows build via Wine\n"
         << "      --dry-run                Print install plan only\n"
+        << "  build <title-id> [opts]      Local generate + cmake (requires matched ROM)\n"
+        << "      --force                  Rebuild even if same source ref\n"
+        << "      --rom PATH               ROM path (else library preferred)\n"
+        << "  pack ensure toolchain|sdk [opts]\n"
+        << "                               Fetch/cache a release pack (smoke-test downloads)\n"
+        << "      --title ID               Use that title's build.toolchain / build.sdk\n"
+        << "      --force                  Re-download even if cached\n"
         << "  update <title-id>|--all      Update installed title(s) if newer\n"
         << "  uninstall <title-id> [opts]  Remove installed title (alias: remove)\n"
         << "      --keep-saves             Keep memcards/SRAM/savestates (default)\n"
@@ -448,7 +458,8 @@ int cmd_scan(const retcomm::Paths& paths, const retcomm::Catalog& cat,
 }
 
 int cmd_install(const retcomm::Paths& paths, const retcomm::Catalog& cat,
-                const std::string& id, bool force, bool dry_run, bool use_wine) {
+                const std::string& id, bool force, bool dry_run, bool use_wine,
+                bool prefer_prebuilt) {
     const auto* t = cat.find(id);
     if (!t) {
         std::cerr << "unknown title: " << id << "\n";
@@ -463,12 +474,123 @@ int cmd_install(const retcomm::Paths& paths, const retcomm::Catalog& cat,
     opts.force = force;
     opts.check_latest = true;
     opts.use_wine = use_wine;
+    opts.prefer_prebuilt = prefer_prebuilt || use_wine;
     if (dry_run) {
+        if (!opts.prefer_prebuilt && t->supports_local_build()) {
+            std::cout << "would build " << t->id << " from " << t->build.source.ref
+                      << " (sdk=" << t->build.sdk.id << ", toolchain=" << t->build.toolchain.id
+                      << ")\n";
+            return 0;
+        }
         auto plan = retcomm::plan_install(paths, *t, opts);
         std::cout << plan.message;
         return 0;
     }
-    auto result = retcomm::install_title(paths, *t, opts);
+    retcomm::BuildOptions bopts;
+    bopts.force = force;
+    auto result = retcomm::install_title_auto(paths, *t, opts, bopts);
+    std::cout << result.message;
+    return result.ok ? 0 : 1;
+}
+
+int cmd_pack_ensure(const retcomm::Paths& paths, const retcomm::Catalog& cat,
+                    const std::string& kind, const std::string& title_id, bool force) {
+    const bool toolchain = (kind == "toolchain");
+    if (!toolchain && kind != "sdk") {
+        std::cerr << "usage: retcomm pack ensure toolchain|sdk [--title ID] [--force]\n";
+        return 2;
+    }
+
+    retcomm::TitleBuildPack pack;
+    if (!title_id.empty()) {
+        const auto* t = cat.find(title_id);
+        if (!t) {
+            std::cerr << "unknown title: " << title_id << "\n";
+            return 1;
+        }
+        pack = toolchain ? t->build.toolchain : t->build.sdk;
+        if (pack.id.empty() || pack.github.empty()) {
+            std::cerr << "title " << title_id << " has no build." << kind << " pack\n";
+            return 1;
+        }
+    } else if (toolchain) {
+        // Default: shared RetComM toolchain repo.
+        pack.id = "cmake-clang-v1";
+        pack.github = "TechnicallyComputers/retcomm-toolchains";
+        pack.asset_glob_linux = "*cmake-clang-v1*linux*";
+        pack.asset_glob_windows = "*cmake-clang-v1*windows*";
+        pack.asset_glob_macos = "*cmake-clang-v1*macos*";
+    } else {
+        std::cerr << "sdk pack ensure requires --title <id>\n";
+        return 2;
+    }
+
+    try {
+        retcomm::ensure_dirs(paths);
+    } catch (const std::exception& e) {
+        std::cerr << "note: " << e.what() << "\n";
+    }
+
+    if (force) {
+        std::error_code ec;
+        const fs::path base = toolchain ? paths.toolchains_dir : paths.sdks_dir;
+        fs::remove_all(base / pack.id, ec);
+    }
+
+    auto r = retcomm::ensure_pack(paths, pack, toolchain, {}, {});
+    if (!r.ok) {
+        std::cerr << r.message << "\n";
+        return 1;
+    }
+    std::cout << r.message << "\n";
+    std::cout << "root: " << r.root.string() << "\n";
+    std::cout << "tag:  " << r.tag << "\n";
+
+    // Light verification for toolchain packs.
+    if (toolchain) {
+        std::error_code ec;
+        const fs::path bin = r.root / "bin";
+        const fs::path cmake =
+#if defined(_WIN32)
+            bin / "cmake.exe";
+#else
+            bin / "cmake";
+#endif
+        if (fs::is_regular_file(cmake, ec)) {
+            std::cout << "cmake: " << cmake.string() << "\n";
+        } else {
+            std::cerr << "warning: cmake not found under " << bin.string() << "\n";
+        }
+        const fs::path meta = r.root / "retcomm-toolchain.json";
+        if (fs::is_regular_file(meta, ec)) std::cout << "meta:  " << meta.string() << "\n";
+    }
+    return 0;
+}
+
+int cmd_build(const retcomm::Paths& paths, const retcomm::Catalog& cat, const std::string& id,
+              bool force, const fs::path& rom_override) {
+    const auto* t = cat.find(id);
+    if (!t) {
+        std::cerr << "unknown title: " << id << "\n";
+        return 1;
+    }
+    if (!t->supports_local_build()) {
+        std::cerr << "title has no local build recipe: " << id << "\n";
+        return 1;
+    }
+    try {
+        retcomm::ensure_dirs(paths);
+    } catch (const std::exception& e) {
+        std::cerr << "note: " << e.what() << "\n";
+    }
+    retcomm::BuildOptions bopts;
+    bopts.force = force;
+    bopts.rom_path = rom_override;
+    if (bopts.rom_path.empty()) {
+        const auto idx = retcomm::load_library_index(paths.library_index_path);
+        bopts.rom_path = idx.preferred_rom(id);
+    }
+    auto result = retcomm::build_title(paths, *t, bopts);
     std::cout << result.message;
     return result.ok ? 0 : 1;
 }
@@ -500,7 +622,9 @@ int cmd_update(const retcomm::Paths& paths, const retcomm::Catalog& cat,
 
     int failures = 0;
     for (const auto* t : targets) {
-        auto result = retcomm::update_title(paths, *t, opts);
+        retcomm::BuildOptions bopts;
+        bopts.force = force;
+        auto result = retcomm::update_title_auto(paths, *t, opts, bopts);
         std::cout << result.message;
         if (!result.ok) ++failures;
     }
@@ -736,12 +860,14 @@ int main(int argc, char** argv) {
         }
         if (cmd == "install") {
             if (args.size() < 2) {
-                std::cerr << "usage: retcomm install <title-id> [--force] [--wine] [--dry-run]\n";
+                std::cerr << "usage: retcomm install <title-id> [--force] [--prebuilt] "
+                             "[--wine] [--dry-run]\n";
                 return 2;
             }
             bool force = false;
             bool dry_run = false;
             bool use_wine = false;
+            bool prefer_prebuilt = false;
             for (size_t i = 2; i < args.size(); ++i) {
                 if (args[i] == "--force")
                     force = true;
@@ -749,12 +875,52 @@ int main(int argc, char** argv) {
                     dry_run = true;
                 else if (args[i] == "--wine")
                     use_wine = true;
+                else if (args[i] == "--prebuilt")
+                    prefer_prebuilt = true;
                 else {
                     std::cerr << "unexpected install arg: " << args[i] << "\n";
                     return 2;
                 }
             }
-            return cmd_install(paths, catalog, args[1], force, dry_run, use_wine);
+            return cmd_install(paths, catalog, args[1], force, dry_run, use_wine, prefer_prebuilt);
+        }
+        if (cmd == "build") {
+            if (args.size() < 2) {
+                std::cerr << "usage: retcomm build <title-id> [--force] [--rom PATH]\n";
+                return 2;
+            }
+            bool force = false;
+            fs::path rom;
+            for (size_t i = 2; i < args.size(); ++i) {
+                if (args[i] == "--force")
+                    force = true;
+                else if (args[i] == "--rom" && i + 1 < args.size())
+                    rom = args[++i];
+                else {
+                    std::cerr << "unexpected build arg: " << args[i] << "\n";
+                    return 2;
+                }
+            }
+            return cmd_build(paths, catalog, args[1], force, rom);
+        }
+        if (cmd == "pack") {
+            if (args.size() < 3 || args[1] != "ensure") {
+                std::cerr << "usage: retcomm pack ensure toolchain|sdk [--title ID] [--force]\n";
+                return 2;
+            }
+            std::string title_id;
+            bool force = false;
+            for (size_t i = 3; i < args.size(); ++i) {
+                if (args[i] == "--title" && i + 1 < args.size())
+                    title_id = args[++i];
+                else if (args[i] == "--force")
+                    force = true;
+                else {
+                    std::cerr << "unexpected pack arg: " << args[i] << "\n";
+                    return 2;
+                }
+            }
+            return cmd_pack_ensure(paths, catalog, args[2], title_id, force);
         }
         if (cmd == "update") {
             if (args.size() < 2) {

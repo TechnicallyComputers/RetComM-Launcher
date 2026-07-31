@@ -21,6 +21,7 @@ namespace retcomm::hub {
 enum class HubJob : int {
     None = 0,
     Install,
+    InstallPrebuilt,
     InstallWine,
     Update,
     Uninstall,
@@ -70,6 +71,8 @@ struct TitleRow {
     std::string author_notes;  // Optional message from the recomp/decomp author
     std::string boxart_path;   // local cover image when found
     bool can_wine_install = false;
+    bool supports_local_build = false;
+    bool can_prebuilt_install = false;
     bool has_rom_identity = false;
     bool romm_ready = false; // base_url + api_token configured
     bool busy = false;

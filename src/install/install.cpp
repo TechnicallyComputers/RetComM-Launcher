@@ -689,6 +689,11 @@ InstallRecord load_install_record(const fs::path& install_root) {
         rec.runtime = j.value("runtime", "");
         rec.installed_at = j.value("installed_at", "");
         rec.release_url = j.value("release_url", "");
+        rec.method = j.value("method", "");
+        if (rec.method.empty()) rec.method = "zip";
+        rec.source_ref = j.value("source_ref", "");
+        rec.sdk_tag = j.value("sdk_tag", "");
+        rec.toolchain_tag = j.value("toolchain_tag", "");
         // Legacy installs: infer Wine from a Windows .exe on a non-Windows host.
         if (rec.runtime.empty()) {
             const std::string& b = rec.binary;
@@ -724,7 +729,11 @@ bool save_install_record(const fs::path& install_root, const InstallRecord& rec)
               {"target_os", rec.target_os},
               {"runtime", rec.runtime},
               {"installed_at", rec.installed_at},
-              {"release_url", rec.release_url}};
+              {"release_url", rec.release_url},
+              {"method", rec.method.empty() ? "zip" : rec.method}};
+    if (!rec.source_ref.empty()) j["source_ref"] = rec.source_ref;
+    if (!rec.sdk_tag.empty()) j["sdk_tag"] = rec.sdk_tag;
+    if (!rec.toolchain_tag.empty()) j["toolchain_tag"] = rec.toolchain_tag;
     std::ofstream out(path);
     if (!out) return false;
     out << j.dump(2) << "\n";
@@ -1022,6 +1031,7 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
     rec.runtime = use_wine ? "wine" : "native";
     rec.installed_at = iso8601_now();
     rec.release_url = rel.html_url;
+    rec.method = "zip";
     if (!save_install_record(install_root, rec)) {
         result.message = "installed files but failed to write install.json";
         return result;
