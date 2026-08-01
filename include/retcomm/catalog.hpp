@@ -79,19 +79,21 @@ struct TitleBuildPack {
     std::string asset_glob_linux;
     std::string asset_glob_windows;
     std::string asset_glob_macos;
+    // Optional semver floor (retcomm-toolchain.json "version" / release tag).
+    std::string min_version;
     const std::string& asset_glob_for_os(const std::string& os) const;
     const std::string& asset_glob_for_host() const;
 };
 
 struct TitleBuildGenerate {
-    // "snesrecomp" | "psxrecomp" — empty ⇒ derive from title.platform
+    // "snesrecomp" | "psxrecomp" | "gbarecomp" — empty ⇒ derive from title.platform
     std::string engine;
     // snesrecomp generate
     std::string cfg_dir = "recomp";
     std::string out_dir = "src/gen";
     std::string funcs_h = "recomp/funcs.h";
     bool cfg_roots = true;
-    // psxrecomp generate
+    // psxrecomp / gbarecomp generate (TOML path)
     std::string config = "game.toml";
 };
 

@@ -5,7 +5,7 @@ tools may be a separate pack **or** embedded in the game release zip.
 
 | Pack | Cache | Override |
 |---|---|---|
-| Toolchain (`cmake-clang-v1`) | `~/.local/share/retcomm/toolchains/<id>/<tag>/` | `RETCOMM_TOOLCHAIN_DIR` |
+| Toolchain (`cmake-clang-v1`) | `~/.local/share/retcomm/toolchains/<id>/<tag>/` (Windows: `%LOCALAPPDATA%\retcomm\toolchains\…`) — shared with standalone setup wizards | `RETCOMM_TOOLCHAIN_DIR` |
 | SDK tools (`snesrecomp-tools` / `psxrecomp-tools`) | `~/.local/share/retcomm/sdks/<id>/<tag>/` | `RETCOMM_SDK_DIR` |
 | Game source | `…/apps/<install>/src/<tag>/` | `RETCOMM_SOURCE_DIR` |
 
@@ -44,10 +44,11 @@ cmake-clang-v1-<os>/
 ```
 
 RetComM prepends `<pack>/bin` (or the single nested folder’s `bin/`) to `PATH`
-for configure/build. Prefer **harvesting** `toolchain/` from the game release
-zip into the shared cache (then prune the per-title copy). Download from
+for configure/build. Prefer **downloading** `cmake-clang-v1` from
 [TechnicallyComputers/retcomm-toolchains](https://github.com/TechnicallyComputers/retcomm-toolchains)
-only when the zip has no embedded pack (legacy titles / fallback).
+into the shared cache (`RETCOMM_TOOLCHAIN_DIR` overrides). Optionally **harvest**
+a legacy game-zip `toolchain/` when download is unavailable, then prune the
+per-title copy.
 
 | OS asset | Notes |
 |----------|--------|
@@ -62,15 +63,25 @@ snesrecomp-tools-<os>/
   snesrecomp_cli.py
   tools/…            # analyzer / emit dependencies
   retcomm-sdk.json   # optional: { "cli": "snesrecomp_cli.py" }
+
+gbarecomp-tools-<os>/
+  gbarecomp_cli.py
+  gba_recompile       # or gba_recompile.exe
+  tools/sdk_*.py
+  bios/gba_bios.toml  # identity seeds only — no BIOS dump
+  retcomm-sdk.json    # { "cli": "gbarecomp_cli.py", "id": "gbarecomp-tools" }
 ```
 
-Do **not** ship ROM dumps or generated `src/gen` in either pack.
+Do **not** ship ROM dumps, BIOS dumps, or generated `src/gen` /
+`variants/*/generated` in either pack.
 
 ## Packaging scripts
 
 - `scripts/package_snesrecomp_tools.sh` — build a tools zip from a snesrecomp tree
+- `gbarecomp/scripts/package_gbarecomp_tools.sh` — GBA tools zip (in gbarecomp)
 - `scripts/package_toolchain_smoke_linux.sh` — local smoke wrappers only (dev/testing)
 - Toolchain release assets: build in **retcomm-toolchains** via its CI
 
 Publish assets with names matching catalog `asset_glob` patterns
-(e.g. `snesrecomp-tools-linux-x64.zip`, `cmake-clang-v1-linux-x64.zip`).
+(e.g. `snesrecomp-tools-linux-x64.zip`, `gbarecomp-tools-linux-x64.zip`,
+`cmake-clang-v1-linux-x64.zip`).

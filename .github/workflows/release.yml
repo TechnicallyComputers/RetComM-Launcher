@@ -169,21 +169,43 @@ jobs:
       - name: Package portable + installer
         shell: pwsh
         run: |
-          # CMake install ships TARGET_RUNTIME_DLLS into out/bin. Also pass the
-          # MSVC Release dir where vcpkg applocal copies SDL3/libcurl during build.
+          # CMake install ships TARGET_RUNTIME_DLLS into out/bin (often incomplete
+          # for transitive deps). Always also harvest from vcpkg installed/bin so
+          # zlib1.dll (libcurl) lands in the installer / portable payload.
           $releaseDir = Join-Path $env:GITHUB_WORKSPACE "build\Release"
+          $vcpkgBin = Join-Path $env:RETCOMM_VCPKG "installed\x64-windows\bin"
           Write-Host "out/bin:"
           Get-ChildItem (Join-Path $env:GITHUB_WORKSPACE "out\bin") -ErrorAction SilentlyContinue |
             ForEach-Object { Write-Host "  $($_.Name)" }
           Write-Host "build/Release DLLs:"
           Get-ChildItem $releaseDir -Filter "*.dll" -ErrorAction SilentlyContinue |
             ForEach-Object { Write-Host "  $($_.Name)" }
+          Write-Host "vcpkg installed/bin:"
+          if (Test-Path $vcpkgBin) {
+            Get-ChildItem $vcpkgBin -Filter "*.dll" -ErrorAction SilentlyContinue |
+              ForEach-Object { Write-Host "  $($_.Name)" }
+          } else {
+            throw "vcpkg bin missing: $vcpkgBin (zlib/libcurl cannot be bundled)"
+          }
+          foreach ($needDll in @("zlib1.dll", "libcurl.dll", "SDL3.dll")) {
+            if (-not (Test-Path (Join-Path $vcpkgBin $needDll))) {
+              throw "Required runtime DLL missing from vcpkg: $needDll"
+            }
+          }
           ./packaging/windows/package.ps1 `
             -Prefix (Join-Path $env:GITHUB_WORKSPACE "out") `
             -Version "${{ needs.version.outputs.version }}" `
-            -VcpkgBin $releaseDir `
+            -VcpkgBin $vcpkgBin `
             -Arch x64 `
             -InnoSetup "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $stage = Join-Path dist "windows-stage"
+          Write-Host "staged DLLs:"
+          Get-ChildItem $stage -Filter "*.dll" | ForEach-Object { Write-Host "  $($_.Name)" }
+          foreach ($needDll in @("zlib1.dll", "libcurl.dll", "SDL3.dll", "z.dll")) {
+            if (-not (Test-Path (Join-Path $stage $needDll))) {
+              throw "Staged payload missing required DLL: $needDll"
+            }
+          }
           Get-ChildItem dist
           $need = @(
             "RetComM-Launcher-${{ needs.version.outputs.version }}-windows-portable.exe",
