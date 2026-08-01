@@ -17,7 +17,12 @@ using BuildProgressFn = std::function<void(const std::string& message, float fra
 
 struct BuildOptions {
     bool force = false; // re-fetch source / rebuild even if pins match
+    // When true, always re-run generate even if codegen-cache / prior src matches.
+    bool force_generate = false;
     fs::path rom_path;  // required verified ROM (library preferred_rom)
+    // Retail BIOS dump for psxrecomp generate (--bios). Empty + use_openbios → OpenBIOS.
+    fs::path bios_path;
+    bool use_openbios = false;
     // Optional overrides (also accepted via RETCOMM_TOOLCHAIN_DIR / RETCOMM_SDK_DIR /
     // RETCOMM_SOURCE_DIR).
     fs::path toolchain_dir;

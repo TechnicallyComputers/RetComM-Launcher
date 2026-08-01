@@ -92,72 +92,117 @@ else
   done
 fi
 
-# Drag-to-Applications DMG (Finder window with .app + /Applications symlink).
+# Drag-to-Applications DMG (.app + /Applications symlink).
 DMG="${OUT_DIR}/RetComM-Launcher-${VERSION}-macos-${ARCH}.dmg"
 VOLUME_NAME="RetComM Launcher"
 STAGE="${OUT_DIR}/dmg-staging"
 RW_DMG="${OUT_DIR}/.retcomm-dmg-rw.dmg"
-rm -rf "${STAGE}"
+MOUNT_DIR="${OUT_DIR}/dmg-mount"
+rm -rf "${STAGE}" "${MOUNT_DIR}"
 rm -f "${DMG}" "${RW_DMG}"
 mkdir -p "${STAGE}"
 # ditto preserves resource forks / signatures better than cp -R.
 ditto "${APP}" "${STAGE}/${APP_NAME}"
 ln -s /Applications "${STAGE}/Applications"
 
-# RW image so we can set Finder icon layout, then compress to UDZO.
-# Size headroom: app + frameworks; hdiutil grows poorly if undersized.
-hdiutil create \
-  -srcfolder "${STAGE}" \
-  -volname "${VOLUME_NAME}" \
-  -fs HFS+ \
-  -fsargs "-c c=64,a=16,e=16" \
-  -format UDRW \
-  -ov \
-  "${RW_DMG}" >/dev/null
+create_compressed_dmg() {
+  # Direct UDZO — no attach/Finder. Reliable on headless CI runners.
+  hdiutil create \
+    -srcfolder "${STAGE}" \
+    -volname "${VOLUME_NAME}" \
+    -fs HFS+ \
+    -fsargs "-c c=64,a=16,e=16" \
+    -format UDZO \
+    -imagekey zlib-level=9 \
+    -ov \
+    "${DMG}" >/dev/null
+}
 
-# Explicit mountpoint — volume names with spaces break `awk '{print $NF}'` parsing
-# of hdiutil attach output (/Volumes/RetComM Launcher → "Launcher").
-MOUNT_DIR="${OUT_DIR}/dmg-mount"
-rm -rf "${MOUNT_DIR}"
-mkdir -p "${MOUNT_DIR}"
-if ! hdiutil attach -readwrite -noverify -noautoopen \
-    -mountpoint "${MOUNT_DIR}" "${RW_DMG}" >/dev/null; then
-  echo "error: failed to mount temporary DMG at ${MOUNT_DIR}" >&2
-  exit 1
-fi
-if [[ ! -d "${MOUNT_DIR}" ]]; then
-  echo "error: mountpoint missing after attach: ${MOUNT_DIR}" >&2
-  exit 1
+detach_dmg_mount() {
+  local mount="$1"
+  local attempt
+  sync || true
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if hdiutil detach "${mount}" -quiet 2>/dev/null; then
+      return 0
+    fi
+    if hdiutil detach "${mount}" -force -quiet 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  # Last resort: detach by image path if mountpoint is already gone/confused.
+  hdiutil detach "${RW_DMG}" -force -quiet 2>/dev/null || true
+  if mount | grep -F " on ${mount} " >/dev/null 2>&1; then
+    return 1
+  fi
+  return 0
+}
+
+# CI / headless: skip Finder icon layout (osascript "tell disk …" flakes and
+# leaves the RW image busy so convert fails). Local interactive builds can opt
+# into the classic drag-install sheet with RETCOMM_DMG_FINDER_LAYOUT=1.
+USE_FINDER_LAYOUT=0
+if [[ "${RETCOMM_DMG_FINDER_LAYOUT:-}" == "1" && -z "${CI:-}" && -z "${GITHUB_ACTIONS:-}" ]]; then
+  USE_FINDER_LAYOUT=1
 fi
 
-# Best-effort Finder layout (classic drag-install sheet). Safe to skip on headless flakes.
-set +e
-osascript <<EOF
+if [[ "${USE_FINDER_LAYOUT}" -eq 1 ]]; then
+  hdiutil create \
+    -srcfolder "${STAGE}" \
+    -volname "${VOLUME_NAME}" \
+    -fs HFS+ \
+    -fsargs "-c c=64,a=16,e=16" \
+    -format UDRW \
+    -ov \
+    "${RW_DMG}" >/dev/null
+
+  mkdir -p "${MOUNT_DIR}"
+  if hdiutil attach -readwrite -noverify -noautoopen \
+      -mountpoint "${MOUNT_DIR}" "${RW_DMG}" >/dev/null \
+      && [[ -d "${MOUNT_DIR}" ]]; then
+    # Address the mount by POSIX path — volume-name lookup fails when attached
+    # at a custom mountpoint (and on runners without a working Finder).
+    set +e
+    osascript <<EOF
 tell application "Finder"
-  tell disk "${VOLUME_NAME}"
-    open
-    set current view of container window to icon view
-    set toolbar visible of container window to false
-    set statusbar visible of container window to false
-    set the bounds of container window to {200, 120, 780, 480}
-    set theViewOptions to the icon view options of container window
-    set arrangement of theViewOptions to not arranged
-    set icon size of theViewOptions to 128
-    set position of item "${APP_NAME}" of container window to {160, 180}
-    set position of item "Applications" of container window to {480, 180}
-    update without registering applications
-    delay 1
-    close
-  end tell
+  set volAlias to (POSIX file "${MOUNT_DIR}") as alias
+  open volAlias
+  set win to container window of volAlias
+  set current view of win to icon view
+  set toolbar visible of win to false
+  set statusbar visible of win to false
+  set the bounds of win to {200, 120, 780, 480}
+  set theViewOptions to the icon view options of win
+  set arrangement of theViewOptions to not arranged
+  set icon size of theViewOptions to 128
+  set position of item "${APP_NAME}" of win to {160, 180}
+  set position of item "Applications" of win to {480, 180}
+  update without registering applications
+  delay 1
+  close win
 end tell
 EOF
-sync
-hdiutil detach "${MOUNT_DIR}" >/dev/null || hdiutil detach -force "${MOUNT_DIR}" >/dev/null
-set -e
+    set -e
+    if ! detach_dmg_mount "${MOUNT_DIR}"; then
+      echo "warning: could not detach temporary DMG; falling back to plain UDZO" >&2
+      rm -f "${RW_DMG}"
+      create_compressed_dmg
+    else
+      hdiutil convert "${RW_DMG}" -format UDZO -imagekey zlib-level=9 -o "${DMG}" >/dev/null
+      rm -f "${RW_DMG}"
+    fi
+  else
+    echo "warning: failed to mount temporary DMG; falling back to plain UDZO" >&2
+    rm -f "${RW_DMG}"
+    create_compressed_dmg
+  fi
+else
+  create_compressed_dmg
+fi
 
-hdiutil convert "${RW_DMG}" -format UDZO -imagekey zlib-level=9 -o "${DMG}" >/dev/null
-rm -f "${RW_DMG}"
 rm -rf "${STAGE}" "${MOUNT_DIR}"
+rm -f "${RW_DMG}"
 
 echo "App: ${APP}"
 echo "DMG: ${DMG}"

@@ -30,6 +30,7 @@ AppState load_app_state(const fs::path& path) {
         st.schema_version = j.value("schema_version", 1);
         load_string_map(j, "preferred_save", st.preferred_save);
         load_string_map(j, "preferred_save_card2", st.preferred_save_card2);
+        load_string_map(j, "preferred_bios", st.preferred_bios);
         // Alternate nested form: titles.<id>.preferred_save / preferred_save_card2
         if (j.contains("titles") && j.at("titles").is_object()) {
             for (auto it = j.at("titles").begin(); it != j.at("titles").end(); ++it) {
@@ -44,6 +45,10 @@ AppState load_app_state(const fs::path& path) {
                     if (!st.preferred_save_card2.count(it.key()))
                         st.preferred_save_card2[it.key()] =
                             tj.at("preferred_save_card2").get<std::string>();
+                }
+                if (tj.contains("preferred_bios") && tj.at("preferred_bios").is_string()) {
+                    if (!st.preferred_bios.count(it.key()))
+                        st.preferred_bios[it.key()] = tj.at("preferred_bios").get<std::string>();
                 }
             }
         }
@@ -66,6 +71,10 @@ bool save_app_state(const fs::path& path, const AppState& state, std::string* er
     for (const auto& [id, save] : state.preferred_save_card2) {
         // Persist explicit blank as empty string only when key was set — we erase blanks.
         if (!id.empty() && !save.empty()) j["preferred_save_card2"][id] = save;
+    }
+    j["preferred_bios"] = json::object();
+    for (const auto& [id, bios] : state.preferred_bios) {
+        if (!id.empty() && !bios.empty()) j["preferred_bios"][id] = bios;
     }
 
     const fs::path tmp = path.string() + ".tmp";
@@ -112,6 +121,21 @@ void set_preferred_save_card2(AppState& state, const std::string& title_id,
         state.preferred_save_card2.erase(title_id);
     else
         state.preferred_save_card2[title_id] = save_id;
+}
+
+std::string preferred_bios_for(const AppState& state, const std::string& title_id) {
+    const auto it = state.preferred_bios.find(title_id);
+    if (it == state.preferred_bios.end()) return {};
+    return it->second;
+}
+
+void set_preferred_bios(AppState& state, const std::string& title_id,
+                        const std::string& bios_choice) {
+    if (title_id.empty()) return;
+    if (bios_choice.empty())
+        state.preferred_bios.erase(title_id);
+    else
+        state.preferred_bios[title_id] = bios_choice;
 }
 
 } // namespace retcomm

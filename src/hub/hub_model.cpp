@@ -40,6 +40,59 @@ std::string join_csv(const std::vector<std::string>& parts) {
     return s;
 }
 
+std::string to_lower_ascii(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+bool title_supports_openbios(const Title& t) {
+    return to_lower_ascii(t.build.generate.engine) == "psxrecomp";
+}
+
+void apply_bios_choice_to_build(const Title& t, const BiosIndex& bios_idx, const AppState& st,
+                                BuildOptions& bopts) {
+    const std::string choice = preferred_bios_for(st, t.id);
+    if (choice == kOpenBiosChoice) {
+        bopts.use_openbios = true;
+        bopts.bios_path.clear();
+        return;
+    }
+    std::error_code ec;
+    if (!choice.empty() && fs::is_regular_file(choice, ec)) {
+        bopts.bios_path = choice;
+        bopts.use_openbios = false;
+        return;
+    }
+    const fs::path pref = bios_idx.preferred_bios(t.id);
+    if (!pref.empty() && fs::is_regular_file(pref, ec)) {
+        bopts.bios_path = pref;
+        bopts.use_openbios = false;
+        return;
+    }
+    if (title_supports_openbios(t)) {
+        bopts.use_openbios = true;
+        bopts.bios_path.clear();
+    }
+}
+
+void apply_bios_choice_to_launch(const Title& t, const BiosIndex& bios_idx, const AppState& st,
+                                 LaunchOptions& opts) {
+    const std::string choice = preferred_bios_for(st, t.id);
+    if (choice == kOpenBiosChoice) {
+        opts.bios_path.clear(); // runtime uses linked OpenBIOS
+        return;
+    }
+    std::error_code ec;
+    if (!choice.empty() && fs::is_regular_file(choice, ec)) {
+        opts.bios_path = choice;
+        return;
+    }
+    if (t.has_bios_identity()) {
+        const fs::path pref = bios_idx.preferred_bios(t.id);
+        if (!pref.empty()) opts.bios_path = pref;
+    }
+}
+
 std::vector<std::string> split_csv(const char* text) {
     std::vector<std::string> out;
     if (!text) return out;
@@ -103,6 +156,7 @@ void HubModel::refresh_rows(bool check_updates) {
         const auto plan = inspect_install(paths, t);
         row.installed = plan.installed;
         row.install_dir_present = plan.install_dir_present;
+        row.has_preserved_state = plan.has_preserved_state;
         row.expected_binary = plan.expected_binary;
         row.install_issue.clear();
         if (plan.install_dir_present && !plan.installed)
@@ -153,10 +207,73 @@ void HubModel::refresh_rows(bool check_updates) {
             if (!art.empty()) row.boxart_path = art.string();
         }
 
-        if (row.needs_bios) {
+        row.supports_openbios = title_supports_openbios(t);
+        if (row.needs_bios || row.supports_openbios) {
             const auto b = bios.preferred_bios(t.id);
             row.has_bios = !b.empty();
             row.bios_path = b.string();
+
+            std::unordered_set<std::string> seen;
+            std::vector<std::string> dump_paths;
+            auto add_dump = [&](const std::string& path) {
+                if (path.empty() || !seen.insert(path).second) return;
+                std::error_code ec;
+                if (!fs::is_regular_file(path, ec)) return;
+                dump_paths.push_back(path);
+            };
+            if (const auto* bind = bios.find_title(t.id)) {
+                if (!bind->preferred_path.empty()) add_dump(bind->preferred_path);
+                for (const auto& p : bind->paths) add_dump(p);
+            }
+            for (const auto& f : bios.files) {
+                if (!f.title_id.empty() && f.title_id != t.id) continue;
+                if (!f.platform.empty() && f.platform != t.platform) continue;
+                add_dump(f.path);
+            }
+            std::unordered_map<std::string, int> basename_counts;
+            for (const auto& path : dump_paths) {
+                basename_counts[fs::path(path).filename().string()]++;
+            }
+            for (const auto& path : dump_paths) {
+                row.bios_choice_ids.push_back(path);
+                const fs::path p(path);
+                const std::string base = p.filename().string();
+                if (basename_counts[base] > 1) {
+                    const std::string parent = p.parent_path().filename().string();
+                    row.bios_choice_labels.push_back(parent.empty() ? path : (parent + "/" + base));
+                } else {
+                    row.bios_choice_labels.push_back(base);
+                }
+            }
+            if (row.supports_openbios) {
+                row.bios_choice_ids.push_back(kOpenBiosChoice);
+                row.bios_choice_labels.push_back("OpenBIOS (MIT, bundled)");
+            }
+
+            row.bios_choice = preferred_bios_for(app_state, t.id);
+            if (row.bios_choice.empty()) {
+                if (!row.bios_path.empty())
+                    row.bios_choice = row.bios_path;
+                else if (row.supports_openbios)
+                    row.bios_choice = kOpenBiosChoice;
+            }
+            row.preferred_bios_index = -1;
+            for (size_t i = 0; i < row.bios_choice_ids.size(); ++i) {
+                if (row.bios_choice_ids[i] == row.bios_choice) {
+                    row.preferred_bios_index = static_cast<int>(i);
+                    break;
+                }
+            }
+            if (row.preferred_bios_index < 0 && !row.bios_choice_ids.empty()) {
+                row.preferred_bios_index = 0;
+                row.bios_choice = row.bios_choice_ids[0];
+            }
+            if (row.bios_choice == kOpenBiosChoice) {
+                row.has_bios = true;
+            } else if (!row.bios_choice.empty()) {
+                row.bios_path = row.bios_choice;
+                row.has_bios = true;
+            }
         }
 
         if (row.installed) {
@@ -346,6 +463,8 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 opts.prefer_prebuilt = prebuilt;
                 BuildOptions bopts;
                 bopts.rom_path = library.preferred_rom(title_id);
+                app_state = load_app_state(paths.state_path);
+                apply_bios_choice_to_build(*t, bios, app_state, bopts);
                 bopts.on_progress = [this](const std::string& msg, float) { set_status(msg); };
                 auto r = install_title_auto(paths, *t, opts, bopts);
                 append_log(r.message);
@@ -362,6 +481,8 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 }
                 BuildOptions bopts;
                 bopts.rom_path = library.preferred_rom(title_id);
+                app_state = load_app_state(paths.state_path);
+                apply_bios_choice_to_build(*t, bios, app_state, bopts);
                 bopts.on_progress = [this](const std::string& msg, float) { set_status(msg); };
                 auto r = update_title_auto(paths, *t, {}, bopts);
                 append_log(r.message);
@@ -394,13 +515,12 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 opts.mode = LaunchMode::Default;
                 opts.detach = true;
                 opts.rom_path = library.preferred_rom(title_id);
-                if (t->has_bios_identity())
-                    opts.bios_path = bios.preferred_bios(title_id);
                 {
                     // Promote install→library and mint a canonical save when needed.
                     auto ensured = ensure_canonical_save(paths, cfg, *t, opts.rom_path, true);
                     if (!ensured.message.empty()) append_log(ensured.message);
                     app_state = load_app_state(paths.state_path);
+                    apply_bios_choice_to_launch(*t, bios, app_state, opts);
                     if (ensured.ok) opts.save_path = ensured.save.host_path;
                     else {
                         const std::string save_id = preferred_save_for(app_state, title_id);
@@ -867,7 +987,9 @@ bool HubModel::save_settings(std::string* error) {
     if (cfg.filter_unsupported_titles) {
         std::lock_guard<std::mutex> lock(mu);
         auto visible = [&](const TitleRow& r) {
-            if (r.has_rom || r.has_romm || r.installed || r.install_dir_present) return true;
+            if (r.has_rom || r.has_romm || r.installed || r.install_dir_present ||
+                r.has_preserved_state)
+                return true;
             return false;
         };
         bool ok = selected >= 0 && selected < static_cast<int>(rows.size()) &&
@@ -928,6 +1050,34 @@ bool HubModel::save_romm_settings(std::string* error) {
     refresh_rows(false);
     // Re-pull covers so RomM menu art replaces any prior url_cover (IGDB) cache.
     start_job(HubJob::FetchBoxart, {}, true);
+    return true;
+}
+
+bool HubModel::set_title_preferred_bios(const std::string& title_id, const std::string& bios_choice,
+                                        std::string* error) {
+    app_state = load_app_state(paths.state_path);
+    set_preferred_bios(app_state, title_id, bios_choice);
+    if (!save_app_state(paths.state_path, app_state, error)) return false;
+
+    std::lock_guard<std::mutex> lock(mu);
+    for (auto& row : rows) {
+        if (row.id != title_id) continue;
+        row.bios_choice = bios_choice;
+        row.preferred_bios_index = -1;
+        for (size_t i = 0; i < row.bios_choice_ids.size(); ++i) {
+            if (row.bios_choice_ids[i] == bios_choice) {
+                row.preferred_bios_index = static_cast<int>(i);
+                break;
+            }
+        }
+        if (bios_choice == kOpenBiosChoice) {
+            row.has_bios = true;
+        } else if (!bios_choice.empty()) {
+            row.bios_path = bios_choice;
+            row.has_bios = true;
+        }
+        break;
+    }
     return true;
 }
 

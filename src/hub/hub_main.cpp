@@ -183,7 +183,7 @@ bool title_has_rom_source(const TitleRow& r) { return r.has_rom || r.has_romm; }
 bool title_passes_library_filter(const TitleRow& r, const HubModel& hub) {
     if (!hub.cfg.filter_unsupported_titles) return true;
     if (title_has_rom_source(r)) return true;
-    if (r.installed || r.install_dir_present) return true;
+    if (r.installed || r.install_dir_present || r.has_preserved_state) return true;
     return false;
 }
 
@@ -192,8 +192,10 @@ const char* chip_label(const TitleRow& r) {
     if (r.installed && r.runtime == "wine") return "WINE";
     if (r.installed) return "INSTALLED";
     if (r.install_dir_present) return "NEEDS SETUP";
+    // Keep-saves uninstall: catalog/ROM state, not a broken install.
     if (r.has_rom) return "ROM READY";
     if (r.has_romm) return "ON ROMM";
+    if (r.has_preserved_state) return "SAVES KEPT";
     return "CATALOG";
 }
 
@@ -204,6 +206,7 @@ ImVec4 chip_color(const TitleRow& r, const Theme& th) {
     if (r.install_dir_present) return th.warn;
     if (r.has_rom) return th.focus;
     if (r.has_romm) return th.accent;
+    if (r.has_preserved_state) return th.focus;
     return th.text_muted;
 }
 
@@ -453,6 +456,14 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
         }
     } else {
         ImGui::TextColored(th.text_muted, "Not installed");
+        if (row.has_preserved_state) {
+            ImGui::TextColored(th.focus, "Preserved saves/config ready");
+            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+            ImGui::TextWrapped(
+                "Previous uninstall kept user data under preserved/. The next install "
+                "will restore it into the new release.");
+            ImGui::PopStyleColor();
+        }
     }
 
     ImGui::Dummy(ImVec2(0, 6));
@@ -479,13 +490,43 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
         }
     }
 
-    if (row.needs_bios) {
+    if (row.needs_bios || row.supports_openbios) {
         ImGui::Dummy(ImVec2(0, 6));
         ImGui::TextColored(th.text_muted, "BIOS");
-        if (row.has_bios)
+        if (!row.bios_choice_ids.empty()) {
+            const char* preview =
+                (row.preferred_bios_index >= 0 &&
+                 row.preferred_bios_index < static_cast<int>(row.bios_choice_labels.size()))
+                    ? row.bios_choice_labels[static_cast<size_t>(row.preferred_bios_index)].c_str()
+                    : "(select)";
+            if (ImGui::BeginCombo("##bios_choice", preview)) {
+                for (size_t i = 0; i < row.bios_choice_ids.size(); ++i) {
+                    const bool selected = static_cast<int>(i) == row.preferred_bios_index;
+                    // Unique ID: duplicate basenames (e.g. two SCPH1001.BIN) collide otherwise.
+                    const std::string item =
+                        row.bios_choice_labels[i] + "##" + row.bios_choice_ids[i];
+                    if (ImGui::Selectable(item.c_str(), selected)) {
+                        std::string err;
+                        if (!hub.set_title_preferred_bios(row.id, row.bios_choice_ids[i], &err))
+                            hub.append_log("BIOS preference failed: " + err);
+                    }
+                    if (selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            if (row.bios_choice == retcomm::kOpenBiosChoice) {
+                ImGui::TextColored(th.text_muted,
+                                   "OpenBIOS regenerates at Build & Install (no dump needed).");
+            } else if (!row.bios_path.empty()) {
+                ImGui::TextWrapped("%s", row.bios_path.c_str());
+            }
+        } else if (row.has_bios) {
             ImGui::TextWrapped("%s", row.bios_path.c_str());
-        else
+        } else {
             ImGui::TextColored(th.warn, "Missing — run Scan BIOS");
+            if (row.supports_openbios)
+                ImGui::TextColored(th.text_muted, "Or use OpenBIOS after a catalog refresh.");
+        }
     }
 
     ImGui::Dummy(ImVec2(0, 12));
@@ -602,7 +643,8 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
         if (ImGui::Button("Uninstall + delete saves", ImVec2(-1, 0)))
             hub.start_job(HubJob::UninstallPurge, row.id);
     } else {
-        if (row.install_dir_present && ImGui::Button("Open Folder", ImVec2(-1, 0))) {
+        if ((row.install_dir_present || row.has_preserved_state) &&
+            ImGui::Button("Open Folder", ImVec2(-1, 0))) {
             std::string err;
             if (!retcomm::open_path_in_file_manager(row.install_root, &err))
                 hub.append_log("Open Folder failed: " + err);
@@ -643,6 +685,14 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
                 hub.start_job(HubJob::Uninstall, row.id);
             if (ImGui::Button("Clean install folder + delete saves", ImVec2(-1, 0)))
                 hub.start_job(HubJob::UninstallPurge, row.id);
+        } else if (row.has_preserved_state) {
+            if (ImGui::Button("Delete preserved data", ImVec2(-1, 0)))
+                hub.start_job(HubJob::UninstallPurge, row.id);
+            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+            ImGui::TextWrapped(
+                "Removes the entire apps folder for this title, including preserved "
+                "saves and config.");
+            ImGui::PopStyleColor();
         }
     }
 
@@ -1140,20 +1190,82 @@ void draw_sidebar_actions(HubModel& hub, const Theme& th) {
     ImGui::PopStyleColor();
 }
 
-void draw_log(HubModel& hub, const Theme& th) {
-    ImGui::BeginChild("log", ImVec2(0, 140), ImGuiChildFlags_Borders);
+void draw_log(HubModel& hub, const Theme& th, float height) {
+    if (height < 60.f) height = 60.f;
+    ImGui::BeginChild("log", ImVec2(0, height), ImGuiChildFlags_Borders);
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
     ImGui::TextUnformatted("ACTIVITY");
     ImGui::PopStyleColor();
-    ImGui::Separator();
     std::string log;
     {
         std::lock_guard<std::mutex> lock(hub.mu);
         log = hub.log;
     }
-    ImGui::TextUnformatted(log.empty() ? "(no activity yet)" : log.c_str());
-    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 8.f) ImGui::SetScrollHereY(1.f);
+    if (log.empty()) log = "(no activity yet)";
+    ImGui::SameLine();
+    {
+        const float copy_w = ImGui::CalcTextSize("Copy").x + ImGui::GetStyle().FramePadding.x * 2.f;
+        const float right = ImGui::GetWindowContentRegionMax().x;
+        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), right - copy_w));
+        if (ImGui::SmallButton("Copy")) ImGui::SetClipboardText(log.c_str());
+    }
+    ImGui::Separator();
+
+    // Scroll the outer child (not InputTextMultiline's internal window). Size the
+    // multiline to its content height so selection/copy still works.
+    ImGui::BeginChild("activity_scroll", ImVec2(0, 0), ImGuiChildFlags_None);
+    static size_t prev_len = 0;
+    const bool grew = log.size() != prev_len;
+    prev_len = log.size();
+    // Measured before content grows so we only stick when the user was already
+    // at the bottom (doesn't fight mouse-wheel scrolling up).
+    const bool at_bottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 8.f;
+
+    std::vector<char> buf(log.begin(), log.end());
+    buf.push_back('\0');
+    const float wrap_w = ImGui::GetContentRegionAvail().x;
+    const float wrap = wrap_w > 1.f ? wrap_w : -1.f;
+    const ImVec2 text_sz = ImGui::CalcTextSize(log.c_str(), nullptr, false, wrap);
+    const float box_h =
+        std::max(text_sz.y + ImGui::GetStyle().FramePadding.y * 2.f + 4.f,
+                 ImGui::GetTextLineHeight() * 2.f);
+
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::InputTextMultiline("##activity_log", buf.data(), buf.size(),
+                              ImVec2(wrap_w > 0.f ? wrap_w : 0.f, box_h),
+                              ImGuiInputTextFlags_ReadOnly);
+    ImGui::PopStyleColor(2);
+
+    if (grew && at_bottom) ImGui::SetScrollHereY(1.f);
     ImGui::EndChild();
+    ImGui::EndChild();
+}
+
+// Drag handle between the library/detail body and the activity log.
+void draw_log_splitter(float& log_h, float avail_y, const Theme& th) {
+    constexpr float kSplitH = 6.f;
+    constexpr float kMinLog = 72.f;
+    constexpr float kMinBody = 160.f;
+    const float max_log = std::max(kMinLog, avail_y - kMinBody - kSplitH);
+    log_h = std::clamp(log_h, kMinLog, max_log);
+
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##body_log_split", ImVec2(-1.f, kSplitH));
+    const ImVec2 p1 = ImGui::GetItemRectMax();
+    const bool active = ImGui::IsItemActive();
+    const bool hover = ImGui::IsItemHovered() || active;
+    if (hover) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+    if (active) {
+        log_h = std::clamp(log_h - ImGui::GetIO().MouseDelta.y, kMinLog, max_log);
+    }
+    const ImU32 col =
+        ImGui::ColorConvertFloat4ToU32(hover ? th.accent : th.border);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(p0, p1, col);
+    const float mid_y = (p0.y + p1.y) * 0.5f;
+    dl->AddLine(ImVec2(p0.x + 24.f, mid_y), ImVec2(p1.x - 24.f, mid_y),
+                ImGui::ColorConvertFloat4ToU32(th.text_muted), 1.f);
 }
 
 } // namespace
@@ -1269,8 +1381,15 @@ int main(int argc, char** argv) {
 
         draw_marquee(th, ImGui::GetContentRegionAvail().x);
 
-        const float footer_h = 150.f;
-        const float body_h = ImGui::GetContentRegionAvail().y - footer_h - 8.f;
+        static float log_h = 150.f;
+        const float avail_y = ImGui::GetContentRegionAvail().y;
+        constexpr float kSplitH = 6.f;
+        constexpr float kMinLog = 72.f;
+        constexpr float kMinBody = 160.f;
+        const float max_log = std::max(kMinLog, avail_y - kMinBody - kSplitH);
+        log_h = std::clamp(log_h, kMinLog, max_log);
+        const float body_h = avail_y - log_h - kSplitH;
+
         ImGui::BeginChild("body", ImVec2(0, body_h), ImGuiChildFlags_None);
 
         const float left_w = 280.f;
@@ -1300,7 +1419,8 @@ int main(int argc, char** argv) {
         }
 
         ImGui::EndChild(); // body
-        draw_log(hub, th);
+        draw_log_splitter(log_h, avail_y, th);
+        draw_log(hub, th, log_h);
         draw_setup_wizard(hub, th, window);
         ImGui::End();
 

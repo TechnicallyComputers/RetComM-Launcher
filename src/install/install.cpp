@@ -78,6 +78,21 @@ std::vector<std::string> save_globs_for_title(const Title& title) {
     return g;
 }
 
+bool is_user_config_path(const std::string& rel_posix) {
+    if (rel_posix.empty()) return false;
+    // Basename-only or nested under the release root (never deep vendor trees).
+    const auto slash = rel_posix.rfind('/');
+    const std::string base =
+        slash == std::string::npos ? rel_posix : rel_posix.substr(slash + 1);
+    static const char* kNames[] = {"settings.toml", "keybinds.ini", "bios.cfg",
+                                   "disc.cfg",      "rom.cfg",      "input.ini",
+                                   "imgui.ini",     "controls.ini"};
+    for (const char* n : kNames) {
+        if (base == n) return true;
+    }
+    return false;
+}
+
 bool is_save_path(const std::string& rel_posix, const std::vector<std::string>& globs) {
     if (rel_posix.empty()) return false;
     // Whole saves/ tree (memcards + host dumps games often drop here).
@@ -88,6 +103,10 @@ bool is_save_path(const std::string& rel_posix, const std::vector<std::string>& 
         if (path_matches_glob(rel_posix, g)) return true;
     }
     return false;
+}
+
+bool is_user_state_path(const std::string& rel_posix, const std::vector<std::string>& globs) {
+    return is_save_path(rel_posix, globs) || is_user_config_path(rel_posix);
 }
 
 std::string rel_posix_under(const fs::path& root, const fs::path& file) {
@@ -114,10 +133,10 @@ std::string normalize_preserved_rel(std::string rel) {
     return rel;
 }
 
-// Copy matching save files from `search_root` into install_root/preserved/<rel>.
-size_t stash_saves_from(const fs::path& search_root, const fs::path& preserved,
-                        const std::vector<std::string>& globs,
-                        std::vector<std::string>* out_rels, std::string* error) {
+// Copy matching save/config files from `search_root` into preserved/<rel>.
+size_t stash_user_state_from(const fs::path& search_root, const fs::path& preserved,
+                             const std::vector<std::string>& globs,
+                             std::vector<std::string>* out_rels, std::string* error) {
     std::error_code ec;
     if (!fs::exists(search_root, ec)) return 0;
     size_t n = 0;
@@ -131,7 +150,7 @@ size_t stash_saves_from(const fs::path& search_root, const fs::path& preserved,
         if (!it->is_regular_file(ec)) continue;
         const std::string rel =
             normalize_preserved_rel(rel_posix_under(search_root, it->path()));
-        if (rel.empty() || !is_save_path(rel, globs)) continue;
+        if (rel.empty() || !is_user_state_path(rel, globs)) continue;
         const fs::path dest = preserved / rel;
         fs::create_directories(dest.parent_path(), ec);
         fs::copy_file(it->path(), dest, fs::copy_options::overwrite_existing, ec);
@@ -145,28 +164,11 @@ size_t stash_saves_from(const fs::path& search_root, const fs::path& preserved,
     return n;
 }
 
-void restore_preserved_saves(const fs::path& install_root, const fs::path& release_dir,
-                             std::string* note) {
-    const fs::path preserved = install_root / "preserved";
-    std::error_code ec;
-    if (!fs::is_directory(preserved, ec)) return;
-    size_t n = 0;
-    for (auto it = fs::recursive_directory_iterator(
-             preserved, fs::directory_options::skip_permission_denied, ec);
-         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
-        if (!it->is_regular_file(ec)) continue;
-        const std::string rel =
-            normalize_preserved_rel(rel_posix_under(preserved, it->path()));
-        // Empty globs: still matches saves/, states/, savestates/ trees.
-        if (rel.empty() || !is_save_path(rel, {})) continue;
-        const fs::path dest = release_dir / rel;
-        if (fs::exists(dest, ec)) continue; // don't clobber newer files
-        fs::create_directories(dest.parent_path(), ec);
-        fs::copy_file(it->path(), dest, fs::copy_options::skip_existing, ec);
-        if (!ec) ++n;
-    }
-    if (note && n > 0)
-        *note = "restored " + std::to_string(n) + " preserved save file(s) into release\n";
+// Back-compat name used by uninstall keep-saves.
+size_t stash_saves_from(const fs::path& search_root, const fs::path& preserved,
+                        const std::vector<std::string>& globs,
+                        std::vector<std::string>* out_rels, std::string* error) {
+    return stash_user_state_from(search_root, preserved, globs, out_rels, error);
 }
 
 std::string iso8601_now() {
@@ -542,6 +544,9 @@ const GhAsset* pick_asset(const GhRelease& rel, const std::string& glob) {
     if (glob.empty()) return nullptr;
     const GhAsset* best = nullptr;
     int best_score = -1;
+    // When the catalog glob itself is for a tools pack, do not penalize "tools".
+    const std::string glob_l = to_lower(glob);
+    const bool glob_wants_tools = glob_l.find("tools") != std::string::npos;
     for (const auto& a : rel.assets) {
         if (!asset_name_matches_glob(glob, a.name)) continue;
         int score = 0;
@@ -554,6 +559,9 @@ const GhAsset* pick_asset(const GhRelease& rel, const std::string& glob) {
             score += 1; // still acceptable
         // Prefer an exact family hit on the primary glob slightly.
         if (match_glob(glob, a.name)) score += 1;
+        // Game releases often ship companion *-tools-* zips on the same tag.
+        // Broad globs like "*linux*" match both; prefer the non-tools asset.
+        if (!glob_wants_tools && n.find("tools") != std::string::npos) score -= 10;
         if (score > best_score) {
             best_score = score;
             best = &a;
@@ -606,14 +614,51 @@ std::string launch_name_for_plan(const InstallPlan& plan) {
     return plan.title->launch_binary_for_host();
 }
 
+// Keep-saves uninstall leaves only apps/<title>/preserved/. That is not a
+// broken install — treat as not installed with optional restore-on-reinstall.
+bool classify_install_root_leftovers(const fs::path& install_root, bool* has_preserved,
+                                     bool* other_leftovers) {
+    if (has_preserved) *has_preserved = false;
+    if (other_leftovers) *other_leftovers = false;
+    std::error_code ec;
+    if (!fs::exists(install_root, ec)) return false;
+
+    bool saw_preserved = false;
+    bool saw_other = false;
+    for (auto it = fs::directory_iterator(install_root, ec);
+         !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (name == "preserved") {
+            saw_preserved = true;
+            // Non-empty preserved/ counts; empty dir is leftover noise.
+            if (has_preserved && fs::is_directory(it->path(), ec) &&
+                !fs::is_empty(it->path(), ec)) {
+                *has_preserved = true;
+            }
+            continue;
+        }
+        saw_other = true;
+    }
+    if (other_leftovers) *other_leftovers = saw_other;
+    (void)saw_preserved;
+    return true;
+}
+
 void fill_from_disk(InstallPlan& plan) {
     plan.record.reset();
     plan.installed = false;
     plan.installed_tag.clear();
     plan.binary_path.clear();
     plan.expected_binary.clear();
+    plan.install_dir_present = false;
+    plan.has_preserved_state = false;
     std::error_code ec;
-    plan.install_dir_present = fs::exists(plan.install_root, ec);
+
+    bool has_preserved = false;
+    bool other_leftovers = false;
+    const bool root_exists =
+        classify_install_root_leftovers(plan.install_root, &has_preserved, &other_leftovers);
+    plan.has_preserved_state = has_preserved;
 
     InstallRecord rec = load_install_record(plan.install_root);
     if (!rec.title_id.empty()) {
@@ -635,6 +680,7 @@ void fill_from_disk(InstallPlan& plan) {
         if (!candidate.empty() && fs::exists(candidate)) {
             plan.binary_path = candidate;
             plan.installed = true;
+            plan.install_dir_present = true;
             plan.message = "installed: " + candidate.string();
             if (!plan.installed_tag.empty())
                 plan.message += " [" + plan.installed_tag + "]";
@@ -642,29 +688,117 @@ void fill_from_disk(InstallPlan& plan) {
                 plan.message += " [wine]";
             return;
         }
+        plan.install_dir_present = true;
         plan.message = "current/ present but binary missing";
         if (!bin.empty()) plan.message += ": " + bin;
         return;
     }
 
+    // Accept only a finished install layout — never the setup host vendored
+    // inside src/<tag>/ from a release/source zip (that falsely enables Play).
     if (!bin.empty()) {
-        const fs::path flat = find_named_file(plan.install_root, bin);
-        if (!flat.empty()) {
-            plan.binary_path = flat;
+        const fs::path top = plan.install_root / bin;
+        if (fs::is_regular_file(top, ec)) {
+            plan.binary_path = top;
             plan.installed = true;
-            plan.message = "installed (flat): " + flat.string();
+            plan.install_dir_present = true;
+            plan.message = "installed (flat): " + top.string();
             return;
         }
+        const fs::path releases = plan.install_root / "releases";
+        if (fs::is_directory(releases, ec)) {
+            const fs::path under_releases = find_named_file(releases, bin);
+            if (!under_releases.empty()) {
+                plan.binary_path = under_releases;
+                plan.installed = true;
+                plan.install_dir_present = true;
+                plan.message = "installed: " + under_releases.string();
+                if (!plan.installed_tag.empty())
+                    plan.message += " [" + plan.installed_tag + "]";
+                return;
+            }
+        }
     }
-    if (plan.install_dir_present) {
+
+    // Partial/broken install artifacts (src/, releases/, install.json, …).
+    // preserved/-only after keep-saves uninstall is not NEEDS SETUP.
+    if (root_exists && other_leftovers) {
+        plan.install_dir_present = true;
         plan.message = "install folder present but binary missing";
         if (!bin.empty()) plan.message += ": " + bin;
+        return;
+    }
+    if (plan.has_preserved_state) {
+        plan.message = "not installed (preserved saves/config under " +
+                       (plan.install_root / "preserved").string() + ")";
         return;
     }
     plan.message = "not installed under " + plan.install_root.string();
 }
 
 } // namespace
+
+void restore_user_state(const fs::path& install_root, const fs::path& release_dir,
+                        std::string* note) {
+    const fs::path preserved = install_root / "preserved";
+    std::error_code ec;
+    if (!fs::is_directory(preserved, ec)) return;
+    size_t n = 0;
+    for (auto it = fs::recursive_directory_iterator(
+             preserved, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        const std::string rel =
+            normalize_preserved_rel(rel_posix_under(preserved, it->path()));
+        if (rel.empty() || !is_user_state_path(rel, {})) continue;
+        const fs::path dest = release_dir / rel;
+        if (fs::exists(dest, ec)) continue;
+        fs::create_directories(dest.parent_path(), ec);
+        fs::copy_file(it->path(), dest, fs::copy_options::skip_existing, ec);
+        if (!ec) ++n;
+    }
+    if (note && n > 0)
+        *note = "restored " + std::to_string(n) + " preserved save/config file(s) into release\n";
+}
+
+void stash_user_state_for_update(const Paths& paths, const Title& title, std::string* note) {
+    const fs::path install_root = paths.apps_dir / title.install_dir_name;
+    const fs::path preserved = install_root / "preserved";
+    const auto globs = save_globs_for_title(title);
+    std::error_code ec;
+    std::vector<fs::path> roots;
+    std::unordered_set<std::string> seen_roots;
+    auto add_root = [&](const fs::path& p) {
+        std::error_code lec;
+        if (!fs::is_directory(p, lec)) return;
+        const fs::path canon = fs::weakly_canonical(p, lec);
+        const fs::path use = lec ? p : canon;
+        if (!seen_roots.insert(use.string()).second) return;
+        roots.push_back(use);
+    };
+    const fs::path releases_dir = install_root / "releases";
+    if (fs::is_directory(releases_dir, ec)) {
+        for (auto it = fs::directory_iterator(releases_dir, ec);
+             !ec && it != fs::directory_iterator(); it.increment(ec)) {
+            if (it->is_directory(ec)) add_root(it->path());
+        }
+    }
+    const InstallPlan plan = inspect_install(paths, title);
+    if (!plan.binary_path.empty()) add_root(plan.binary_path.parent_path());
+
+    size_t n = 0;
+    std::string err;
+    for (const auto& root : roots) {
+        n += stash_user_state_from(root, preserved, globs, nullptr, &err);
+        if (!err.empty()) break;
+    }
+    if (note) {
+        if (!err.empty())
+            *note = err;
+        else if (n > 0)
+            *note = "preserved " + std::to_string(n) + " save/config file(s)\n";
+    }
+}
 
 bool extract_archive_to(const fs::path& archive, const fs::path& dest, std::string* error) {
     return extract_archive(archive, dest, error);
@@ -999,6 +1133,10 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
     }
     make_executable(binary);
 
+    // Keep saves + user config across same-tag force reinstall / overwrite.
+    std::string stash_note;
+    stash_user_state_for_update(paths, title, &stash_note);
+
     if (!promote_staging_to_release(staging, release_dir, &err)) {
         result.message = "failed to place release dir: " + err;
         return result;
@@ -1041,7 +1179,7 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
     fs::remove_all(download.parent_path(), ec);
 
     std::string restore_note;
-    restore_preserved_saves(install_root, release_dir, &restore_note);
+    restore_user_state(install_root, release_dir, &restore_note);
 
     result.plan = inspect_install(paths, title);
     result.plan.latest_tag = rel.tag;
@@ -1050,6 +1188,7 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
     result.message = "installed " + title.id + " " + rel.tag +
                      (use_wine ? " (wine)\n" : "\n") + "  asset:  " + asset->name +
                      "\n  binary: " + result.plan.binary_path.string() + "\n";
+    if (!stash_note.empty()) result.message += "  " + stash_note;
     if (!restore_note.empty()) result.message += "  " + restore_note;
     return result;
 }
@@ -1130,7 +1269,7 @@ UninstallResult uninstall_title(const Paths& paths, const Title& title,
                     if (!it->is_regular_file(ec)) continue;
                     const std::string rel =
                         normalize_preserved_rel(rel_posix_under(root, it->path()));
-                    if (rel.empty() || !is_save_path(rel, globs)) continue;
+                    if (rel.empty() || !is_user_state_path(rel, globs)) continue;
                     if (seen_rel.insert(rel).second) result.preserved_paths.push_back(rel);
                 }
             }

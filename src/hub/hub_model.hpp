@@ -48,8 +48,10 @@ struct TitleRow {
     std::string platform;
     std::string kind;
     bool installed = false;
-    // apps/<dir> exists but launch binary was not resolved (partial / mismatched install).
+    // apps/<dir> has leftover install/build artifacts but no launch binary (partial install).
     bool install_dir_present = false;
+    // apps/<dir>/preserved/ from keep-saves uninstall (not a broken install).
+    bool has_preserved_state = false;
     std::string install_issue;   // human-readable reason when !installed && dir present
     std::string expected_binary; // catalog launch name looked for
     std::string installed_tag;
@@ -60,9 +62,15 @@ struct TitleRow {
     std::string romm_file_name; // remote dump name when has_romm
     bool needs_bios = false;
     bool has_bios = false;
+    bool supports_openbios = false; // psxrecomp titles can generate MIT OpenBIOS
     std::string rom_path;
     std::string suggested_rom; // catalog basename hint when unmatched
     std::string bios_path;
+    // Dropdown: dump paths + optional kOpenBiosChoice. Labels parallel ids.
+    std::vector<std::string> bios_choice_ids;
+    std::vector<std::string> bios_choice_labels;
+    int preferred_bios_index = -1;
+    std::string bios_choice; // selected id (path or kOpenBiosChoice)
     std::string install_root;
     std::string binary_path;
     std::string runtime; // "native" | "wine"
@@ -262,6 +270,10 @@ struct HubModel {
     // Disc memcard 2. Pass kBlankMemcardId / empty for a blank card2.mcd.
     bool set_title_preferred_save_card2(const std::string& title_id, const std::string& save_id,
                                         std::string* error = nullptr);
+
+    // Persist BIOS choice: absolute dump path, or kOpenBiosChoice.
+    bool set_title_preferred_bios(const std::string& title_id, const std::string& bios_choice,
+                                  std::string* error = nullptr);
 
     // Mint a new empty managed save in the library (or install saves/), set preferred.
     bool create_title_save(const std::string& title_id, std::string* error = nullptr);

@@ -1,14 +1,34 @@
 # RetComM build packs
 
-Local generate + cmake installs need two managed packs plus game source.
+Local generate + cmake installs need a toolchain pack plus game source. SDK
+tools may be a separate pack **or** embedded in the game release zip.
 
 | Pack | Cache | Override |
 |---|---|---|
 | Toolchain (`cmake-clang-v1`) | `~/.local/share/retcomm/toolchains/<id>/<tag>/` | `RETCOMM_TOOLCHAIN_DIR` |
-| SDK tools (`snesrecomp-tools`) | `~/.local/share/retcomm/sdks/<id>/<tag>/` | `RETCOMM_SDK_DIR` |
-| Game source | `…/apps/<install>/src/<ref>/` | `RETCOMM_SOURCE_DIR` |
+| SDK tools (`snesrecomp-tools` / `psxrecomp-tools`) | `~/.local/share/retcomm/sdks/<id>/<tag>/` | `RETCOMM_SDK_DIR` |
+| Game source | `…/apps/<install>/src/<tag>/` | `RETCOMM_SOURCE_DIR` |
 
-Optional: `RETCOMM_PYTHON` selects the interpreter for `snesrecomp_cli.py`
+Game source prefers the host **release zip** (`release.asset_glob`) when that
+archive vendors a cmake-buildable tree (e.g. BPE `bpe-*.zip` ships `psxrecomp/` +
+`recomp-ui/` + emitters at the release pins). Otherwise RetComM falls back to the
+GitHub source zipball at `build.source.ref` (note: zipballs omit git submodules).
+
+**One-zip titles (BPE):** the same `bpe-*.zip` is used for install and update.
+RetComM harvests CLI + `psxrecomp-game` / `psxrecomp-bios` into the shared SDK
+cache, prunes those binaries from the per-title source tree, rebuilds cleanly,
+and restores saves + user config (`settings.toml`, etc.) across updates. Harvest
+requires **both** emitters (no separate tools zip). The setup host inside `src/`
+is never treated as a finished Play install — only `releases/` (or `current/`)
+counts.
+
+**Codegen reuse on update:** after the first successful generate, RetComM keeps
+`apps/<title>/codegen-cache/` keyed by ROM/BIOS + emitter fingerprints. Updates
+that only change runtime/UI sources restore that cache (or a stamped prior
+`src/<tag>/`) and skip regenerate; pass `force_generate` to rebuild C from the
+disc again.
+
+Optional: `RETCOMM_PYTHON` selects the interpreter for SDK CLIs
 (default `python3` / `python` on Windows).
 
 ## Toolchain pack layout
@@ -24,9 +44,10 @@ cmake-clang-v1-<os>/
 ```
 
 RetComM prepends `<pack>/bin` (or the single nested folder’s `bin/`) to `PATH`
-for configure/build. Toolchains are **fetched on demand** from
+for configure/build. Prefer **harvesting** `toolchain/` from the game release
+zip into the shared cache (then prune the per-title copy). Download from
 [TechnicallyComputers/retcomm-toolchains](https://github.com/TechnicallyComputers/retcomm-toolchains)
-(not embedded in game zips) and cached for reuse.
+only when the zip has no embedded pack (legacy titles / fallback).
 
 | OS asset | Notes |
 |----------|--------|

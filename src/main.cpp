@@ -44,12 +44,16 @@ void print_help(const char* argv0) {
         << "      --dry-run                Print install plan only\n"
         << "  build <title-id> [opts]      Local generate + cmake (requires matched ROM)\n"
         << "      --force                  Rebuild even if same source ref\n"
+        << "      --force-generate         Re-run disc→C even if codegen-cache matches\n"
         << "      --rom PATH               ROM path (else library preferred)\n"
         << "  pack ensure toolchain|sdk [opts]\n"
         << "                               Fetch/cache a release pack (smoke-test downloads)\n"
         << "      --title ID               Use that title's build.toolchain / build.sdk\n"
         << "      --force                  Re-download even if cached\n"
-        << "  update <title-id>|--all      Update installed title(s) if newer\n"
+        << "  update <title-id>|--all [opts]\n"
+        << "                               Update installed title(s) if newer\n"
+        << "      --force                  Force update even if pin matches\n"
+        << "      --force-generate         Re-run disc→C on build updates\n"
         << "  uninstall <title-id> [opts]  Remove installed title (alias: remove)\n"
         << "      --keep-saves             Keep memcards/SRAM/savestates (default)\n"
         << "      --delete-saves           Also wipe saves / preserved stash\n"
@@ -488,6 +492,22 @@ int cmd_install(const retcomm::Paths& paths, const retcomm::Catalog& cat,
     }
     retcomm::BuildOptions bopts;
     bopts.force = force;
+    {
+        const auto st = retcomm::load_app_state(paths.state_path);
+        const std::string choice = retcomm::preferred_bios_for(st, id);
+        if (choice == retcomm::kOpenBiosChoice) {
+            bopts.use_openbios = true;
+        } else if (!choice.empty()) {
+            bopts.bios_path = choice;
+        } else {
+            auto bidx = retcomm::load_bios_index(paths.bios_index_path);
+            bopts.bios_path = bidx.preferred_bios(id);
+            if (bopts.bios_path.empty() &&
+                t->build.generate.engine == "psxrecomp") {
+                bopts.use_openbios = true;
+            }
+        }
+    }
     auto result = retcomm::install_title_auto(paths, *t, opts, bopts);
     std::cout << result.message;
     return result.ok ? 0 : 1;
@@ -568,7 +588,7 @@ int cmd_pack_ensure(const retcomm::Paths& paths, const retcomm::Catalog& cat,
 }
 
 int cmd_build(const retcomm::Paths& paths, const retcomm::Catalog& cat, const std::string& id,
-              bool force, const fs::path& rom_override) {
+              bool force, bool force_generate, const fs::path& rom_override) {
     const auto* t = cat.find(id);
     if (!t) {
         std::cerr << "unknown title: " << id << "\n";
@@ -585,10 +605,25 @@ int cmd_build(const retcomm::Paths& paths, const retcomm::Catalog& cat, const st
     }
     retcomm::BuildOptions bopts;
     bopts.force = force;
+    bopts.force_generate = force_generate;
     bopts.rom_path = rom_override;
     if (bopts.rom_path.empty()) {
         const auto idx = retcomm::load_library_index(paths.library_index_path);
         bopts.rom_path = idx.preferred_rom(id);
+    }
+    {
+        const auto st = retcomm::load_app_state(paths.state_path);
+        const std::string choice = retcomm::preferred_bios_for(st, id);
+        if (choice == retcomm::kOpenBiosChoice) {
+            bopts.use_openbios = true;
+        } else if (!choice.empty()) {
+            bopts.bios_path = choice;
+        } else {
+            auto bidx = retcomm::load_bios_index(paths.bios_index_path);
+            bopts.bios_path = bidx.preferred_bios(id);
+            if (bopts.bios_path.empty() && t->build.generate.engine == "psxrecomp")
+                bopts.use_openbios = true;
+        }
     }
     auto result = retcomm::build_title(paths, *t, bopts);
     std::cout << result.message;
@@ -596,7 +631,7 @@ int cmd_build(const retcomm::Paths& paths, const retcomm::Catalog& cat, const st
 }
 
 int cmd_update(const retcomm::Paths& paths, const retcomm::Catalog& cat,
-               const std::string& id_or_all, bool force) {
+               const std::string& id_or_all, bool force, bool force_generate) {
     retcomm::InstallOptions opts;
     opts.force = force;
     opts.check_latest = true;
@@ -624,6 +659,7 @@ int cmd_update(const retcomm::Paths& paths, const retcomm::Catalog& cat,
     for (const auto* t : targets) {
         retcomm::BuildOptions bopts;
         bopts.force = force;
+        bopts.force_generate = force_generate;
         auto result = retcomm::update_title_auto(paths, *t, opts, bopts);
         std::cout << result.message;
         if (!result.ok) ++failures;
@@ -661,11 +697,20 @@ int cmd_launch(const retcomm::Paths& paths, const retcomm::Catalog& cat,
     } else {
         rom_source = "--rom";
     }
-    if (opts.bios_path.empty() && t->has_bios_identity()) {
-        auto bidx = retcomm::load_bios_index(paths.bios_index_path);
-        opts.bios_path = bidx.preferred_bios(id);
-        if (!opts.bios_path.empty()) bios_source = "bios-index";
-    } else if (!opts.bios_path.empty()) {
+    if (opts.bios_path.empty()) {
+        const auto st = retcomm::load_app_state(paths.state_path);
+        const std::string choice = retcomm::preferred_bios_for(st, id);
+        if (choice == retcomm::kOpenBiosChoice) {
+            bios_source = "openbios";
+        } else if (!choice.empty()) {
+            opts.bios_path = choice;
+            bios_source = "state";
+        } else if (t->has_bios_identity()) {
+            auto bidx = retcomm::load_bios_index(paths.bios_index_path);
+            opts.bios_path = bidx.preferred_bios(id);
+            if (!opts.bios_path.empty()) bios_source = "bios-index";
+        }
+    } else {
         bios_source = "--bios";
     }
     if (opts.save_path.empty()) {
@@ -886,14 +931,18 @@ int main(int argc, char** argv) {
         }
         if (cmd == "build") {
             if (args.size() < 2) {
-                std::cerr << "usage: retcomm build <title-id> [--force] [--rom PATH]\n";
+                std::cerr << "usage: retcomm build <title-id> [--force] [--force-generate] "
+                             "[--rom PATH]\n";
                 return 2;
             }
             bool force = false;
+            bool force_generate = false;
             fs::path rom;
             for (size_t i = 2; i < args.size(); ++i) {
                 if (args[i] == "--force")
                     force = true;
+                else if (args[i] == "--force-generate")
+                    force_generate = true;
                 else if (args[i] == "--rom" && i + 1 < args.size())
                     rom = args[++i];
                 else {
@@ -901,7 +950,7 @@ int main(int argc, char** argv) {
                     return 2;
                 }
             }
-            return cmd_build(paths, catalog, args[1], force, rom);
+            return cmd_build(paths, catalog, args[1], force, force_generate, rom);
         }
         if (cmd == "pack") {
             if (args.size() < 3 || args[1] != "ensure") {
@@ -924,19 +973,23 @@ int main(int argc, char** argv) {
         }
         if (cmd == "update") {
             if (args.size() < 2) {
-                std::cerr << "usage: retcomm update <title-id>|--all [--force]\n";
+                std::cerr << "usage: retcomm update <title-id>|--all [--force] "
+                             "[--force-generate]\n";
                 return 2;
             }
             bool force = false;
+            bool force_generate = false;
             for (size_t i = 2; i < args.size(); ++i) {
                 if (args[i] == "--force")
                     force = true;
+                else if (args[i] == "--force-generate")
+                    force_generate = true;
                 else {
                     std::cerr << "unexpected update arg: " << args[i] << "\n";
                     return 2;
                 }
             }
-            return cmd_update(paths, catalog, args[1], force);
+            return cmd_update(paths, catalog, args[1], force, force_generate);
         }
         if (cmd == "uninstall" || cmd == "remove") {
             if (args.size() < 2) {

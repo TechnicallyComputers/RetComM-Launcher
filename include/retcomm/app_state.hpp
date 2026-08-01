@@ -10,6 +10,9 @@ namespace retcomm {
 
 namespace fs = std::filesystem;
 
+// Sentinel for AppState::preferred_bios — use MIT OpenBIOS (no retail dump).
+inline constexpr const char* kOpenBiosChoice = "__openbios__";
+
 // Hub-wide prefs in data_dir/state.json (preferred save slot per title, etc.).
 struct AppState {
     int schema_version = 1;
@@ -18,6 +21,8 @@ struct AppState {
     std::unordered_map<std::string, std::string> preferred_save;
     // Disc / dual-memcard titles: memcard slot 2 (card2). Empty = blank card2.mcd.
     std::unordered_map<std::string, std::string> preferred_save_card2;
+    // title_id → absolute BIOS dump path, or kOpenBiosChoice for OpenBIOS.
+    std::unordered_map<std::string, std::string> preferred_bios;
 };
 
 AppState load_app_state(const fs::path& path);
@@ -29,5 +34,9 @@ void set_preferred_save(AppState& state, const std::string& title_id, const std:
 std::string preferred_save_card2_for(const AppState& state, const std::string& title_id);
 void set_preferred_save_card2(AppState& state, const std::string& title_id,
                               const std::string& save_id);
+
+std::string preferred_bios_for(const AppState& state, const std::string& title_id);
+void set_preferred_bios(AppState& state, const std::string& title_id,
+                        const std::string& bios_choice);
 
 } // namespace retcomm

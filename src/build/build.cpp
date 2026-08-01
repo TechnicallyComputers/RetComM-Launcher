@@ -5,6 +5,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -169,12 +170,39 @@ bool fetch_latest_release(const std::string& github_slug, GhRelease& out, std::s
     }
 }
 
+bool ends_with_ci(const std::string& s, const std::string& suf) {
+    if (s.size() < suf.size()) return false;
+    for (size_t i = 0; i < suf.size(); ++i) {
+        const char a = static_cast<char>(std::tolower(static_cast<unsigned char>(s[s.size() - suf.size() + i])));
+        const char b = static_cast<char>(std::tolower(static_cast<unsigned char>(suf[i])));
+        if (a != b) return false;
+    }
+    return true;
+}
+
 const GhAsset* pick_asset(const GhRelease& rel, const std::string& glob) {
     if (glob.empty()) return nullptr;
+    const GhAsset* best = nullptr;
+    int best_score = -1;
+    const std::string glob_l = to_lower(glob);
+    const bool glob_wants_tools = glob_l.find("tools") != std::string::npos;
     for (const auto& a : rel.assets) {
-        if (match_glob(glob, a.name)) return &a;
+        if (!match_glob(glob, a.name)) continue;
+        int score = 0;
+        const std::string n = to_lower(a.name);
+        if (ends_with_ci(n, ".zip")) score += 3;
+        if (n.find("x64") != std::string::npos || n.find("amd64") != std::string::npos ||
+            n.find("x86_64") != std::string::npos || n.find("win64") != std::string::npos)
+            score += 2;
+        if (n.find("arm64") != std::string::npos || n.find("aarch64") != std::string::npos)
+            score += 1;
+        if (!glob_wants_tools && n.find("tools") != std::string::npos) score -= 10;
+        if (score > best_score) {
+            best_score = score;
+            best = &a;
+        }
     }
-    return nullptr;
+    return best;
 }
 
 fs::path unwrap_single_subdir(const fs::path& root) {
@@ -186,6 +214,51 @@ fs::path unwrap_single_subdir(const fs::path& root) {
     }
     if (kids.size() == 1 && fs::is_directory(kids[0], ec)) return kids[0];
     return root;
+}
+
+// True when an extracted tree can cmake-configure (release zips that only ship a
+// binary fail this and we fall back to the GitHub source zipball).
+bool source_tree_buildable(const Title& title, const fs::path& root) {
+    std::error_code ec;
+    if (!fs::is_regular_file(root / "CMakeLists.txt", ec)) return false;
+    const std::string eng = to_lower(title.build.generate.engine);
+    if (eng == "psxrecomp" || (eng.empty() && to_lower(title.platform) == "psx")) {
+        return fs::is_regular_file(root / "psxrecomp" / "runtime" / "runtime.cmake", ec) &&
+               fs::is_directory(root / "recomp-ui", ec);
+    }
+    return true;
+}
+
+bool install_extracted_tree(const fs::path& staging, const fs::path& dest, std::string* error) {
+    std::error_code ec;
+    fs::remove_all(dest, ec);
+    fs::create_directories(dest.parent_path(), ec);
+    const fs::path inner = unwrap_single_subdir(staging);
+    if (inner == staging) {
+        fs::rename(staging, dest, ec);
+        if (ec) {
+            fs::copy(staging, dest,
+                     fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+            fs::remove_all(staging, ec);
+        }
+    } else {
+        fs::create_directories(dest, ec);
+        for (auto it = fs::directory_iterator(inner, ec); !ec && it != fs::directory_iterator();
+             it.increment(ec)) {
+            const fs::path to = dest / it->path().filename();
+            fs::rename(it->path(), to, ec);
+            if (ec) {
+                fs::copy(it->path(), to,
+                         fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+            }
+        }
+        fs::remove_all(staging, ec);
+    }
+    if (!fs::is_directory(dest, ec)) {
+        if (error) *error = ec ? ec.message() : "destination missing after extract";
+        return false;
+    }
+    return true;
 }
 
 std::string shell_quote(const std::string& s) {
@@ -282,6 +355,360 @@ std::string resolve_generate_engine(const Title& title) {
     return "snesrecomp";
 }
 
+bool copy_rel_file(const fs::path& from_root, const fs::path& to_root, const fs::path& rel,
+                   std::error_code& ec) {
+    const fs::path from = from_root / rel;
+    if (!fs::is_regular_file(from, ec)) return false;
+    const fs::path to = to_root / rel;
+    fs::create_directories(to.parent_path(), ec);
+    if (ec) return false;
+    fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+    return !ec;
+}
+
+bool copy_rel_tree(const fs::path& from_root, const fs::path& to_root, const fs::path& rel,
+                   std::error_code& ec) {
+    const fs::path from = from_root / rel;
+    if (!fs::is_directory(from, ec)) return false;
+    const fs::path to = to_root / rel;
+    fs::create_directories(to.parent_path(), ec);
+    fs::copy(from, to, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    return !ec;
+}
+
+bool copy_tree_overwrite(const fs::path& from, const fs::path& to, std::string* error) {
+    std::error_code ec;
+    if (!fs::is_directory(from, ec)) {
+        if (error) *error = "missing directory: " + from.string();
+        return false;
+    }
+    fs::create_directories(to.parent_path(), ec);
+    fs::remove_all(to, ec);
+    fs::copy(from, to, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    if (ec) {
+        if (error) *error = "copy " + from.string() + ": " + ec.message();
+        return false;
+    }
+    return true;
+}
+
+std::string file_stat_sig(const fs::path& p) {
+    std::error_code ec;
+    if (!fs::is_regular_file(p, ec)) return {};
+    const auto sz = fs::file_size(p, ec);
+    if (ec) return {};
+    return std::to_string(static_cast<unsigned long long>(sz)) + ":" +
+           std::to_string(file_mtime_sec(p));
+}
+
+fs::path codegen_cache_dir(const Paths& paths, const Title& title) {
+    return paths.apps_dir / title.install_dir_name / "codegen-cache";
+}
+
+fs::path snes_out_dir(const Title& title, const fs::path& src_root) {
+    const std::string rel =
+        title.build.generate.out_dir.empty() ? "src/gen" : title.build.generate.out_dir;
+    return src_root / rel;
+}
+
+bool psx_generated_ready(const fs::path& src_root) {
+    std::error_code ec;
+    const fs::path game_gen = src_root / "generated";
+    if (!fs::is_directory(game_gen, ec)) return false;
+    bool game_ok = false;
+    for (auto it = fs::directory_iterator(game_gen, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        const auto name = it->path().filename().string();
+        if (name.size() > 12 && name.find("_dispatch.c") != std::string::npos) {
+            game_ok = true;
+            break;
+        }
+    }
+    if (!game_ok) return false;
+    const fs::path bios_gen = src_root / "psxrecomp" / "generated";
+    return fs::is_regular_file(bios_gen / "OpenBIOS_dispatch.c", ec) ||
+           fs::is_regular_file(bios_gen / "SCPH1001_dispatch.c", ec);
+}
+
+bool snes_generated_ready(const Title& title, const fs::path& src_root) {
+    std::error_code ec;
+    const fs::path out = snes_out_dir(title, src_root);
+    if (!fs::is_directory(out, ec)) return false;
+    for (auto it = fs::directory_iterator(out, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        const auto ext = it->path().extension().string();
+        if (ext == ".c" || ext == ".h" || ext == ".cpp") return true;
+    }
+    return false;
+}
+
+bool generated_ready(const Title& title, const std::string& engine, const fs::path& src_root) {
+    if (engine == "psxrecomp") return psx_generated_ready(src_root);
+    return snes_generated_ready(title, src_root);
+}
+
+std::string rom_fingerprint(const Paths& paths, const fs::path& rom) {
+    std::error_code ec;
+    if (!fs::is_regular_file(rom, ec)) return {};
+    const auto idx = load_library_index(paths.library_index_path);
+    if (const LibraryFile* f = idx.find_path(rom.string())) {
+        if (!f->sha256.empty()) return "sha256:" + f->sha256;
+        if (!f->sha1.empty()) return "sha1:" + f->sha1;
+        if (!f->md5.empty()) return "md5:" + f->md5;
+        if (!f->crc32.empty()) return "crc32:" + f->crc32;
+    }
+    return "stat:" + file_stat_sig(rom) + ":" + rom.generic_string();
+}
+
+std::string bios_fingerprint(const BuildOptions& opts) {
+    if (opts.use_openbios || opts.bios_path.empty()) return "openbios";
+    std::error_code ec;
+    if (!fs::is_regular_file(opts.bios_path, ec)) return "bios-missing";
+    return "stat:" + file_stat_sig(opts.bios_path) + ":" + opts.bios_path.generic_string();
+}
+
+std::string tool_fingerprint(const fs::path& game_bin, const fs::path& bios_bin) {
+    return file_stat_sig(game_bin) + "|" + file_stat_sig(bios_bin);
+}
+
+json make_codegen_meta(const std::string& engine, const std::string& rom_fp,
+                       const std::string& bios_fp, const std::string& sdk_tag,
+                       const std::string& tool_fp) {
+    return json{{"engine", engine},
+                {"rom", rom_fp},
+                {"bios", bios_fp},
+                {"sdk_tag", sdk_tag},
+                {"tools", tool_fp}};
+}
+
+bool codegen_meta_matches(const json& meta, const json& want) {
+    return meta.value("engine", "") == want.value("engine", "") &&
+           meta.value("rom", "") == want.value("rom", "") &&
+           meta.value("bios", "") == want.value("bios", "") &&
+           meta.value("sdk_tag", "") == want.value("sdk_tag", "") &&
+           meta.value("tools", "") == want.value("tools", "");
+}
+
+bool install_generated_from(const Title& title, const std::string& engine,
+                            const fs::path& from_root, const fs::path& to_root,
+                            std::string* error) {
+    if (engine == "psxrecomp") {
+        if (!copy_tree_overwrite(from_root / "generated", to_root / "generated", error))
+            return false;
+        const fs::path bios_from = from_root / "psxrecomp" / "generated";
+        const fs::path bios_to = to_root / "psxrecomp" / "generated";
+        std::error_code ec;
+        if (fs::is_directory(bios_from, ec)) {
+            if (!copy_tree_overwrite(bios_from, bios_to, error)) return false;
+        }
+        return psx_generated_ready(to_root);
+    }
+    const fs::path from_out = snes_out_dir(title, from_root);
+    const fs::path to_out = snes_out_dir(title, to_root);
+    if (!copy_tree_overwrite(from_out, to_out, error)) return false;
+    return snes_generated_ready(title, to_root);
+}
+
+bool try_restore_codegen_cache(const Paths& paths, const Title& title, const std::string& engine,
+                               const fs::path& src_root, const json& want, std::string* note) {
+    const fs::path cache = codegen_cache_dir(paths, title);
+    std::error_code ec;
+    const fs::path meta_path = cache / ".retcomm-codegen.json";
+    if (!fs::is_regular_file(meta_path, ec)) return false;
+    try {
+        std::ifstream in(meta_path);
+        const json meta = json::parse(in);
+        if (!codegen_meta_matches(meta, want)) return false;
+    } catch (...) {
+        return false;
+    }
+    if (!generated_ready(title, engine, cache)) return false;
+    std::string err;
+    if (!install_generated_from(title, engine, cache, src_root, &err)) return false;
+    if (note) *note = "restored codegen-cache";
+    return true;
+}
+
+bool try_adopt_previous_src_generated(const Paths& paths, const Title& title,
+                                      const std::string& engine, const fs::path& src_root,
+                                      const json& want, std::string* note) {
+    std::error_code ec;
+    const fs::path src_base = paths.apps_dir / title.install_dir_name / "src";
+    if (!fs::is_directory(src_base, ec)) return false;
+
+    std::vector<fs::path> candidates;
+    for (auto it = fs::directory_iterator(src_base, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        const auto name = it->path().filename().string();
+        if (!name.empty() && name[0] == '.') continue;
+        if (it->path() == src_root) continue;
+        if (!generated_ready(title, engine, it->path())) continue;
+        candidates.push_back(it->path());
+    }
+    if (candidates.empty()) return false;
+    std::sort(candidates.begin(), candidates.end());
+    // Newest tag directory first (lexicographic works for v0.1.x / build- tags mostly).
+    for (auto it = candidates.rbegin(); it != candidates.rend(); ++it) {
+        const fs::path stamp = *it / ".retcomm-codegen.json";
+        if (!fs::is_regular_file(stamp, ec)) continue;
+        try {
+            std::ifstream in(stamp);
+            const json meta = json::parse(in);
+            if (!codegen_meta_matches(meta, want)) continue;
+        } catch (...) {
+            continue;
+        }
+        std::string err;
+        if (!install_generated_from(title, engine, *it, src_root, &err)) continue;
+        if (note) *note = "carried forward from " + it->filename().string();
+        return true;
+    }
+    return false;
+}
+
+bool save_codegen_cache(const Paths& paths, const Title& title, const std::string& engine,
+                        const fs::path& src_root, const json& meta, std::string* note) {
+    if (!generated_ready(title, engine, src_root)) return false;
+    const fs::path cache = codegen_cache_dir(paths, title);
+    std::string err;
+    if (engine == "psxrecomp") {
+        if (!copy_tree_overwrite(src_root / "generated", cache / "generated", &err)) return false;
+        const fs::path bios = src_root / "psxrecomp" / "generated";
+        std::error_code ec;
+        if (fs::is_directory(bios, ec)) {
+            if (!copy_tree_overwrite(bios, cache / "psxrecomp" / "generated", &err)) return false;
+        }
+    } else {
+        if (!copy_tree_overwrite(snes_out_dir(title, src_root), snes_out_dir(title, cache), &err))
+            return false;
+    }
+    try {
+        std::ofstream out(cache / ".retcomm-codegen.json");
+        out << meta.dump(2) << "\n";
+        std::ofstream stamp(src_root / ".retcomm-codegen.json");
+        stamp << meta.dump(2) << "\n";
+    } catch (...) {
+        return false;
+    }
+    if (note) *note = "saved codegen-cache";
+    return true;
+}
+
+// Promote CLI + emitter binaries from a vendored game zip into the shared SDK
+// cache, then callers may prune duplicates from the source tree.
+PackEnsureResult harvest_embedded_sdk(const Paths& paths, const Title& title,
+                                      const fs::path& src_root, const std::string& tag) {
+    PackEnsureResult r;
+    std::error_code ec;
+    const std::string engine = resolve_generate_engine(title);
+    fs::path eng = src_root;
+    std::string pack_id = title.build.sdk.id;
+    if (engine == "psxrecomp") {
+        eng = src_root / "psxrecomp";
+        if (pack_id.empty()) pack_id = "psxrecomp-tools";
+    } else {
+        if (fs::is_directory(src_root / "snesrecomp", ec)) eng = src_root / "snesrecomp";
+        if (pack_id.empty()) pack_id = "snesrecomp-tools";
+    }
+    if (find_sdk_cli(eng).empty()) {
+        r.message = "no embedded SDK CLI under " + eng.string();
+        return r;
+    }
+    auto has_tool = [&](const char* name, const char* name_exe) {
+        return fs::is_regular_file(eng / "recompiler/build" / name, ec) ||
+               fs::is_regular_file(eng / "recompiler/build" / name_exe, ec) ||
+               !find_named_file(eng, name).empty() || !find_named_file(eng, name_exe).empty();
+    };
+    if (engine == "psxrecomp") {
+        // Both emitters are required: game C + OpenBIOS regen.
+        if (!has_tool("psxrecomp-game", "psxrecomp-game.exe")) {
+            r.message = "embedded psxrecomp tree missing psxrecomp-game";
+            return r;
+        }
+        if (!has_tool("psxrecomp-bios", "psxrecomp-bios.exe")) {
+            r.message = "embedded psxrecomp tree missing psxrecomp-bios";
+            return r;
+        }
+    }
+
+    ensure_dirs(paths);
+    const std::string safe = sanitize_tag(tag.empty() ? "embedded" : tag);
+    const fs::path dest = paths.sdks_dir / pack_id / safe;
+    fs::remove_all(dest, ec);
+    fs::create_directories(dest, ec);
+    if (ec) {
+        r.message = "create sdk cache: " + ec.message();
+        return r;
+    }
+
+    // Slim tools layout (mirrors package_psxrecomp_tools.sh / snes tools packs).
+    copy_rel_file(eng, dest, "psxrecomp_cli.py", ec);
+    copy_rel_file(eng, dest, "snesrecomp_cli.py", ec);
+    copy_rel_file(eng, dest, "retcomm-sdk.json", ec);
+    copy_rel_tree(eng, dest, "tools", ec);
+    copy_rel_tree(eng, dest, "docs", ec);
+    if (engine == "psxrecomp") {
+        for (const char* name : {"psxrecomp-game", "psxrecomp-game.exe", "psxrecomp-bios",
+                                 "psxrecomp-bios.exe"}) {
+            copy_rel_file(eng, dest, fs::path("recompiler/build") / name, ec);
+        }
+        for (const char* name : {"OpenBIOS.toml", "openbios.bin", "OpenBIOS.LICENSE",
+                                 "SCPH1001.toml"}) {
+            copy_rel_file(eng, dest, fs::path("bios") / name, ec);
+        }
+        for (const char* name : {"openbios_elf_seeds.json", "openbios_dispatch_miss.json",
+                                 "phase2_ghidra_seeds.json"}) {
+            copy_rel_file(eng, dest, fs::path("recompiler/seeds") / name, ec);
+        }
+    }
+
+    if (find_sdk_cli(dest).empty()) {
+        r.message = "harvested SDK missing CLI";
+        fs::remove_all(dest, ec);
+        return r;
+    }
+    if (engine == "psxrecomp") {
+        const bool dest_game =
+            fs::is_regular_file(dest / "recompiler/build/psxrecomp-game", ec) ||
+            fs::is_regular_file(dest / "recompiler/build/psxrecomp-game.exe", ec);
+        const bool dest_bios =
+            fs::is_regular_file(dest / "recompiler/build/psxrecomp-bios", ec) ||
+            fs::is_regular_file(dest / "recompiler/build/psxrecomp-bios.exe", ec);
+        if (!dest_game || !dest_bios) {
+            r.message = "harvested SDK incomplete (need psxrecomp-game and psxrecomp-bios)";
+            fs::remove_all(dest, ec);
+            return r;
+        }
+    }
+    {
+        json meta = {{"id", pack_id},
+                     {"tag", tag},
+                     {"source", "harvested-from-game-zip"},
+                     {"github", title.release.github}};
+        std::ofstream out(dest / ".retcomm-pack.json");
+        out << meta.dump(2) << "\n";
+    }
+    r.ok = true;
+    r.root = dest;
+    r.tag = tag;
+    r.message = "harvested SDK into " + dest.string();
+    return r;
+}
+
+void prune_embedded_tool_bins(const fs::path& src_root, const std::string& engine) {
+    if (engine != "psxrecomp") return;
+    std::error_code ec;
+    const fs::path build = src_root / "psxrecomp" / "recompiler" / "build";
+    if (!fs::is_directory(build, ec)) return;
+    for (const char* name : {"psxrecomp-game", "psxrecomp-game.exe", "psxrecomp-bios",
+                             "psxrecomp-bios.exe"}) {
+        fs::remove(build / name, ec);
+    }
+}
+
 fs::path toolchain_bin_dir(const fs::path& toolchain_root) {
     std::error_code ec;
     const fs::path bin = toolchain_root / "bin";
@@ -290,6 +717,133 @@ fs::path toolchain_bin_dir(const fs::path& toolchain_root) {
     const fs::path unwrapped = unwrap_single_subdir(toolchain_root);
     if (fs::is_directory(unwrapped / "bin", ec)) return unwrapped / "bin";
     return {};
+}
+
+bool toolchain_looks_usable(const fs::path& root) {
+    std::error_code ec;
+    const fs::path bin = toolchain_bin_dir(root);
+    if (bin.empty()) return false;
+    return fs::is_regular_file(bin / "cmake", ec) || fs::is_regular_file(bin / "cmake.exe", ec);
+}
+
+std::string read_toolchain_version(const fs::path& root) {
+    std::error_code ec;
+    const fs::path meta = root / "retcomm-toolchain.json";
+    if (!fs::is_regular_file(meta, ec)) return {};
+    try {
+        std::ifstream in(meta);
+        json j = json::parse(in);
+        return j.value("version", "");
+    } catch (...) {
+        return {};
+    }
+}
+
+fs::path find_cached_toolchain(const Paths& paths, const std::string& pack_id) {
+    std::error_code ec;
+    const fs::path base = paths.toolchains_dir / pack_id;
+    if (!fs::is_directory(base, ec)) return {};
+    // Prefer newest tag directory with a usable bin/cmake.
+    std::vector<fs::path> candidates;
+    for (auto it = fs::directory_iterator(base, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        const auto name = it->path().filename().string();
+        if (!name.empty() && name[0] == '.') continue;
+        if (toolchain_looks_usable(it->path())) candidates.push_back(it->path());
+    }
+    if (candidates.empty()) return {};
+    std::sort(candidates.begin(), candidates.end());
+    return unwrap_single_subdir(candidates.back());
+}
+
+void prune_embedded_toolchain(const fs::path& src_root) {
+    std::error_code ec;
+    fs::remove_all(src_root / "toolchain", ec);
+}
+
+// Promote game-zip toolchain/ into the shared cache (or reuse an existing cache
+// entry), then prune the per-title copy to save disk.
+PackEnsureResult harvest_embedded_toolchain(const Paths& paths, const Title& title,
+                                            const fs::path& src_root,
+                                            const std::string& src_tag) {
+    PackEnsureResult r;
+    std::error_code ec;
+    const std::string pack_id =
+        title.build.toolchain.id.empty() ? "cmake-clang-v1" : title.build.toolchain.id;
+
+    const fs::path emb_raw = src_root / "toolchain";
+    const bool have_embedded =
+        fs::is_directory(emb_raw, ec) && toolchain_looks_usable(unwrap_single_subdir(emb_raw));
+
+    // Reuse any already-cached pack for this id (shared across titles).
+    const fs::path cached = find_cached_toolchain(paths, pack_id);
+    if (!cached.empty()) {
+        if (have_embedded) prune_embedded_toolchain(src_root);
+        r.ok = true;
+        r.root = cached;
+        r.tag = cached.filename().string();
+        r.message = "using cached toolchain " + r.root.string();
+        return r;
+    }
+
+    if (!have_embedded) {
+        r.message = "no embedded toolchain/ under " + src_root.string();
+        return r;
+    }
+
+    const fs::path emb = unwrap_single_subdir(emb_raw);
+    std::string ver = read_toolchain_version(emb);
+    if (ver.empty()) ver = src_tag.empty() ? "embedded" : src_tag;
+    const std::string safe = sanitize_tag(ver);
+    ensure_dirs(paths);
+    const fs::path dest = paths.toolchains_dir / pack_id / safe;
+    fs::remove_all(dest, ec);
+    fs::create_directories(dest.parent_path(), ec);
+
+    // Prefer rename (no 2GB copy); fall back to copy + delete.
+    fs::rename(emb, dest, ec);
+    if (ec) {
+        ec.clear();
+        fs::create_directories(dest, ec);
+        fs::copy(emb, dest, fs::copy_options::recursive | fs::copy_options::overwrite_existing,
+                 ec);
+        if (ec) {
+            r.message = "promote toolchain failed: " + ec.message();
+            fs::remove_all(dest, ec);
+            return r;
+        }
+        fs::remove_all(emb_raw, ec);
+    } else {
+        // Renamed inner tree; drop empty wrapper if emb was nested.
+        fs::remove_all(emb_raw, ec);
+    }
+
+    if (!toolchain_looks_usable(dest)) {
+        r.message = "harvested toolchain missing bin/cmake";
+        fs::remove_all(dest, ec);
+        return r;
+    }
+    {
+        json meta = {{"id", pack_id},
+                     {"tag", ver},
+                     {"source", "harvested-from-game-zip"},
+                     {"github", title.release.github}};
+        std::ofstream out(dest / ".retcomm-pack.json");
+        out << meta.dump(2) << "\n";
+    }
+    r.ok = true;
+    r.root = unwrap_single_subdir(dest);
+    r.tag = ver;
+    r.message = "harvested toolchain into " + r.root.string();
+    return r;
+}
+
+void prune_build_tree_after_success(const fs::path& src_root, const fs::path& build_dir) {
+    std::error_code ec;
+    // Drop cmake intermediates / whole build dir (staged binary lives under releases/).
+    if (!build_dir.empty()) fs::remove_all(build_dir, ec);
+    prune_embedded_toolchain(src_root);
 }
 
 fs::path resolve_python() {
@@ -389,7 +943,7 @@ bool copy_tree_if_exists(const fs::path& src, const fs::path& dest, std::string*
 
 bool stage_build_output(const fs::path& src_root, const fs::path& build_dir,
                         const std::string& launch_name, const fs::path& release_dir,
-                        std::string* error) {
+                        const std::string& game_config_rel, std::string* error) {
     std::error_code ec;
     fs::remove_all(release_dir, ec);
     fs::create_directories(release_dir, ec);
@@ -419,6 +973,18 @@ bool stage_build_output(const fs::path& src_root, const fs::path& build_dir,
     const fs::path exe_dir = binary.parent_path();
     if (!copy_tree_if_exists(exe_dir / "assets", release_dir / "assets", error)) return false;
     if (!copy_tree_if_exists(src_root / "VERSION", release_dir / "VERSION", error)) return false;
+    // game.toml (or catalog generate.config) drives [game] players=N and disc paths.
+    // Without it the host defaults to 1 player and hides local/netplay pad UI.
+    {
+        const fs::path cfg_rel =
+            game_config_rel.empty() ? fs::path("game.toml") : fs::path(game_config_rel);
+        const fs::path cfg_name = cfg_rel.filename();
+        if (!copy_tree_if_exists(src_root / cfg_rel, release_dir / cfg_name, error)) return false;
+        if (!fs::exists(release_dir / cfg_name, ec)) {
+            // Also try next to the built binary (some projects copy it POST_BUILD).
+            copy_tree_if_exists(exe_dir / cfg_name, release_dir / cfg_name, error);
+        }
+    }
     // Fallback assets from source tree (recomp-ui POST_BUILD may not have run yet).
     if (!fs::exists(release_dir / "assets" / "fonts", ec)) {
         copy_tree_if_exists(src_root / "recomp-ui" / "assets" / "fonts",
@@ -564,8 +1130,13 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
             r.message = "override source dir missing: " + ov.string();
             return r;
         }
-        r.ok = true;
         r.root = unwrap_single_subdir(ov);
+        if (!source_tree_buildable(title, r.root)) {
+            r.message = "override source dir is not cmake-buildable (missing engine/UI tree): " +
+                        r.root.string();
+            return r;
+        }
+        r.ok = true;
         r.tag = title.build.source.ref.empty() ? "override" : title.build.source.ref;
         r.message = "using override source at " + r.root.string();
         return r;
@@ -574,32 +1145,104 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
     const std::string gh = title.build.source.github.empty() ? title.release.github
                                                              : title.build.source.github;
     const std::string ref = title.build.source.ref;
-    if (gh.empty() || ref.empty()) {
-        r.message = "build.source.github/ref required";
+    if (gh.empty()) {
+        r.message = "build.source.github / release.github required";
         return r;
     }
 
     const fs::path install_root = paths.apps_dir / title.install_dir_name;
+    ensure_dirs(paths);
+    const fs::path staging = install_root / "src" / ".staging";
+    const fs::path download_dir = install_root / "src" / ".download";
+    fs::create_directories(download_dir, ec);
+
+    auto finish_ok = [&](const fs::path& dest, const std::string& tag, const std::string& asset,
+                         const char* kind) {
+        json meta = {{"github", gh},
+                     {"ref", tag},
+                     {"asset", asset},
+                     {"source", kind}};
+        std::ofstream out(dest / ".retcomm-source.json");
+        out << meta.dump(2) << "\n";
+        r.ok = true;
+        r.root = dest;
+        r.tag = tag;
+        r.message = std::string("source ready (") + kind + ") at " + dest.string();
+    };
+
+    // 1) Prefer the host OS game release zip (vendors engine + UI at release pins).
+    //    Falls through to zipball when the asset is binary-only or missing.
+    const std::string release_gh =
+        title.release.github.empty() ? gh : title.release.github;
+    const std::string asset_glob = title.asset_glob_for_host();
+    if (!asset_glob.empty() && !release_gh.empty()) {
+        GhRelease rel;
+        std::string err;
+        const bool allow_pre = title.release.allow_prerelease;
+        if (fetch_latest_release(release_gh, rel, &err, allow_pre)) {
+            const GhAsset* asset = pick_asset(rel, asset_glob);
+            if (asset) {
+                const std::string tag = rel.tag.empty() ? ref : rel.tag;
+                const std::string safe = sanitize_tag(tag.empty() ? asset->name : tag);
+                const fs::path dest = install_root / "src" / safe;
+                const fs::path marker = dest / ".retcomm-source.json";
+                if (!force && fs::is_regular_file(marker, ec) && source_tree_buildable(title, dest)) {
+                    r.ok = true;
+                    r.root = dest;
+                    r.tag = tag;
+                    r.message = "source cached (release): " + dest.string();
+                    return r;
+                }
+
+                progress(on_progress, "Downloading release source " + asset->name + "…");
+                fs::remove_all(staging, ec);
+                fs::create_directories(staging, ec);
+                const fs::path download = download_dir / asset->name;
+                auto headers = github_http_headers();
+                headers.erase(std::remove_if(headers.begin(), headers.end(),
+                                             [](const auto& h) { return h.first == "Accept"; }),
+                              headers.end());
+                headers.emplace_back("Accept", "application/octet-stream");
+                if (http_download(asset->browser_download_url, download, &err, headers) &&
+                    extract_archive_to(download, staging, &err) &&
+                    install_extracted_tree(staging, dest, &err)) {
+                    fs::remove(download, ec);
+                    if (source_tree_buildable(title, dest)) {
+                        finish_ok(dest, tag, asset->name, "release");
+                        return r;
+                    }
+                    progress(on_progress,
+                             "Release zip lacks buildable engine/UI — falling back to zipball…");
+                    fs::remove_all(dest, ec);
+                } else {
+                    progress(on_progress,
+                             "Release source fetch failed (" + err + ") — trying zipball…");
+                }
+            }
+        }
+    }
+
+    // 2) GitHub source zipball (no git submodules — may be incomplete for psx titles).
+    if (ref.empty()) {
+        r.message =
+            "no buildable release zip and build.source.ref empty — cannot fetch source zipball";
+        return r;
+    }
     const std::string safe_ref = sanitize_tag(ref);
     const fs::path dest = install_root / "src" / safe_ref;
     const fs::path marker = dest / ".retcomm-source.json";
-    if (!force && fs::is_regular_file(marker, ec) && fs::is_directory(dest, ec)) {
+    if (!force && fs::is_regular_file(marker, ec) && source_tree_buildable(title, dest)) {
         r.ok = true;
-        r.root = unwrap_single_subdir(dest);
+        r.root = dest;
         r.tag = ref;
-        r.message = "source cached: " + r.root.string();
+        r.message = "source cached (zipball): " + dest.string();
         return r;
     }
 
-    ensure_dirs(paths);
-    progress(on_progress, "Downloading source " + gh + "@" + ref + "…");
-    const fs::path staging = install_root / "src" / ".staging";
-    const fs::path download = install_root / "src" / ".download" / (safe_ref + ".zip");
+    progress(on_progress, "Downloading source zipball " + gh + "@" + ref + "…");
     fs::remove_all(staging, ec);
     fs::create_directories(staging, ec);
-    fs::create_directories(download.parent_path(), ec);
-
-    // GitHub zipball API (works for tags, branches, commits).
+    const fs::path download = download_dir / (safe_ref + "-zipball.zip");
     const std::string url = "https://api.github.com/repos/" + gh + "/zipball/" + ref;
     auto headers = github_http_headers();
     headers.erase(std::remove_if(headers.begin(), headers.end(),
@@ -608,53 +1251,26 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
     headers.emplace_back("Accept", "application/vnd.github+json");
     std::string err;
     if (!http_download(url, download, &err, headers)) {
-        r.message = "source download failed: " + err;
+        r.message = "source zipball download failed: " + err;
         return r;
     }
     if (!extract_archive_to(download, staging, &err)) {
         r.message = "source extract failed: " + err;
         return r;
     }
-
-    fs::remove_all(dest, ec);
-    fs::create_directories(dest.parent_path(), ec);
-    // Keep the single top-level zipball folder as dest contents.
-    const fs::path inner = unwrap_single_subdir(staging);
-    if (inner == staging) {
-        fs::rename(staging, dest, ec);
-        if (ec) {
-            fs::copy(staging, dest,
-                     fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-            fs::remove_all(staging, ec);
-        }
-    } else {
-        fs::create_directories(dest, ec);
-        for (auto it = fs::directory_iterator(inner, ec); !ec && it != fs::directory_iterator();
-             it.increment(ec)) {
-            const fs::path to = dest / it->path().filename();
-            fs::rename(it->path(), to, ec);
-            if (ec) {
-                fs::copy(it->path(), to,
-                         fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-            }
-        }
-        fs::remove_all(staging, ec);
-    }
-    if (ec && !fs::is_directory(dest, ec)) {
-        r.message = "source install failed: " + ec.message();
+    if (!install_extracted_tree(staging, dest, &err)) {
+        r.message = "source install failed: " + err;
         return r;
     }
-    {
-        json meta = {{"github", gh}, {"ref", ref}};
-        std::ofstream out(marker);
-        out << meta.dump(2) << "\n";
-    }
     fs::remove(download, ec);
-
-    r.ok = true;
-    r.root = dest;
-    r.tag = ref;
-    r.message = "source ready at " + dest.string();
+    if (!source_tree_buildable(title, dest)) {
+        r.message =
+            "source zipball is not cmake-buildable (git submodules omitted). "
+            "Publish a setup/release zip that vendors psxrecomp+recomp-ui, or set "
+            "RETCOMM_SOURCE_DIR to a full checkout.";
+        return r;
+    }
+    finish_ok(dest, ref, safe_ref + "-zipball.zip", "zipball");
     return r;
 }
 
@@ -677,10 +1293,12 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
         return result;
     }
 
-    const std::string pin_tag = "build-" + sanitize_tag(title.build.source.ref);
     if (result.plan.installed && !opts.force && result.plan.record &&
         result.plan.record->method == "build" &&
-        result.plan.record->source_ref == title.build.source.ref) {
+        result.plan.record->source_ref == title.build.source.ref &&
+        title.asset_glob_for_host().empty()) {
+        // Floating release-zip titles are skipped in update_title_auto via
+        // GitHub release tags; catalog-ref equality is enough for zipball builds.
         result.ok = true;
         result.skipped = true;
         result.message = "already built at source ref " + title.build.source.ref +
@@ -688,21 +1306,83 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
         return result;
     }
 
-    auto tc = ensure_pack(paths, title.build.toolchain, true, opts.toolchain_dir, opts.on_progress);
-    if (!tc.ok) {
-        result.message = tc.message;
-        return result;
-    }
-    auto sdk = ensure_pack(paths, title.build.sdk, false, opts.sdk_dir, opts.on_progress);
-    if (!sdk.ok) {
-        result.message = sdk.message;
-        return result;
-    }
     auto src = ensure_source_tree(paths, title, opts.source_dir, opts.force, opts.on_progress);
     if (!src.ok) {
         result.message = src.message;
         return result;
     }
+
+    // Toolchain: prefer game-zip toolchain/ (promote to shared cache + prune),
+    // then RETCOMM_TOOLCHAIN_DIR / catalog download fallback.
+    PackEnsureResult tc;
+    if (!opts.toolchain_dir.empty()) {
+        tc = ensure_pack(paths, title.build.toolchain, true, opts.toolchain_dir, opts.on_progress);
+    } else {
+        progress(opts.on_progress, "Resolving portable toolchain…", 0.015f);
+        tc = harvest_embedded_toolchain(paths, title, src.root, src.tag);
+        if (tc.ok) {
+            progress(opts.on_progress, tc.message, 0.02f);
+        } else if (!title.build.toolchain.id.empty() && !title.build.toolchain.github.empty() &&
+                   !title.build.toolchain.asset_glob_for_host().empty()) {
+            progress(opts.on_progress,
+                     "No embedded toolchain (" + tc.message + ") — fetching toolchain pack…",
+                     0.02f);
+            tc = ensure_pack(paths, title.build.toolchain, true, {}, opts.on_progress);
+        }
+    }
+    if (!tc.ok) {
+        result.message = tc.message.empty()
+                             ? "toolchain missing (game zip should embed toolchain/, "
+                               "or set build.toolchain / RETCOMM_TOOLCHAIN_DIR)"
+                             : tc.message;
+        return result;
+    }
+
+    // Prefer tools embedded in the game release zip (shared SDK cache + prune).
+    PackEnsureResult sdk;
+    if (!opts.sdk_dir.empty()) {
+        sdk = ensure_pack(paths, title.build.sdk, false, opts.sdk_dir, opts.on_progress);
+    } else {
+        progress(opts.on_progress, "Harvesting tools from game package…", 0.025f);
+        sdk = harvest_embedded_sdk(paths, title, src.root, src.tag);
+        if (sdk.ok) {
+            progress(opts.on_progress, sdk.message, 0.03f);
+            prune_embedded_tool_bins(src.root, resolve_generate_engine(title));
+        } else if (!title.build.sdk.id.empty() && !title.build.sdk.github.empty()) {
+            // Legacy fallback: catalog still points at a separate tools zip.
+            {
+                const std::string pack_id = title.build.sdk.id.empty()
+                                                ? "psxrecomp-tools"
+                                                : title.build.sdk.id;
+                const fs::path stale =
+                    paths.sdks_dir / pack_id / sanitize_tag(src.tag.empty() ? "embedded" : src.tag);
+                std::error_code rm_ec;
+                fs::remove_all(stale, rm_ec);
+            }
+            progress(opts.on_progress,
+                     "No complete embedded tools (" + sdk.message + ") — fetching SDK pack…",
+                     0.03f);
+            sdk = ensure_pack(paths, title.build.sdk, false, {}, opts.on_progress);
+        } else {
+            // Drop incomplete harvests so a broken SDK pin is not reused.
+            const std::string pack_id =
+                title.build.sdk.id.empty() ? "psxrecomp-tools" : title.build.sdk.id;
+            const fs::path stale =
+                paths.sdks_dir / pack_id / sanitize_tag(src.tag.empty() ? "embedded" : src.tag);
+            std::error_code rm_ec;
+            fs::remove_all(stale, rm_ec);
+        }
+    }
+    if (!sdk.ok) {
+        result.message = sdk.message.empty()
+                             ? "SDK tools missing (game release zip must embed "
+                               "psxrecomp-game + psxrecomp-bios)"
+                             : sdk.message;
+        return result;
+    }
+
+    const std::string pin_tag =
+        "build-" + sanitize_tag(src.tag.empty() ? title.build.source.ref : src.tag);
 
     const fs::path cli = find_sdk_cli(sdk.root);
     if (cli.empty()) {
@@ -716,48 +1396,8 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
     const fs::path path_prefix = bin_dir;
     const std::string engine = resolve_generate_engine(title);
 
-    progress(opts.on_progress, "Generating C sources…", 0.05f);
-    std::vector<std::string> gen_args = {
-        resolve_python().string(),
-        cli.string(),
-        "generate",
-    };
-    if (engine == "psxrecomp") {
-        const std::string cfg = title.build.generate.config.empty() ? "game.toml"
-                                                                    : title.build.generate.config;
-        gen_args.push_back("--config");
-        gen_args.push_back(cfg);
-        gen_args.push_back("--project-root");
-        gen_args.push_back(src.root.string());
-        gen_args.push_back("--disc");
-        gen_args.push_back(opts.rom_path.string());
-        gen_args.push_back("--json-progress");
-    } else {
-        gen_args.push_back("--rom");
-        gen_args.push_back(opts.rom_path.string());
-        gen_args.push_back("--cfg-dir");
-        gen_args.push_back(title.build.generate.cfg_dir);
-        gen_args.push_back("--out-dir");
-        gen_args.push_back(title.build.generate.out_dir);
-        gen_args.push_back("--funcs-h");
-        gen_args.push_back(title.build.generate.funcs_h);
-        gen_args.push_back("--project-root");
-        gen_args.push_back(src.root.string());
-        gen_args.push_back("--json-progress");
-        if (title.build.generate.cfg_roots) gen_args.push_back("--cfg-roots");
-        const std::string crc = first_digest(title.rom_identity.crc32);
-        const std::string sha256 = first_digest(title.rom_identity.sha256);
-        if (!crc.empty()) {
-            gen_args.push_back("--expected-crc32");
-            gen_args.push_back(crc);
-        }
-        if (!sha256.empty()) {
-            gen_args.push_back("--expected-sha256");
-            gen_args.push_back(sha256);
-        }
-    }
-
     fs::path psxrecomp_game;
+    fs::path psxrecomp_bios;
     if (engine == "psxrecomp") {
         for (const char* rel : {"recompiler/build/psxrecomp-game",
                                 "recompiler/build/psxrecomp-game.exe",
@@ -778,63 +1418,205 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
                 " (tools pack must ship recompiler/build/psxrecomp-game)";
             return result;
         }
-    }
-
-    std::ostringstream gen_cmd;
-#if !defined(_WIN32)
-    if (!path_prefix.empty())
-        gen_cmd << "PATH=" << shell_quote(path_with_prefix(path_prefix)) << " ";
-    if (!psxrecomp_game.empty())
-        gen_cmd << "PSXRECOMP_GAME=" << shell_quote(psxrecomp_game.string()) << " ";
-#endif
-    for (size_t i = 0; i < gen_args.size(); ++i) {
-        if (i) gen_cmd << ' ';
-        gen_cmd << shell_quote(gen_args[i]);
-    }
-#if defined(_WIN32)
-    std::string gen_full;
-    if (!path_prefix.empty())
-        gen_full = "set \"PATH=" + path_with_prefix(path_prefix) + "\" && ";
-    if (!psxrecomp_game.empty())
-        gen_full += "set \"PSXRECOMP_GAME=" + psxrecomp_game.string() + "\" && ";
-    gen_full += gen_cmd.str();
-#else
-    const std::string gen_full = gen_cmd.str();
-#endif
-
-    std::string gen_log;
-    const int gen_rc = run_capture_lines(
-        gen_full, src.root,
-        [&](const std::string& line) {
-            if (line.empty() || line[0] != '{') return;
-            try {
-                const json j = json::parse(line);
-                const std::string ev = j.value("event", "");
-                if (ev == "phase") {
-                    float pct = -1.0f;
-                    if (j.contains("pct") && j.at("pct").is_number())
-                        pct = j.at("pct").get<float>();
-                    else if (j.contains("pct") && j.at("pct").is_number_integer())
-                        pct = static_cast<float>(j.at("pct").get<int>()) / 100.0f;
-                    const std::string msg = j.value("message", j.value("phase", "generate"));
-                    progress(opts.on_progress, msg, pct >= 0 ? pct * 0.5f : 0.2f);
-                } else if (ev == "error") {
-                    progress(opts.on_progress, j.value("message", "generate error"), -1.0f);
-                }
-            } catch (...) {
+        for (const char* rel : {"recompiler/build/psxrecomp-bios",
+                                "recompiler/build/psxrecomp-bios.exe",
+                                "psxrecomp-bios", "psxrecomp-bios.exe"}) {
+            const fs::path cand = sdk.root / rel;
+            if (fs::is_regular_file(cand, ec)) {
+                psxrecomp_bios = cand;
+                break;
             }
-        },
-        &gen_log);
-    if (gen_rc != 0) {
-        result.message = "generate failed (exit " + std::to_string(gen_rc) + ")\n" + gen_log;
-        return result;
+        }
+        if (psxrecomp_bios.empty())
+            psxrecomp_bios = find_named_file(sdk.root, "psxrecomp-bios");
+        if (psxrecomp_bios.empty())
+            psxrecomp_bios = find_named_file(sdk.root, "psxrecomp-bios.exe");
+        if (psxrecomp_bios.empty()) {
+            result.message =
+                "psxrecomp-bios not found under SDK " + sdk.root.string() +
+                " (OpenBIOS regen requires recompiler/build/psxrecomp-bios; "
+                "use a complete game zip or psxrecomp-tools pack)";
+            return result;
+        }
+    }
+
+    const json codegen_want = make_codegen_meta(
+        engine, rom_fingerprint(paths, opts.rom_path), bios_fingerprint(opts), sdk.tag,
+        engine == "psxrecomp" ? tool_fingerprint(psxrecomp_game, psxrecomp_bios) : sdk.tag);
+
+    bool skip_generate = false;
+    std::string reuse_note;
+    if (!opts.force_generate) {
+        if (generated_ready(title, engine, src.root)) {
+            // Refresh stamp when inputs still match an existing stamp.
+            const fs::path stamp = src.root / ".retcomm-codegen.json";
+            bool stamp_ok = false;
+            if (fs::is_regular_file(stamp, ec)) {
+                try {
+                    std::ifstream in(stamp);
+                    stamp_ok = codegen_meta_matches(json::parse(in), codegen_want);
+                } catch (...) {
+                }
+            }
+            if (stamp_ok || !fs::is_regular_file(stamp, ec)) {
+                skip_generate = true;
+                reuse_note = stamp_ok ? "sources already present (fingerprint match)"
+                                      : "sources already present";
+                if (!stamp_ok) {
+                    try {
+                        std::ofstream out(stamp);
+                        out << codegen_want.dump(2) << "\n";
+                    } catch (...) {
+                    }
+                }
+            }
+        }
+        if (!skip_generate &&
+            try_restore_codegen_cache(paths, title, engine, src.root, codegen_want, &reuse_note)) {
+            skip_generate = true;
+        }
+        if (!skip_generate && try_adopt_previous_src_generated(paths, title, engine, src.root,
+                                                              codegen_want, &reuse_note)) {
+            skip_generate = true;
+        }
+    }
+
+    if (skip_generate) {
+        progress(opts.on_progress, "Reusing generated C (" + reuse_note + ")…", 0.45f);
+        // Keep stable cache in sync for the next update.
+        save_codegen_cache(paths, title, engine, src.root, codegen_want, nullptr);
+    } else {
+        progress(opts.on_progress, "Generating C sources…", 0.05f);
+        std::vector<std::string> gen_args = {
+            resolve_python().string(),
+            cli.string(),
+            "generate",
+        };
+        if (engine == "psxrecomp") {
+            const std::string cfg = title.build.generate.config.empty()
+                                        ? "game.toml"
+                                        : title.build.generate.config;
+            gen_args.push_back("--config");
+            gen_args.push_back(cfg);
+            gen_args.push_back("--project-root");
+            gen_args.push_back(src.root.string());
+            gen_args.push_back("--disc");
+            gen_args.push_back(opts.rom_path.string());
+            gen_args.push_back("--json-progress");
+            // Prefer a retail dump from the BIOS index / hub dropdown; OpenBIOS is
+            // the fallback when use_openbios is set or no dump was provided.
+            if (!opts.use_openbios && !opts.bios_path.empty()) {
+                gen_args.push_back("--bios");
+                gen_args.push_back(opts.bios_path.string());
+            }
+        } else {
+            gen_args.push_back("--rom");
+            gen_args.push_back(opts.rom_path.string());
+            gen_args.push_back("--cfg-dir");
+            gen_args.push_back(title.build.generate.cfg_dir);
+            gen_args.push_back("--out-dir");
+            gen_args.push_back(title.build.generate.out_dir);
+            gen_args.push_back("--funcs-h");
+            gen_args.push_back(title.build.generate.funcs_h);
+            gen_args.push_back("--project-root");
+            gen_args.push_back(src.root.string());
+            gen_args.push_back("--json-progress");
+            if (title.build.generate.cfg_roots) gen_args.push_back("--cfg-roots");
+            const std::string crc = first_digest(title.rom_identity.crc32);
+            const std::string sha256 = first_digest(title.rom_identity.sha256);
+            if (!crc.empty()) {
+                gen_args.push_back("--expected-crc32");
+                gen_args.push_back(crc);
+            }
+            if (!sha256.empty()) {
+                gen_args.push_back("--expected-sha256");
+                gen_args.push_back(sha256);
+            }
+        }
+
+        std::ostringstream gen_cmd;
+#if !defined(_WIN32)
+        if (!path_prefix.empty())
+            gen_cmd << "PATH=" << shell_quote(path_with_prefix(path_prefix)) << " ";
+        if (!psxrecomp_game.empty())
+            gen_cmd << "PSXRECOMP_GAME=" << shell_quote(psxrecomp_game.string()) << " ";
+        if (!psxrecomp_bios.empty())
+            gen_cmd << "PSXRECOMP_BIOS=" << shell_quote(psxrecomp_bios.string()) << " ";
+#endif
+        for (size_t i = 0; i < gen_args.size(); ++i) {
+            if (i) gen_cmd << ' ';
+            gen_cmd << shell_quote(gen_args[i]);
+        }
+#if defined(_WIN32)
+        std::string gen_full;
+        if (!path_prefix.empty())
+            gen_full = "set \"PATH=" + path_with_prefix(path_prefix) + "\" && ";
+        if (!psxrecomp_game.empty())
+            gen_full += "set \"PSXRECOMP_GAME=" + psxrecomp_game.string() + "\" && ";
+        if (!psxrecomp_bios.empty())
+            gen_full += "set \"PSXRECOMP_BIOS=" + psxrecomp_bios.string() + "\" && ";
+        gen_full += gen_cmd.str();
+#else
+        const std::string gen_full = gen_cmd.str();
+#endif
+
+        std::string gen_log;
+        const int gen_rc = run_capture_lines(
+            gen_full, src.root,
+            [&](const std::string& line) {
+                if (line.empty() || line[0] != '{') return;
+                try {
+                    const json j = json::parse(line);
+                    const std::string ev = j.value("event", "");
+                    if (ev == "phase") {
+                        float pct = -1.0f;
+                        if (j.contains("pct") && j.at("pct").is_number())
+                            pct = j.at("pct").get<float>();
+                        else if (j.contains("pct") && j.at("pct").is_number_integer())
+                            pct = static_cast<float>(j.at("pct").get<int>()) / 100.0f;
+                        const std::string msg = j.value("message", j.value("phase", "generate"));
+                        progress(opts.on_progress, msg, pct >= 0 ? pct * 0.5f : 0.2f);
+                    } else if (ev == "error") {
+                        progress(opts.on_progress, j.value("message", "generate error"), -1.0f);
+                    }
+                } catch (...) {
+                }
+            },
+            &gen_log);
+        if (gen_rc != 0) {
+            result.message = "generate failed (exit " + std::to_string(gen_rc) + ")\n" + gen_log;
+            return result;
+        }
+        if (!generated_ready(title, engine, src.root)) {
+            result.message = "generate finished but expected sources are missing under " +
+                             src.root.string();
+            return result;
+        }
+        std::string cache_note;
+        save_codegen_cache(paths, title, engine, src.root, codegen_want, &cache_note);
+        if (!cache_note.empty())
+            progress(opts.on_progress, cache_note, 0.48f);
     }
 
     const fs::path build_dir = src.root / title.build.cmake.build_dir;
+    if (opts.force) {
+        progress(opts.on_progress, "Cleaning previous cmake build…", 0.52f);
+        fs::remove_all(build_dir, ec);
+    }
     progress(opts.on_progress, "Configuring cmake…", 0.55f);
     std::string cmake_log;
     std::vector<std::string> conf = {"cmake", "-S", src.root.string(), "-B",
                                      build_dir.string()};
+    // Single-config generators need CMAKE_BUILD_TYPE for Release defines
+    // (e.g. PSX_GAME_VERSION from the tag, not "dev").
+    if (!title.build.cmake.config.empty()) {
+        conf.push_back("-DCMAKE_BUILD_TYPE=" + title.build.cmake.config);
+    }
+    // Catalog netplay titles: ensure recomp-net is linked even if the game
+    // CMakeLists forgot to opt into PSX_NETPLAY (framework default is OFF).
+    if (title.supports_netplay()) {
+        conf.push_back("-DPSX_NETPLAY=ON");
+    }
     // Prefer Ninja for fresh build dirs when the toolchain pack provides it.
     // Do not override an existing generator (e.g. Unix Makefiles cache).
     {
@@ -874,8 +1656,13 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
     const fs::path install_root = paths.apps_dir / title.install_dir_name;
     const fs::path release_dir = install_root / "releases" / pin_tag;
     const std::string launch_name = title.launch_binary_for_host();
+
+    std::string stash_note;
+    stash_user_state_for_update(paths, title, &stash_note);
+
     std::string stage_err;
-    if (!stage_build_output(src.root, build_dir, launch_name, release_dir, &stage_err)) {
+    if (!stage_build_output(src.root, build_dir, launch_name, release_dir,
+                            title.build.generate.config, &stage_err)) {
         result.message = stage_err;
         return result;
     }
@@ -884,6 +1671,9 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
     if (binary.empty()) binary = release_dir / launch_name;
     make_executable(binary);
     set_current_symlink(install_root, pin_tag);
+
+    std::string restore_note;
+    restore_user_state(install_root, release_dir, &restore_note);
 
     InstallRecord rec;
     rec.title_id = title.id;
@@ -900,9 +1690,11 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
     rec.target_os = host_os_key();
     rec.runtime = "native";
     rec.installed_at = iso8601_now();
-    rec.release_url = "https://github.com/" + rec.github + "/tree/" + title.build.source.ref;
+    rec.release_url = "https://github.com/" + rec.github + "/releases/tag/" +
+                      (src.tag.empty() ? title.build.source.ref : src.tag);
     rec.method = "build";
-    rec.source_ref = title.build.source.ref;
+    // Pin to the material actually built (release tag when from game zip).
+    rec.source_ref = src.tag.empty() ? title.build.source.ref : src.tag;
     rec.sdk_tag = sdk.tag;
     rec.toolchain_tag = tc.tag;
     if (!save_install_record(install_root, rec)) {
@@ -910,12 +1702,18 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
         return result;
     }
 
+    // Free disk: drop per-title build tree + any leftover embedded toolchain/
+    // (compilers live in the shared toolchains cache after harvest).
+    prune_build_tree_after_success(src.root, build_dir);
+
     result.plan = inspect_install(paths, title);
     result.plan.latest_tag = pin_tag;
     result.ok = true;
-    result.message = "built " + title.id + " from " + title.build.source.ref + "\n" +
+    result.message = "built " + title.id + " from " + rec.source_ref + "\n" +
                      "  binary: " + result.plan.binary_path.string() + "\n" +
                      "  sdk: " + sdk.tag + "  toolchain: " + tc.tag + "\n";
+    if (!stash_note.empty()) result.message += "  " + stash_note;
+    if (!restore_note.empty()) result.message += "  " + restore_note;
     progress(opts.on_progress, "Build complete", 1.0f);
     return result;
 }
@@ -947,14 +1745,33 @@ InstallResult update_title_auto(const Paths& paths, const Title& title,
             const auto idx = load_library_index(paths.library_index_path);
             b.rom_path = idx.preferred_rom(title.id);
         }
-        // Rebuild when catalog source_ref moved, or force.
-        if (plan.record && plan.record->source_ref == title.build.source.ref && !b.force &&
-            !install_opts.force && plan.installed) {
+        bool need = b.force || install_opts.force || !plan.installed;
+        if (!need && plan.record) {
+            // One-zip titles: compare installed pin to latest GitHub release tag.
+            if (!title.asset_glob_for_host().empty() && !title.release.github.empty()) {
+                GhRelease rel;
+                std::string err;
+                const bool allow_pre =
+                    install_opts.allow_prerelease || title.release.allow_prerelease;
+                if (fetch_latest_release(title.release.github, rel, &err, allow_pre) &&
+                    !rel.tag.empty()) {
+                    const std::string latest = sanitize_tag(rel.tag);
+                    const std::string have = sanitize_tag(plan.record->source_ref);
+                    need = (have != latest);
+                } else {
+                    need = plan.record->source_ref != title.build.source.ref;
+                }
+            } else {
+                need = plan.record->source_ref != title.build.source.ref;
+            }
+        }
+        if (!need) {
             InstallResult r;
             r.ok = true;
             r.skipped = true;
             r.plan = plan;
-            r.message = "build install already at source ref " + title.build.source.ref + "\n";
+            r.message = "build install already up to date (" +
+                        (plan.record ? plan.record->source_ref : title.build.source.ref) + ")\n";
             return r;
         }
         b.force = true;

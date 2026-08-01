@@ -38,9 +38,12 @@ struct InstallPlan {
     fs::path current_link; // install_root/current
     fs::path binary_path;  // resolved launch binary under current/
     bool installed = false;
-    // True when apps/<install_dir_name> exists even if the launch binary was not found
-    // (failed/partial install — hub can still offer Open Folder / cleanup).
+    // True when apps/<install_dir_name> exists with leftover install/build artifacts
+    // but no launch binary (failed/partial install — hub offers Open Folder / cleanup).
+    // False when the root is absent, or only holds preserved/ from keep-saves uninstall.
     bool install_dir_present = false;
+    // True when uninstall kept saves/config under install_root/preserved/.
+    bool has_preserved_state = false;
     std::string expected_binary; // catalog launch name looked for when missing
     std::optional<InstallRecord> record;
     std::string installed_tag;
@@ -100,6 +103,14 @@ struct UninstallResult {
 // save/savestate files under install_root/preserved/ for the next install.
 UninstallResult uninstall_title(const Paths& paths, const Title& title,
                                 const UninstallOptions& opts = {});
+
+// Stash saves + user config from existing release trees into
+// apps/<install>/preserved/ before a wipe/rebuild/update.
+// Restores into a newly staged release_dir (skip_existing).
+void stash_user_state_for_update(const Paths& paths, const Title& title,
+                                 std::string* note = nullptr);
+void restore_user_state(const fs::path& install_root, const fs::path& release_dir,
+                        std::string* note = nullptr);
 
 // Fetch latest release tag for owner/repo (empty on failure).
 std::string fetch_latest_release_tag(const std::string& github_slug, std::string* error = nullptr,

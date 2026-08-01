@@ -258,10 +258,18 @@ bool Title::supports_local_build() const {
     const std::string src_gh =
         build.source.github.empty() ? release.github : build.source.github;
     if (src_gh.empty()) return false;
-    if (build.sdk.id.empty() || build.sdk.github.empty()) return false;
-    if (build.sdk.asset_glob_for_host().empty()) return false;
-    if (build.toolchain.id.empty() || build.toolchain.github.empty()) return false;
-    if (build.toolchain.asset_glob_for_host().empty()) return false;
+    // SDK tools may come from a separate pack *or* be embedded in the host
+    // release zip (one-zip titles like BPE). Require one of the two.
+    const bool has_sdk_pack = !build.sdk.id.empty() && !build.sdk.github.empty() &&
+                              !build.sdk.asset_glob_for_host().empty();
+    const bool has_embedded_zip =
+        !release.github.empty() && !asset_glob_for_host().empty();
+    if (!has_sdk_pack && !has_embedded_zip) return false;
+    // Toolchain: downloadable pack and/or embedded under release zip toolchain/.
+    if (build.toolchain.id.empty()) return false;
+    const bool has_tc_pack = !build.toolchain.github.empty() &&
+                             !build.toolchain.asset_glob_for_host().empty();
+    if (!has_tc_pack && !has_embedded_zip) return false;
     if (build.cmake.target.empty() && launch_binary_for_host().empty()) return false;
     return true;
 }
