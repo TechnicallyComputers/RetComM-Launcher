@@ -169,31 +169,52 @@ jobs:
       - name: Package portable + installer
         shell: pwsh
         run: |
-          # CMake install ships TARGET_RUNTIME_DLLS into out/bin (often incomplete
-          # for transitive deps). Always also harvest from vcpkg installed/bin so
-          # zlib1.dll (libcurl) lands in the installer / portable payload.
-          $releaseDir = Join-Path $env:GITHUB_WORKSPACE "build\Release"
-          $vcpkgBin = Join-Path $env:RETCOMM_VCPKG "installed\x64-windows\bin"
-          Write-Host "out/bin:"
-          Get-ChildItem (Join-Path $env:GITHUB_WORKSPACE "out\bin") -ErrorAction SilentlyContinue |
-            ForEach-Object { Write-Host "  $($_.Name)" }
-          Write-Host "build/Release DLLs:"
-          Get-ChildItem $releaseDir -Filter "*.dll" -ErrorAction SilentlyContinue |
-            ForEach-Object { Write-Host "  $($_.Name)" }
-          Write-Host "vcpkg installed/bin:"
-          if (Test-Path $vcpkgBin) {
-            Get-ChildItem $vcpkgBin -Filter "*.dll" -ErrorAction SilentlyContinue |
-              ForEach-Object { Write-Host "  $($_.Name)" }
-          } else {
-            throw "vcpkg bin missing: $vcpkgBin (zlib/libcurl cannot be bundled)"
+          # Manifest-mode vcpkg installs under build/vcpkg_installed/…, not the
+          # classic $RETCOMM_VCPKG/installed/… tree. zlib may be zlib1.dll or z.dll.
+          $ws = $env:GITHUB_WORKSPACE
+          $releaseDir = Join-Path $ws "build\Release"
+          $candidates = @(
+            (Join-Path $ws "build\vcpkg_installed\x64-windows\bin"),
+            (Join-Path $ws "vcpkg_installed\x64-windows\bin"),
+            (Join-Path $env:RETCOMM_VCPKG "installed\x64-windows\bin"),
+            $releaseDir,
+            (Join-Path $ws "out\bin")
+          )
+          function Test-HasRuntimeDlls([string]$Dir) {
+            if (-not (Test-Path $Dir)) { return $false }
+            $hasSdl = Test-Path (Join-Path $Dir "SDL3.dll")
+            $hasCurl = (Test-Path (Join-Path $Dir "libcurl.dll")) -or
+                       (Get-ChildItem $Dir -Filter "libcurl*.dll" -ErrorAction SilentlyContinue)
+            $hasZ = (Test-Path (Join-Path $Dir "zlib1.dll")) -or
+                    (Test-Path (Join-Path $Dir "z.dll")) -or
+                    (Test-Path (Join-Path $Dir "zlib.dll"))
+            return ($hasSdl -and $hasCurl -and $hasZ)
           }
-          foreach ($needDll in @("zlib1.dll", "libcurl.dll", "SDL3.dll")) {
-            if (-not (Test-Path (Join-Path $vcpkgBin $needDll))) {
-              throw "Required runtime DLL missing from vcpkg: $needDll"
+          $vcpkgBin = $null
+          foreach ($c in $candidates) {
+            Write-Host "probe: $c"
+            if (Test-Path $c) {
+              Get-ChildItem $c -Filter "*.dll" -ErrorAction SilentlyContinue |
+                ForEach-Object { Write-Host "  $($_.Name)" }
+            }
+            if (Test-HasRuntimeDlls $c) { $vcpkgBin = $c; break }
+          }
+          if (-not $vcpkgBin) {
+            # Last resort: find zlib next to a harvested SDL3 under build/.
+            $zHit = Get-ChildItem -Path (Join-Path $ws "build") -Recurse -Include @(
+              "zlib1.dll", "z.dll", "zlib.dll") -ErrorAction SilentlyContinue |
+              Select-Object -First 1
+            if ($zHit) {
+              $vcpkgBin = $zHit.DirectoryName
+              Write-Host "Discovered zlib at $vcpkgBin"
             }
           }
+          if (-not $vcpkgBin) {
+            throw "Could not locate a DLL directory containing SDL3 + libcurl + zlib (zlib1.dll or z.dll)"
+          }
+          Write-Host "Using runtime DLL dir: $vcpkgBin"
           ./packaging/windows/package.ps1 `
-            -Prefix (Join-Path $env:GITHUB_WORKSPACE "out") `
+            -Prefix (Join-Path $ws "out") `
             -Version "${{ needs.version.outputs.version }}" `
             -VcpkgBin $vcpkgBin `
             -Arch x64 `
@@ -201,10 +222,16 @@ jobs:
           $stage = Join-Path dist "windows-stage"
           Write-Host "staged DLLs:"
           Get-ChildItem $stage -Filter "*.dll" | ForEach-Object { Write-Host "  $($_.Name)" }
-          foreach ($needDll in @("zlib1.dll", "libcurl.dll", "SDL3.dll", "z.dll")) {
+          foreach ($needDll in @("libcurl.dll", "SDL3.dll")) {
             if (-not (Test-Path (Join-Path $stage $needDll))) {
               throw "Staged payload missing required DLL: $needDll"
             }
+          }
+          $hasZlib = (Test-Path (Join-Path $stage "zlib1.dll")) -or
+                     (Test-Path (Join-Path $stage "z.dll")) -or
+                     (Test-Path (Join-Path $stage "zlib.dll"))
+          if (-not $hasZlib) {
+            throw "Staged payload missing zlib runtime (zlib1.dll / z.dll / zlib.dll)"
           }
           Get-ChildItem dist
           $need = @(
