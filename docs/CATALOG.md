@@ -88,8 +88,8 @@ Title manifests may still set `bios_identity` to override the default, or
 | `release.asset_glob` | object | Per-OS glob: `linux`, `windows`, `macos` (launcher also accepts synonyms, e.g. `*windows*` ↔ `win64` / `win-x64`) |
 | `build` | object | Optional local generate + cmake recipe; when `enabled`, Install prefers build over zip |
 | `build.source` | object | `github` + `ref` (zipball fallback). Prefer host `release.asset_glob` zip when it vendors a buildable tree |
-| `build.sdk` / `build.toolchain` | object | Pack id, github, per-OS `asset_glob` |
-| `build.generate` / `build.cmake` | object | generate engine (`snesrecomp` / `psxrecomp`) + cmake target |
+| `build.sdk` / `build.toolchain` | object | Pack id, github, per-OS `asset_glob`; toolchain may set `min_version` |
+| `build.generate` / `build.cmake` | object | generate engine (`snesrecomp` / `psxrecomp` / `gbarecomp`) + cmake target |
 | `install_dir_name` | string | Folder under `apps/` |
 | `launch` | object | Relative binary names: `linux`, `windows`, `macos` |
 | `romm` | object | Optional match hints |

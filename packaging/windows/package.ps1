@@ -26,27 +26,42 @@ Copy-Item (Join-Path $PrefixBin "retcomm.exe") $Stage
 Copy-Item (Join-Path $PrefixBin "retcomm-hub.exe") $Stage
 
 # Prefer DLLs already installed beside the exes (CMake TARGET_RUNTIME_DLLS).
+# Note: TARGET_RUNTIME_DLLS often misses *transitive* deps (e.g. zlib behind
+# libcurl), so we always harvest from vcpkg installed/bin as well.
 Get-ChildItem -Path $PrefixBin -Filter "*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
     Copy-Item $_.FullName $Stage -Force
 }
 
-function Copy-RuntimeDlls([string]$Dir) {
+function Copy-RuntimeDlls([string]$Dir, [switch]$AllDlls) {
     if (-not $Dir -or -not (Test-Path $Dir)) { return 0 }
     $count = 0
+    if ($AllDlls) {
+        Get-ChildItem -Path $Dir -Filter "*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item $_.FullName $Stage -Force
+            $count++
+        }
+        return $count
+    }
     $patterns = @(
         "SDL3.dll",
         "libcurl.dll",
         "libcurl-d.dll",
         "zlib1.dll",
         "zlibd1.dll",
+        "zlib.dll",
+        "z.dll",
         "libssl*.dll",
         "libcrypto*.dll",
+        "libssl-*.dll",
+        "libcrypto-*.dll",
         "nghttp2.dll",
         "libssh2.dll",
         "brotlicommon.dll",
         "brotlidec.dll",
+        "brotlienc.dll",
         "fmt.dll",
-        "legacy.dll"
+        "legacy.dll",
+        "libomp*.dll"
     )
     foreach ($pat in $patterns) {
         Get-ChildItem -Path $Dir -Filter $pat -ErrorAction SilentlyContinue | ForEach-Object {
@@ -54,44 +69,85 @@ function Copy-RuntimeDlls([string]$Dir) {
             $count++
         }
     }
-    if ($count -eq 0) {
-        Get-ChildItem -Path $Dir -Filter "*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
-            Copy-Item $_.FullName $Stage -Force
-            $count++
-        }
-    }
     return $count
 }
 
+function Test-StagedDll([string[]]$Names) {
+    foreach ($n in $Names) {
+        if (Test-Path (Join-Path $Stage $n)) { return $true }
+        if (Get-ChildItem $Stage -Filter $n -ErrorAction SilentlyContinue) { return $true }
+    }
+    return $false
+}
+
+# Always merge from every known location. Skipping the vcpkg installed tree when
+# build/Release already has SDL3 was leaving zlib (curl transitive) out of the
+# installer — clean machines then fail with "zlib1.dll / z.dll was not found".
+$searchRoots = [System.Collections.Generic.List[string]]::new()
+if ($VcpkgBin) { [void]$searchRoots.Add($VcpkgBin) }
+@(
+    (Join-Path $Root "build\Release"),
+    (Join-Path $Root "build\RelWithDebInfo"),
+    (Join-Path $Root "vcpkg_installed\x64-windows\bin"),
+    (Join-Path $Root "retcomm-vcpkg\installed\x64-windows\bin"),
+    (Join-Path $Root "build\vcpkg_installed\x64-windows\bin"),
+    (Join-Path $env:RETCOMM_VCPKG "installed\x64-windows\bin")
+) | ForEach-Object {
+    if ($_ -and (Test-Path $_)) { [void]$searchRoots.Add($_) }
+}
+
 $copied = 0
-if ($VcpkgBin) { $copied += Copy-RuntimeDlls $VcpkgBin }
-
-if ($copied -eq 0 -or -not (Test-Path (Join-Path $Stage "SDL3.dll"))) {
-    $searchRoots = @(
-        (Join-Path $Root "build\Release"),
-        (Join-Path $Root "vcpkg_installed\x64-windows\bin"),
-        (Join-Path $Root "retcomm-vcpkg\installed\x64-windows\bin"),
-        (Join-Path $Root "build\vcpkg_installed\x64-windows\bin")
-    )
-    foreach ($dir in $searchRoots) {
-        $copied += Copy-RuntimeDlls $dir
-    }
-    if (-not (Test-Path (Join-Path $Stage "SDL3.dll"))) {
-        $hit = Get-ChildItem -Path (Join-Path $Root "build") -Recurse -Filter "SDL3.dll" -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($hit) {
-            Write-Host "Discovered SDL3.dll at $($hit.DirectoryName)"
-            Copy-RuntimeDlls $hit.DirectoryName | Out-Null
-        }
+foreach ($dir in ($searchRoots | Select-Object -Unique)) {
+    # Full harvest from vcpkg package bins (small; covers curl→zlib→…).
+    $isVcpkgPkgBin = ($dir -match '[/\\]installed[/\\]x64-windows[/\\]bin$')
+    $n = Copy-RuntimeDlls $dir -AllDlls:$isVcpkgPkgBin
+    if ($n -gt 0) {
+        Write-Host "Harvested $n DLL(s) from $dir"
+        $copied += $n
     }
 }
 
-if (-not (Test-Path (Join-Path $Stage "SDL3.dll"))) {
-    Write-Warning "SDL3.dll not bundled — retcomm-hub may fail to start on clean machines"
+if (-not (Test-StagedDll @("SDL3.dll"))) {
+    $hit = Get-ChildItem -Path (Join-Path $Root "build") -Recurse -Filter "SDL3.dll" -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($hit) {
+        Write-Host "Discovered SDL3.dll at $($hit.DirectoryName)"
+        Copy-RuntimeDlls $hit.DirectoryName | Out-Null
+        Copy-RuntimeDlls $hit.DirectoryName -AllDlls | Out-Null
+    }
 }
-if (-not (Test-Path (Join-Path $Stage "libcurl.dll")) -and
-    -not (Get-ChildItem $Stage -Filter "libcurl*.dll" -ErrorAction SilentlyContinue)) {
-    Write-Warning "libcurl DLL not bundled — network features may fail on clean machines"
+
+# MSVC/vcpkg ships zlib1.dll; some MinGW layouts use z.dll / zlib.dll.
+$hasZlib = Test-StagedDll @("zlib1.dll", "zlibd1.dll", "z.dll", "zlib.dll")
+$hasCurl = Test-StagedDll @("libcurl.dll", "libcurl-d.dll", "libcurl*.dll")
+$hasSdl = Test-StagedDll @("SDL3.dll")
+
+if (-not $hasSdl) {
+    throw "SDL3.dll not bundled — cannot ship a Windows release without it"
+}
+if (-not $hasCurl) {
+    throw "libcurl DLL not bundled — cannot ship a Windows release without it"
+}
+if (-not $hasZlib) {
+    throw @"
+zlib runtime DLL not bundled (need zlib1.dll from vcpkg, or z.dll/zlib.dll).
+libcurl depends on zlib; clean machines fail with 'z.dll / zlib1.dll was not found'.
+Searched: $($searchRoots -join '; ')
+Staged so far: $((Get-ChildItem $Stage -Filter '*.dll' | ForEach-Object Name) -join ', ')
+"@
+}
+
+# If an import expects z.dll but we only have zlib1.dll, provide an alias copy.
+# (Harmless when unused; unblocks mismatched import names.)
+$zlib1 = Join-Path $Stage "zlib1.dll"
+$zDll = Join-Path $Stage "z.dll"
+if ((Test-Path $zlib1) -and -not (Test-Path $zDll)) {
+    Copy-Item $zlib1 $zDll -Force
+    Write-Host "Aliased zlib1.dll -> z.dll for import-name compatibility"
+}
+if ((Test-Path $zDll) -and -not (Test-Path $zlib1)) {
+    Copy-Item $zDll $zlib1 -Force
+    Write-Host "Aliased z.dll -> zlib1.dll for import-name compatibility"
 }
 
 # Installer channel marker (self-update picks the windows-*-setup.exe asset).

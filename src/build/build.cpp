@@ -49,6 +49,43 @@ std::string sanitize_tag(std::string tag) {
     return tag;
 }
 
+// Compare dotted numeric versions (optional leading 'v'). Returns <0, 0, >0.
+int version_cmp(std::string a, std::string b) {
+    auto strip_v = [](std::string& s) {
+        if (s.size() >= 2 && (s[0] == 'v' || s[0] == 'V') && std::isdigit(static_cast<unsigned char>(s[1])))
+            s.erase(s.begin());
+    };
+    strip_v(a);
+    strip_v(b);
+    size_t ia = 0, ib = 0;
+    while (ia < a.size() || ib < b.size()) {
+        long va = 0, vb = 0;
+        bool ha = false, hb = false;
+        while (ia < a.size() && std::isdigit(static_cast<unsigned char>(a[ia]))) {
+            va = va * 10 + (a[ia] - '0');
+            ++ia;
+            ha = true;
+        }
+        while (ib < b.size() && std::isdigit(static_cast<unsigned char>(b[ib]))) {
+            vb = vb * 10 + (b[ib] - '0');
+            ++ib;
+            hb = true;
+        }
+        if (!ha && !hb) return 0;
+        if (va != vb) return va < vb ? -1 : 1;
+        if (ia < a.size() && a[ia] == '.') ++ia;
+        if (ib < b.size() && b[ib] == '.') ++ib;
+        if (!ha || !hb) return ha ? 1 : (hb ? -1 : 0);
+    }
+    return 0;
+}
+
+bool version_satisfies(const std::string& have, const std::string& need) {
+    if (need.empty()) return true;
+    if (have.empty()) return false;
+    return version_cmp(have, need) >= 0;
+}
+
 std::string iso8601_now() {
     using clock = std::chrono::system_clock;
     const auto t = clock::to_time_t(clock::now());
@@ -222,8 +259,13 @@ bool source_tree_buildable(const Title& title, const fs::path& root) {
     std::error_code ec;
     if (!fs::is_regular_file(root / "CMakeLists.txt", ec)) return false;
     const std::string eng = to_lower(title.build.generate.engine);
-    if (eng == "psxrecomp" || (eng.empty() && to_lower(title.platform) == "psx")) {
+    const std::string plat = to_lower(title.platform);
+    if (eng == "psxrecomp" || (eng.empty() && plat == "psx")) {
         return fs::is_regular_file(root / "psxrecomp" / "runtime" / "runtime.cmake", ec) &&
+               fs::is_directory(root / "recomp-ui", ec);
+    }
+    if (eng == "gbarecomp" || (eng.empty() && plat == "gba")) {
+        return fs::is_directory(root / "gbarecomp", ec) &&
                fs::is_directory(root / "recomp-ui", ec);
     }
     return true;
@@ -338,7 +380,8 @@ fs::path find_sdk_cli(const fs::path& sdk_root) {
         } catch (...) {
         }
     }
-    for (const char* name : {"snesrecomp_cli.py", "psxrecomp_cli.py"}) {
+    for (const char* name :
+         {"snesrecomp_cli.py", "psxrecomp_cli.py", "gbarecomp_cli.py"}) {
         const fs::path flat = sdk_root / name;
         if (fs::is_regular_file(flat, ec)) return flat;
         const fs::path nested = find_named_file(sdk_root, name);
@@ -352,6 +395,7 @@ std::string resolve_generate_engine(const Title& title) {
     if (!eng.empty()) return eng;
     const std::string plat = to_lower(title.platform);
     if (plat == "psx" || plat == "ps1" || plat == "ps") return "psxrecomp";
+    if (plat == "gba") return "gbarecomp";
     return "snesrecomp";
 }
 
@@ -411,6 +455,13 @@ fs::path snes_out_dir(const Title& title, const fs::path& src_root) {
     return src_root / rel;
 }
 
+fs::path gba_out_dir(const Title& title, const fs::path& src_root) {
+    const std::string rel = title.build.generate.out_dir.empty()
+                                ? "variants/emerald/generated"
+                                : title.build.generate.out_dir;
+    return src_root / rel;
+}
+
 bool psx_generated_ready(const fs::path& src_root) {
     std::error_code ec;
     const fs::path game_gen = src_root / "generated";
@@ -444,8 +495,24 @@ bool snes_generated_ready(const Title& title, const fs::path& src_root) {
     return false;
 }
 
+bool gba_generated_ready(const Title& title, const fs::path& src_root) {
+    std::error_code ec;
+    const fs::path out = gba_out_dir(title, src_root);
+    if (!fs::is_regular_file(out / "dispatch_table.cpp", ec)) return false;
+    int shards = 0;
+    for (auto it = fs::directory_iterator(out, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        const auto name = it->path().filename().string();
+        if (name.rfind("recompiled_", 0) == 0 && it->path().extension() == ".cpp")
+            ++shards;
+    }
+    return shards >= 2;
+}
+
 bool generated_ready(const Title& title, const std::string& engine, const fs::path& src_root) {
     if (engine == "psxrecomp") return psx_generated_ready(src_root);
+    if (engine == "gbarecomp") return gba_generated_ready(title, src_root);
     return snes_generated_ready(title, src_root);
 }
 
@@ -504,6 +571,21 @@ bool install_generated_from(const Title& title, const std::string& engine,
             if (!copy_tree_overwrite(bios_from, bios_to, error)) return false;
         }
         return psx_generated_ready(to_root);
+    }
+    if (engine == "gbarecomp") {
+        if (!copy_tree_overwrite(gba_out_dir(title, from_root), gba_out_dir(title, to_root),
+                                 error))
+            return false;
+        const fs::path bios_from =
+            from_root / "gbarecomp" / "src" / "runtime" / "generated_bios";
+        const fs::path bios_to =
+            to_root / "gbarecomp" / "src" / "runtime" / "generated_bios";
+        std::error_code ec;
+        if (fs::is_directory(bios_from, ec) &&
+            fs::is_regular_file(bios_from / "bios_recompiled.cpp", ec)) {
+            if (!copy_tree_overwrite(bios_from, bios_to, error)) return false;
+        }
+        return gba_generated_ready(title, to_root);
     }
     const fs::path from_out = snes_out_dir(title, from_root);
     const fs::path to_out = snes_out_dir(title, to_root);
@@ -581,6 +663,18 @@ bool save_codegen_cache(const Paths& paths, const Title& title, const std::strin
         if (fs::is_directory(bios, ec)) {
             if (!copy_tree_overwrite(bios, cache / "psxrecomp" / "generated", &err)) return false;
         }
+    } else if (engine == "gbarecomp") {
+        if (!copy_tree_overwrite(gba_out_dir(title, src_root), gba_out_dir(title, cache), &err))
+            return false;
+        const fs::path bios =
+            src_root / "gbarecomp" / "src" / "runtime" / "generated_bios";
+        std::error_code ec;
+        if (fs::is_directory(bios, ec) &&
+            fs::is_regular_file(bios / "bios_recompiled.cpp", ec)) {
+            if (!copy_tree_overwrite(
+                    bios, cache / "gbarecomp" / "src" / "runtime" / "generated_bios", &err))
+                return false;
+        }
     } else {
         if (!copy_tree_overwrite(snes_out_dir(title, src_root), snes_out_dir(title, cache), &err))
             return false;
@@ -609,6 +703,9 @@ PackEnsureResult harvest_embedded_sdk(const Paths& paths, const Title& title,
     if (engine == "psxrecomp") {
         eng = src_root / "psxrecomp";
         if (pack_id.empty()) pack_id = "psxrecomp-tools";
+    } else if (engine == "gbarecomp") {
+        eng = src_root / "gbarecomp";
+        if (pack_id.empty()) pack_id = "gbarecomp-tools";
     } else {
         if (fs::is_directory(src_root / "snesrecomp", ec)) eng = src_root / "snesrecomp";
         if (pack_id.empty()) pack_id = "snesrecomp-tools";
@@ -620,6 +717,10 @@ PackEnsureResult harvest_embedded_sdk(const Paths& paths, const Title& title,
     auto has_tool = [&](const char* name, const char* name_exe) {
         return fs::is_regular_file(eng / "recompiler/build" / name, ec) ||
                fs::is_regular_file(eng / "recompiler/build" / name_exe, ec) ||
+               fs::is_regular_file(eng / "build" / name, ec) ||
+               fs::is_regular_file(eng / "build" / name_exe, ec) ||
+               fs::is_regular_file(eng / name, ec) ||
+               fs::is_regular_file(eng / name_exe, ec) ||
                !find_named_file(eng, name).empty() || !find_named_file(eng, name_exe).empty();
     };
     if (engine == "psxrecomp") {
@@ -630,6 +731,12 @@ PackEnsureResult harvest_embedded_sdk(const Paths& paths, const Title& title,
         }
         if (!has_tool("psxrecomp-bios", "psxrecomp-bios.exe")) {
             r.message = "embedded psxrecomp tree missing psxrecomp-bios";
+            return r;
+        }
+    }
+    if (engine == "gbarecomp") {
+        if (!has_tool("gba_recompile", "gba_recompile.exe")) {
+            r.message = "embedded gbarecomp tree missing gba_recompile";
             return r;
         }
     }
@@ -644,9 +751,10 @@ PackEnsureResult harvest_embedded_sdk(const Paths& paths, const Title& title,
         return r;
     }
 
-    // Slim tools layout (mirrors package_psxrecomp_tools.sh / snes tools packs).
+    // Slim tools layout (mirrors package_*_tools.sh packs).
     copy_rel_file(eng, dest, "psxrecomp_cli.py", ec);
     copy_rel_file(eng, dest, "snesrecomp_cli.py", ec);
+    copy_rel_file(eng, dest, "gbarecomp_cli.py", ec);
     copy_rel_file(eng, dest, "retcomm-sdk.json", ec);
     copy_rel_tree(eng, dest, "tools", ec);
     copy_rel_tree(eng, dest, "docs", ec);
@@ -663,6 +771,13 @@ PackEnsureResult harvest_embedded_sdk(const Paths& paths, const Title& title,
                                  "phase2_ghidra_seeds.json"}) {
             copy_rel_file(eng, dest, fs::path("recompiler/seeds") / name, ec);
         }
+    }
+    if (engine == "gbarecomp") {
+        for (const char* name : {"gba_recompile", "gba_recompile.exe"}) {
+            copy_rel_file(eng, dest, name, ec);
+            copy_rel_file(eng, dest, fs::path("build") / name, ec);
+        }
+        copy_rel_file(eng, dest, "bios/gba_bios.toml", ec);
     }
 
     if (find_sdk_cli(dest).empty()) {
@@ -739,21 +854,38 @@ std::string read_toolchain_version(const fs::path& root) {
     }
 }
 
-fs::path find_cached_toolchain(const Paths& paths, const std::string& pack_id) {
+fs::path find_cached_toolchain(const Paths& paths, const std::string& pack_id,
+                               const std::string& min_version = {}) {
     std::error_code ec;
     const fs::path base = paths.toolchains_dir / pack_id;
     if (!fs::is_directory(base, ec)) return {};
-    // Prefer newest tag directory with a usable bin/cmake.
+    // Prefer highest semver (then name) among usable packs that meet min_version.
     std::vector<fs::path> candidates;
     for (auto it = fs::directory_iterator(base, ec); !ec && it != fs::directory_iterator();
          it.increment(ec)) {
         if (!it->is_directory(ec)) continue;
         const auto name = it->path().filename().string();
         if (!name.empty() && name[0] == '.') continue;
-        if (toolchain_looks_usable(it->path())) candidates.push_back(it->path());
+        if (!toolchain_looks_usable(it->path())) continue;
+        const fs::path root = unwrap_single_subdir(it->path());
+        std::string ver = read_toolchain_version(root);
+        if (ver.empty()) ver = name;
+        if (!version_satisfies(ver, min_version)) continue;
+        candidates.push_back(it->path());
     }
     if (candidates.empty()) return {};
-    std::sort(candidates.begin(), candidates.end());
+    std::sort(candidates.begin(), candidates.end(),
+              [](const fs::path& a, const fs::path& b) {
+                  const fs::path ra = unwrap_single_subdir(a);
+                  const fs::path rb = unwrap_single_subdir(b);
+                  std::string va = read_toolchain_version(ra);
+                  std::string vb = read_toolchain_version(rb);
+                  if (va.empty()) va = a.filename().string();
+                  if (vb.empty()) vb = b.filename().string();
+                  const int c = version_cmp(va, vb);
+                  if (c != 0) return c < 0;
+                  return a.filename().string() < b.filename().string();
+              });
     return unwrap_single_subdir(candidates.back());
 }
 
@@ -777,7 +909,8 @@ PackEnsureResult harvest_embedded_toolchain(const Paths& paths, const Title& tit
         fs::is_directory(emb_raw, ec) && toolchain_looks_usable(unwrap_single_subdir(emb_raw));
 
     // Reuse any already-cached pack for this id (shared across titles).
-    const fs::path cached = find_cached_toolchain(paths, pack_id);
+    const fs::path cached =
+        find_cached_toolchain(paths, pack_id, title.build.toolchain.min_version);
     if (!cached.empty()) {
         if (have_embedded) prune_embedded_toolchain(src_root);
         r.ok = true;
@@ -794,6 +927,11 @@ PackEnsureResult harvest_embedded_toolchain(const Paths& paths, const Title& tit
 
     const fs::path emb = unwrap_single_subdir(emb_raw);
     std::string ver = read_toolchain_version(emb);
+    if (!version_satisfies(ver.empty() ? src_tag : ver, title.build.toolchain.min_version)) {
+        r.message = "embedded toolchain version too old (need >= " +
+                    title.build.toolchain.min_version + ")";
+        return r;
+    }
     if (ver.empty()) ver = src_tag.empty() ? "embedded" : src_tag;
     const std::string safe = sanitize_tag(ver);
     ensure_dirs(paths);
@@ -1038,12 +1176,30 @@ PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, boo
         return r;
     }
 
+    // Prefer any already-cached pack that meets min_version (shared across titles).
+    if (toolchain && !pack.min_version.empty()) {
+        const fs::path cached = find_cached_toolchain(paths, pack.id, pack.min_version);
+        if (!cached.empty()) {
+            r.ok = true;
+            r.root = cached;
+            r.tag = cached.filename().string();
+            r.message = "pack cached: " + r.root.string();
+            return r;
+        }
+    }
+
     progress(on_progress, std::string("Fetching ") + pack.id + " pack…");
     GhRelease rel;
     std::string err;
     if (!fetch_latest_release(pack.github, rel, &err, /*allow_prerelease=*/true)) {
         r.message = "pack release: " + err +
                     " (set RETCOMM_TOOLCHAIN_DIR / RETCOMM_SDK_DIR for offline packs)";
+        return r;
+    }
+    if (toolchain && !pack.min_version.empty() &&
+        !version_satisfies(rel.tag, pack.min_version)) {
+        r.message = "latest " + pack.id + " release " + rel.tag +
+                    " is older than min_version " + pack.min_version;
         return r;
     }
     const GhAsset* asset = pick_asset(rel, glob);
@@ -1057,11 +1213,25 @@ PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, boo
     const fs::path dest = base / pack.id / tag;
     const fs::path stamp = dest / ".retcomm-pack.json";
     if (fs::is_regular_file(stamp, ec) && fs::is_directory(dest, ec)) {
-        r.ok = true;
-        r.root = unwrap_single_subdir(dest);
-        r.tag = rel.tag;
-        r.message = "pack cached: " + r.root.string();
-        return r;
+        const fs::path root = unwrap_single_subdir(dest);
+        if (toolchain) {
+            const std::string ver = read_toolchain_version(root);
+            if (!version_satisfies(ver.empty() ? rel.tag : ver, pack.min_version)) {
+                // Stale cache entry — re-download below.
+            } else {
+                r.ok = true;
+                r.root = root;
+                r.tag = rel.tag;
+                r.message = "pack cached: " + r.root.string();
+                return r;
+            }
+        } else {
+            r.ok = true;
+            r.root = root;
+            r.tag = rel.tag;
+            r.message = "pack cached: " + r.root.string();
+            return r;
+        }
     }
 
     ensure_dirs(paths);
@@ -1108,8 +1278,16 @@ PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, boo
     }
     fs::remove(download, ec);
 
-    r.ok = true;
     r.root = unwrap_single_subdir(dest);
+    if (toolchain && !pack.min_version.empty()) {
+        const std::string ver = read_toolchain_version(r.root);
+        if (!version_satisfies(ver.empty() ? rel.tag : ver, pack.min_version)) {
+            r.message = "installed " + pack.id + " " + rel.tag +
+                        " does not meet min_version " + pack.min_version;
+            return r;
+        }
+    }
+    r.ok = true;
     r.tag = rel.tag;
     r.message = "installed pack " + pack.id + " " + rel.tag;
     return r;
@@ -1312,28 +1490,47 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
         return result;
     }
 
-    // Toolchain: prefer game-zip toolchain/ (promote to shared cache + prune),
-    // then RETCOMM_TOOLCHAIN_DIR / catalog download fallback.
+    // Toolchain: RETCOMM_TOOLCHAIN_DIR / opts override, then catalog download
+    // into the shared cache, then optional harvest of legacy zip toolchain/.
     PackEnsureResult tc;
     if (!opts.toolchain_dir.empty()) {
         tc = ensure_pack(paths, title.build.toolchain, true, opts.toolchain_dir, opts.on_progress);
     } else {
-        progress(opts.on_progress, "Resolving portable toolchain…", 0.015f);
-        tc = harvest_embedded_toolchain(paths, title, src.root, src.tag);
-        if (tc.ok) {
-            progress(opts.on_progress, tc.message, 0.02f);
-        } else if (!title.build.toolchain.id.empty() && !title.build.toolchain.github.empty() &&
-                   !title.build.toolchain.asset_glob_for_host().empty()) {
-            progress(opts.on_progress,
-                     "No embedded toolchain (" + tc.message + ") — fetching toolchain pack…",
-                     0.02f);
+        const bool can_download =
+            !title.build.toolchain.id.empty() && !title.build.toolchain.github.empty() &&
+            !title.build.toolchain.asset_glob_for_host().empty();
+        if (can_download) {
+            progress(opts.on_progress, "Ensuring portable toolchain pack…", 0.015f);
             tc = ensure_pack(paths, title.build.toolchain, true, {}, opts.on_progress);
+            if (tc.ok) {
+                // Drop any leftover per-title copy from older embedded zips.
+                prune_embedded_toolchain(src.root);
+            }
+        }
+        if (!tc.ok) {
+            progress(opts.on_progress,
+                     can_download ? ("Toolchain download unavailable (" + tc.message +
+                                     ") — trying embedded toolchain/…")
+                                  : "Resolving embedded toolchain/…",
+                     0.018f);
+            const PackEnsureResult harvested =
+                harvest_embedded_toolchain(paths, title, src.root, src.tag);
+            if (harvested.ok) {
+                tc = harvested;
+                progress(opts.on_progress, tc.message, 0.02f);
+            } else if (tc.message.empty()) {
+                tc = harvested;
+            } else {
+                tc.message += "; harvest: " + harvested.message;
+            }
+        } else {
+            progress(opts.on_progress, tc.message, 0.02f);
         }
     }
     if (!tc.ok) {
         result.message = tc.message.empty()
-                             ? "toolchain missing (game zip should embed toolchain/, "
-                               "or set build.toolchain / RETCOMM_TOOLCHAIN_DIR)"
+                             ? "toolchain missing (set build.toolchain to download "
+                               "cmake-clang-v1, or RETCOMM_TOOLCHAIN_DIR / offline zip)"
                              : tc.message;
         return result;
     }
@@ -1387,7 +1584,8 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
     const fs::path cli = find_sdk_cli(sdk.root);
     if (cli.empty()) {
         result.message = "SDK CLI not found under " + sdk.root.string() +
-                         " (expected snesrecomp_cli.py / psxrecomp_cli.py or retcomm-sdk.json)";
+                         " (expected snesrecomp_cli.py / psxrecomp_cli.py / "
+                         "gbarecomp_cli.py or retcomm-sdk.json)";
         return result;
     }
 
@@ -1508,6 +1706,33 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
             if (!opts.use_openbios && !opts.bios_path.empty()) {
                 gen_args.push_back("--bios");
                 gen_args.push_back(opts.bios_path.string());
+            }
+        } else if (engine == "gbarecomp") {
+            const std::string cfg =
+                title.build.generate.config.empty()
+                    ? "variants/emerald/symbols/emerald_usa.toml"
+                    : title.build.generate.config;
+            const std::string out =
+                title.build.generate.out_dir.empty()
+                    ? "variants/emerald/generated"
+                    : title.build.generate.out_dir;
+            gen_args.push_back("--config");
+            gen_args.push_back(cfg);
+            gen_args.push_back("--project-root");
+            gen_args.push_back(src.root.string());
+            gen_args.push_back("--rom");
+            gen_args.push_back(opts.rom_path.string());
+            gen_args.push_back("--out-dir");
+            gen_args.push_back(out);
+            gen_args.push_back("--json-progress");
+            if (!opts.bios_path.empty()) {
+                gen_args.push_back("--bios");
+                gen_args.push_back(opts.bios_path.string());
+            }
+            const std::string sha1 = first_digest(title.rom_identity.sha1);
+            if (!sha1.empty()) {
+                gen_args.push_back("--expected-sha1");
+                gen_args.push_back(sha1);
             }
         } else {
             gen_args.push_back("--rom");

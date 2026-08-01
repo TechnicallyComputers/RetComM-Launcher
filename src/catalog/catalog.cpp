@@ -147,6 +147,7 @@ Title parse_title(const json& j) {
         auto parse_pack = [](const json& p, TitleBuildPack& out) {
             out.id = p.value("id", "");
             out.github = p.value("github", "");
+            out.min_version = p.value("min_version", "");
             if (p.contains("asset_glob") && p.at("asset_glob").is_object()) {
                 const auto& g = p.at("asset_glob");
                 out.asset_glob_linux = g.value("linux", "");

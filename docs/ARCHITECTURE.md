@@ -79,8 +79,9 @@ When catalog `build.enabled` is set, Hub **Build & Install** / `retcomm install`
    `RETCOMM_SDK_DIR` overrides). Toolchains come from
    `TechnicallyComputers/retcomm-toolchains` (`cmake-clang-v1`).
 3. Fetch game source zipball at `build.source.ref` (or `RETCOMM_SOURCE_DIR`).
-4. Run SDK CLI `generate --json-progress` (`snesrecomp_cli.py` or
-   `psxrecomp_cli.py` per `build.generate.engine` / platform).
+4. Run SDK CLI `generate --json-progress` (`snesrecomp_cli.py`,
+   `psxrecomp_cli.py`, or `gbarecomp_cli.py` per `build.generate.engine` /
+   platform).
 5. `cmake -S … -B …` then `cmake --build --target …`.
 6. Stage binary + `assets/` into `releases/build-<ref>/` and link `current`.
 
