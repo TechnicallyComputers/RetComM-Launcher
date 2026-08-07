@@ -39,8 +39,9 @@ CLI / (future) ImGui hub
    Reuse hashes from `library-index.json` when `path+size+mtime` is unchanged.
    `scan --full` / hub Full Rescan ignores the cache and rebuilds the index.
 4. Join: file hash ∈ title identity → **ready** / **installable**. Prefer `.cue`
-   / cart dumps over `.iso` for launch staging. Hashed disc dumps also promote
-   a companion `.cue` (same stem or `FILE` reference) into the index.
+   / cart dumps for launch staging. Hashed `.bin` dumps promote a companion
+   `.cue` (same stem or `FILE` reference). `.iso`/`.chd` are rejected for PSX
+   (cannot reliably expand to multi-track Redump).
 5. Persist matches to the library index; `launch` reads preferred ROM path
    without rescanning (disc titles prefer companion `.cue`).
 6. Surface matches in `scan` / `library` / (later) hub UI.

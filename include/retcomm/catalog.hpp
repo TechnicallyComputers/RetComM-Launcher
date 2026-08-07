@@ -25,6 +25,11 @@ struct RomIdentity {
     // Suggested basenames for the hub UI when unmatched (No-Intro / Redump).
     // Display / RomM search hints — not used for hard matching.
     std::vector<std::string> filenames;
+    // Exact cue TRACK counts (e.g. MotK Redump = {17}). Empty = no TOC gate.
+    // Digests prove the data track; this rejects Track-01-only mounts.
+    std::vector<int> track_counts;
+    // Prefer/require a .cue bind (set for multi-track titles).
+    bool require_cue = false;
 };
 
 // Host firmware / BIOS required by some titles (e.g. psxrecomp SCPH1001).

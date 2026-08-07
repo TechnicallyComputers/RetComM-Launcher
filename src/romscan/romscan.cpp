@@ -286,7 +286,7 @@ void walk_platform_root(const fs::path& root, const std::string& platform,
         return;
     }
 
-    // Smaller dumps first (MotK .bin before .iso) so we can early-out on match.
+    // Smaller dumps first (.bin before large leftovers) so we can early-out.
     std::sort(to_hash.begin(), to_hash.end(), [](const fs::path& a, const fs::path& b) {
         std::error_code ea, eb;
         const auto sa = fs::file_size(a, ea);
@@ -361,6 +361,7 @@ void match_titles(const Catalog& catalog, ScanResult& result) {
                 by = "sha256";
             }
             if (!hit) continue;
+            if (!rom_identity_toc_ok(t.rom_identity, rf.path)) continue;
             m.all_paths.push_back(rf.path);
             if (m.matched_by.empty()) m.matched_by = by;
         }

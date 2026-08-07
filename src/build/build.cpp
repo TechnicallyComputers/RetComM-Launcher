@@ -1,6 +1,7 @@
 #include "retcomm/build.hpp"
 #include "retcomm/http.hpp"
 #include "retcomm/library_index.hpp"
+#include "retcomm/toolchain_env.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -33,6 +34,18 @@ using nlohmann::json;
 void progress(const BuildProgressFn& fn, const std::string& msg, float frac = -1.0f) {
     if (fn) fn(msg, frac);
     std::cerr << msg << "\n";
+}
+
+// Mirror retcomm-toolchains install.sh: latest pointer + idempotent user PATH.
+void maybe_publish_toolchain_path(const Paths& paths, const std::string& pack_id,
+                                  bool toolchain, PackEnsureResult& r) {
+    if (!toolchain || !r.ok || r.root.empty()) return;
+    const std::string id = pack_id.empty() ? "cmake-clang-v1" : pack_id;
+    std::string note;
+    if (publish_toolchain_user_env(paths, id, r.root, &note) && !note.empty()) {
+        if (!r.message.empty()) r.message += "; ";
+        r.message += note;
+    }
 }
 
 std::string to_lower(std::string s) {
@@ -917,6 +930,7 @@ PackEnsureResult harvest_embedded_toolchain(const Paths& paths, const Title& tit
         r.root = cached;
         r.tag = cached.filename().string();
         r.message = "using cached toolchain " + r.root.string();
+        maybe_publish_toolchain_path(paths, pack_id, /*toolchain=*/true, r);
         return r;
     }
 
@@ -974,6 +988,7 @@ PackEnsureResult harvest_embedded_toolchain(const Paths& paths, const Title& tit
     r.root = unwrap_single_subdir(dest);
     r.tag = ver;
     r.message = "harvested toolchain into " + r.root.string();
+    maybe_publish_toolchain_path(paths, pack_id, /*toolchain=*/true, r);
     return r;
 }
 
@@ -1142,7 +1157,8 @@ std::string first_digest(const std::vector<std::string>& v) {
 } // namespace
 
 PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, bool toolchain,
-                             const fs::path& override_dir, BuildProgressFn on_progress) {
+                             const fs::path& override_dir, BuildProgressFn on_progress,
+                             bool force) {
     PackEnsureResult r;
     std::error_code ec;
 
@@ -1154,7 +1170,7 @@ PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, boo
             if (const char* e = std::getenv("RETCOMM_SDK_DIR")) ov = e;
         }
     }
-    if (!ov.empty()) {
+    if (!ov.empty() && !force) {
         if (!fs::is_directory(ov, ec)) {
             r.message = "override pack dir missing: " + ov.string();
             return r;
@@ -1163,6 +1179,7 @@ PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, boo
         r.root = unwrap_single_subdir(ov);
         r.tag = "override";
         r.message = "using override pack at " + r.root.string();
+        maybe_publish_toolchain_path(paths, pack.id, toolchain, r);
         return r;
     }
 
@@ -1177,13 +1194,14 @@ PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, boo
     }
 
     // Prefer any already-cached pack that meets min_version (shared across titles).
-    if (toolchain && !pack.min_version.empty()) {
+    if (!force && toolchain && !pack.min_version.empty()) {
         const fs::path cached = find_cached_toolchain(paths, pack.id, pack.min_version);
         if (!cached.empty()) {
             r.ok = true;
             r.root = cached;
             r.tag = cached.filename().string();
             r.message = "pack cached: " + r.root.string();
+            maybe_publish_toolchain_path(paths, pack.id, toolchain, r);
             return r;
         }
     }
@@ -1212,7 +1230,7 @@ PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, boo
     const std::string tag = sanitize_tag(rel.tag);
     const fs::path dest = base / pack.id / tag;
     const fs::path stamp = dest / ".retcomm-pack.json";
-    if (fs::is_regular_file(stamp, ec) && fs::is_directory(dest, ec)) {
+    if (!force && fs::is_regular_file(stamp, ec) && fs::is_directory(dest, ec)) {
         const fs::path root = unwrap_single_subdir(dest);
         if (toolchain) {
             const std::string ver = read_toolchain_version(root);
@@ -1223,6 +1241,7 @@ PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, boo
                 r.root = root;
                 r.tag = rel.tag;
                 r.message = "pack cached: " + r.root.string();
+                maybe_publish_toolchain_path(paths, pack.id, toolchain, r);
                 return r;
             }
         } else {
@@ -1290,6 +1309,7 @@ PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, boo
     r.ok = true;
     r.tag = rel.tag;
     r.message = "installed pack " + pack.id + " " + rel.tag;
+    maybe_publish_toolchain_path(paths, pack.id, toolchain, r);
     return r;
 }
 
@@ -2003,6 +2023,63 @@ InstallResult update_title_auto(const Paths& paths, const Title& title,
         return build_title(paths, title, b);
     }
     return update_title(paths, title, install_opts);
+}
+
+ToolchainUpdateInfo check_toolchain_update(const Paths& paths, const std::string& pack_id,
+                                           const std::string& github) {
+    ToolchainUpdateInfo info;
+    info.pack_id = pack_id.empty() ? "cmake-clang-v1" : pack_id;
+    const std::string repo =
+        github.empty() ? "TechnicallyComputers/retcomm-toolchains" : github;
+
+    const fs::path cached = find_cached_toolchain(paths, info.pack_id, {});
+    if (!cached.empty()) {
+        info.installed = true;
+        info.current_version = read_toolchain_version(cached);
+        if (info.current_version.empty())
+            info.current_version = cached.filename().string();
+    }
+
+    GhRelease rel;
+    std::string err;
+    if (!fetch_latest_release(repo, rel, &err, /*allow_prerelease=*/true)) {
+        info.message = "toolchain update check failed: " + err;
+        return info;
+    }
+    info.ok = true;
+    info.latest_tag = rel.tag;
+    std::string latest_ver = rel.tag;
+    // Prefer comparing against pack JSON semantics (strip leading v).
+    while (!latest_ver.empty() && (latest_ver.front() == 'v' || latest_ver.front() == 'V'))
+        latest_ver.erase(latest_ver.begin());
+
+    if (!info.installed) {
+        info.update_available = false;
+        info.message = "toolchain not installed (latest " + info.latest_tag + ")";
+        return info;
+    }
+
+    const std::string have = info.current_version;
+    info.update_available = version_cmp(have, latest_ver) < 0;
+    if (info.update_available) {
+        info.message = "toolchain update available: " + have + " → " + info.latest_tag;
+    } else {
+        info.message = "toolchain up to date (" + have + ")";
+    }
+    return info;
+}
+
+PackEnsureResult update_toolchain_to_latest(const Paths& paths, BuildProgressFn on_progress,
+                                            const std::string& pack_id,
+                                            const std::string& github) {
+    TitleBuildPack pack;
+    pack.id = pack_id.empty() ? "cmake-clang-v1" : pack_id;
+    pack.github = github.empty() ? "TechnicallyComputers/retcomm-toolchains" : github;
+    pack.asset_glob_linux = "*cmake-clang-v1*linux*";
+    pack.asset_glob_windows = "*cmake-clang-v1*windows*";
+    pack.asset_glob_macos = "*cmake-clang-v1*macos*";
+    pack.min_version.clear();
+    return ensure_pack(paths, pack, /*toolchain=*/true, {}, on_progress, /*force=*/true);
 }
 
 } // namespace retcomm

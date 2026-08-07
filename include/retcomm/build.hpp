@@ -38,11 +38,33 @@ struct PackEnsureResult {
     std::string message;
 };
 
+struct ToolchainUpdateInfo {
+    bool ok = false;
+    bool installed = false;
+    bool update_available = false;
+    std::string pack_id = "cmake-clang-v1";
+    std::string current_version;
+    std::string latest_tag;
+    std::string message;
+};
+
 // Resolve or download a release asset pack into toolchains/ or sdks/.
+// When force is true, re-download even if a matching cache entry exists.
 PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack,
                              bool toolchain /* true → toolchains_dir */,
                              const fs::path& override_dir = {},
-                             BuildProgressFn on_progress = {});
+                             BuildProgressFn on_progress = {}, bool force = false);
+
+// Compare shared-cache cmake-clang-v1 (or pack_id) to GitHub /releases/latest.
+ToolchainUpdateInfo check_toolchain_update(
+    const Paths& paths, const std::string& pack_id = "cmake-clang-v1",
+    const std::string& github = "TechnicallyComputers/retcomm-toolchains");
+
+// Download + install the latest toolchain pack (force), then refresh PATH/latest.
+PackEnsureResult update_toolchain_to_latest(
+    const Paths& paths, BuildProgressFn on_progress = {},
+    const std::string& pack_id = "cmake-clang-v1",
+    const std::string& github = "TechnicallyComputers/retcomm-toolchains");
 
 // Fetch GitHub source zipball into apps/<install>/src/<ref>/ (or override).
 PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,

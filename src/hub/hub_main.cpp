@@ -1170,13 +1170,31 @@ void draw_sidebar_actions(HubModel& hub, const Theme& th) {
     ImGui::Separator();
     ImGui::Dummy(ImVec2(0, 4));
     if (ImGui::Button("Update RetComM", ImVec2(-1, 0))) hub.start_job(HubJob::SelfUpdate);
-    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
     {
-        std::string ver = hub.launcher_version;
-        if (ver.empty()) ver = retcomm::retcomm_installed_tag(hub.paths);
-        ImGui::TextWrapped("Launcher %s", ver.c_str());
+        bool tc_upd = false;
+        std::string tc_line;
+        {
+            std::lock_guard<std::mutex> lock(hub.mu);
+            tc_upd = hub.toolchain_update_available;
+            tc_line = hub.toolchain_status;
+            if (tc_line.empty() && !hub.toolchain_current_version.empty())
+                tc_line = "Toolchain " + hub.toolchain_current_version;
+        }
+        if (tc_upd) {
+            if (accent_button("Update Toolchain", th, ImVec2(-1, 0)))
+                hub.start_job(HubJob::UpdateToolchain);
+        } else if (ImGui::Button("Update Toolchain", ImVec2(-1, 0))) {
+            hub.start_job(HubJob::UpdateToolchain);
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        {
+            std::string ver = hub.launcher_version;
+            if (ver.empty()) ver = retcomm::retcomm_installed_tag(hub.paths);
+            ImGui::TextWrapped("Launcher %s", ver.c_str());
+            if (!tc_line.empty()) ImGui::TextWrapped("%s", tc_line.c_str());
+        }
+        ImGui::PopStyleColor();
     }
-    ImGui::PopStyleColor();
     ImGui::EndDisabled();
 
     ImGui::Dummy(ImVec2(0, 8));
@@ -1352,6 +1370,8 @@ int main(int argc, char** argv) {
     }
     // After a real catalog download, pull covers for titles missing from cache.
     if (catalog_updated) hub.start_job(HubJob::FetchBoxart);
+    // Defer toolchain update check until the hub is idle (after catalog boxart job).
+    hub.pending_startup_toolchain_check = true;
 
     retcomm::hub::BoxartCache boxart;
     bool running = true;
@@ -1367,6 +1387,11 @@ int main(int argc, char** argv) {
         if (hub.request_exit.load()) running = false;
 
         hub.apply_pending_folder_pick();
+
+        if (hub.pending_startup_toolchain_check && !hub.job_running.load()) {
+            hub.pending_startup_toolchain_check = false;
+            hub.start_job(HubJob::CheckToolchainUpdate);
+        }
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
@@ -1422,6 +1447,39 @@ int main(int argc, char** argv) {
         draw_log_splitter(log_h, avail_y, th);
         draw_log(hub, th, log_h);
         draw_setup_wizard(hub, th, window);
+
+        if (hub.toolchain_prompt_pending.exchange(false))
+            ImGui::OpenPopup("Toolchain update###toolchain_update");
+        if (ImGui::BeginPopupModal("Toolchain update###toolchain_update", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            std::string cur, latest;
+            {
+                std::lock_guard<std::mutex> lock(hub.mu);
+                cur = hub.toolchain_current_version;
+                latest = hub.toolchain_latest_tag;
+            }
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 380.f);
+            ImGui::TextWrapped(
+                "A newer portable toolchain (cmake-clang-v1) is available.\n\n"
+                "Installed: %s\nLatest: %s\n\n"
+                "Update now? Builds that use the shared RetComM toolchain cache "
+                "will pick up the new pack.",
+                cur.empty() ? "?" : cur.c_str(),
+                latest.empty() ? "?" : latest.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::Dummy(ImVec2(0, 10));
+            const bool busy = hub.job_running.load();
+            ImGui::BeginDisabled(busy);
+            if (accent_button("Update Toolchain", th, ImVec2(160, 0))) {
+                hub.start_job(HubJob::UpdateToolchain);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Later", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+            ImGui::EndDisabled();
+            ImGui::EndPopup();
+        }
+
         ImGui::End();
 
         ImGui::Render();

@@ -70,6 +70,13 @@ int rom_path_rank(const std::string& ext);
 // Same-stem sibling .cue, else a sheet whose FILE "…" basename matches the dump.
 fs::path companion_cue_for_disc_dump(const fs::path& dump_path);
 
+// Count TRACK lines in a .cue sheet (0 if unreadable / not a cue).
+int count_cue_tracks(const fs::path& cue_path);
+
+// After a digest hit: enforce rom_identity.track_counts / require_cue.
+// Resolves companion .cue for .bin/.iso dumps. True when policy is empty or met.
+bool rom_identity_toc_ok(const RomIdentity& id, const fs::path& matched_path);
+
 std::int64_t file_mtime_sec(const fs::path& path);
 
 } // namespace retcomm

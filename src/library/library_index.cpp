@@ -71,7 +71,9 @@ std::string lower_ext_str(const std::string& path) {
 }
 
 bool is_disc_dump_ext(const std::string& ext) {
-    return ext == ".bin" || ext == ".iso" || ext == ".img";
+    // Track images only — .iso/.chd are not accepted for multi-track PSX
+    // (cannot reliably expand to a Redump cue + bins).
+    return ext == ".bin" || ext == ".img";
 }
 
 // Prefer same-stem sibling .cue; else any sheet whose FILE "..." BINARY
@@ -182,11 +184,61 @@ fs::path companion_cue_for_disc_dump(const fs::path& dump_path) {
     return companion_cue_path(dump_path);
 }
 
+int count_cue_tracks(const fs::path& cue_path) {
+    std::error_code ec;
+    if (cue_path.empty() || !fs::is_regular_file(cue_path, ec)) return 0;
+    if (lower_ext_str(cue_path) != ".cue") return 0;
+    std::ifstream in(cue_path);
+    if (!in) return 0;
+    int tracks = 0;
+    std::string line;
+    while (std::getline(in, line)) {
+        size_t i = 0;
+        while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+        if (line.size() - i < 5) continue;
+        if (line.compare(i, 5, "TRACK") != 0) continue;
+        const size_t after = i + 5;
+        if (after < line.size() && std::isalnum(static_cast<unsigned char>(line[after])))
+            continue;
+        ++tracks;
+    }
+    return tracks;
+}
+
+bool rom_identity_toc_ok(const RomIdentity& id, const fs::path& matched_path) {
+    const std::string ext = lower_ext_str(matched_path);
+    // Never accept cooked ISO / CHD for disc identity (no reliable multi-track).
+    if (ext == ".iso" || ext == ".chd") return false;
+
+    if (id.track_counts.empty() && !id.require_cue) return true;
+
+    fs::path cue = matched_path;
+    if (ext != ".cue") {
+        if (is_disc_dump_ext(ext))
+            cue = companion_cue_path(matched_path);
+        else
+            cue.clear();
+    }
+    if (cue.empty()) {
+        // No cue available — fail when policy requires one or an exact track count.
+        return id.track_counts.empty() && !id.require_cue;
+    }
+    if (id.track_counts.empty()) return true; // require_cue alone: cue present is enough
+
+    const int n = count_cue_tracks(cue);
+    if (n < 1) return false;
+    for (int want : id.track_counts) {
+        if (want == n) return true;
+    }
+    return false;
+}
+
 int rom_path_rank(const std::string& ext) {
     if (ext == ".cue") return 0;
     if (ext == ".sfc" || ext == ".z64" || ext == ".gba" || ext == ".md") return 1;
     if (ext == ".bin" || ext == ".gen" || ext == ".smd") return 2;
     if (ext == ".smc" || ext == ".n64" || ext == ".v64") return 3;
+    // .iso/.chd intentionally ranked last and rejected by rom_identity_toc_ok.
     if (ext == ".chd") return 4;
     if (ext == ".iso") return 5;
     return 9;

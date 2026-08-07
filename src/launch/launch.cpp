@@ -69,9 +69,14 @@ fs::path prefer_media_path(const Title& title, fs::path media) {
 
     if (is_disc_platform(title.platform)) {
         const std::string ext = lower_ext(media);
-        if (ext == ".bin" || ext == ".iso" || ext == ".img") {
+        // .iso/.chd cannot become multi-track Redump dumps — refuse.
+        if (ext == ".iso" || ext == ".chd") return {};
+        if (ext == ".bin" || ext == ".img") {
             const fs::path cue = companion_cue_for_disc_dump(media);
             if (!cue.empty() && fs::is_regular_file(cue, ec)) return cue;
+            if (title.rom_identity.require_cue ||
+                !title.rom_identity.track_counts.empty())
+                return {};
         }
     }
     return media;

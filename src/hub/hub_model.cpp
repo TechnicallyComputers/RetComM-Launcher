@@ -674,10 +674,65 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
             case HubJob::CheckUpdates: {
                 set_status("Checking updates…");
                 refresh_rows(true);
+                {
+                    auto tc = check_toolchain_update(paths);
+                    append_log(tc.message);
+                    std::lock_guard<std::mutex> lock(mu);
+                    toolchain_current_version = tc.current_version;
+                    toolchain_latest_tag = tc.latest_tag;
+                    toolchain_update_available = tc.update_available;
+                    toolchain_status = tc.message;
+                    if (tc.update_available) toolchain_prompt_pending.store(true);
+                }
                 set_status("Update check complete");
                 job_running = false;
                 job = HubJob::None;
                 return;
+            }
+            case HubJob::CheckToolchainUpdate: {
+                set_status("Checking toolchain updates…");
+                auto tc = check_toolchain_update(paths);
+                append_log(tc.message);
+                {
+                    std::lock_guard<std::mutex> lock(mu);
+                    toolchain_current_version = tc.current_version;
+                    toolchain_latest_tag = tc.latest_tag;
+                    toolchain_update_available = tc.update_available;
+                    toolchain_status = tc.message;
+                    if (tc.update_available) toolchain_prompt_pending.store(true);
+                }
+                if (tc.update_available)
+                    set_status("Toolchain update available (" + tc.current_version + " → " +
+                               tc.latest_tag + ")");
+                else if (tc.ok)
+                    set_status(tc.installed ? ("Toolchain up to date (" + tc.current_version + ")")
+                                            : "No toolchain installed yet");
+                else
+                    set_status("Toolchain update check failed");
+                break;
+            }
+            case HubJob::UpdateToolchain: {
+                set_status("Updating portable toolchain…");
+                append_log("Toolchain update: fetching latest cmake-clang-v1…");
+                auto ur = update_toolchain_to_latest(
+                    paths, [this](const std::string& msg, float) {
+                        set_status(msg);
+                        append_log(msg);
+                    });
+                append_log(ur.message);
+                if (ur.ok) {
+                    auto tc = check_toolchain_update(paths);
+                    std::lock_guard<std::mutex> lock(mu);
+                    toolchain_current_version = tc.current_version.empty() ? ur.tag
+                                                                          : tc.current_version;
+                    toolchain_latest_tag = tc.latest_tag;
+                    toolchain_update_available = false;
+                    toolchain_status = "toolchain " + toolchain_current_version;
+                    set_status("Toolchain updated (" + toolchain_current_version + ")");
+                } else {
+                    set_status("Toolchain update failed");
+                }
+                break;
             }
             case HubJob::FetchBoxart: {
                 fetch_boxart_for_catalog(force_boxart);

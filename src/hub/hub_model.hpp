@@ -40,6 +40,8 @@ enum class HubJob : int {
     SyncRommStates,
     SelfUpdate,
     RefreshCatalog,
+    CheckToolchainUpdate,
+    UpdateToolchain,
 };
 
 struct TitleRow {
@@ -239,6 +241,14 @@ struct HubModel {
     bool job_force_boxart = false; // FetchBoxart: re-download even when cached
     std::thread worker;
     std::string launcher_version; // display: installed/current tag
+
+    // Shared cmake-clang-v1 toolchain update prompt (launch / Check Updates).
+    std::atomic<bool> toolchain_prompt_pending{false};
+    bool pending_startup_toolchain_check = false;
+    std::string toolchain_current_version;
+    std::string toolchain_latest_tag;
+    std::string toolchain_status; // short UI line
+    bool toolchain_update_available = false;
 
     // Native folder picker (SDL_ShowOpenFolderDialog) — apply on main thread.
     std::mutex folder_pick_mu;

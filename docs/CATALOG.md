@@ -76,6 +76,8 @@ Title manifests may still set `bios_identity` to override the default, or
 | `rom_identity.disc_serials` | string[] | PSX/etc, e.g. `"SLUS-00562"` |
 | `rom_identity.sizes` | number[] | Optional byte lengths; when set, scan only hashes files of those sizes (disc dumps) |
 | `rom_identity.filenames` | string[] | Suggested basenames for the hub when unmatched (No-Intro / Redump); search hints, not hard matching |
+| `rom_identity.track_counts` | number[] | Optional exact cue TRACK counts (multi-track PSX); empty = no TOC gate |
+| `rom_identity.require_cue` | bool | Require a `.cue` bind (implied when any track_counts entry is > 1). PSX: `.cue`/`.bin` only — no `.iso`/`.chd` |
 | `rom_extensions` | string[] | Scan filter, e.g. `[".sfc",".smc"]` |
 | `bios_identity` | object | Optional host BIOS / firmware the title needs |
 | `bios_identity.required` | bool | Default `true` when object present |
@@ -128,7 +130,9 @@ subset without schema churn:
   "sha256": [],
   "disc_serials": [],
   "sizes": [],
-  "filenames": ["Game Name (USA).z64"]
+  "filenames": ["Game Name (USA).z64"],
+  "track_counts": [],
+  "require_cue": false
 }
 ```
 

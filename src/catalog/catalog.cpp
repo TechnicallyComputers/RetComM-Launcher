@@ -84,6 +84,23 @@ Title parse_title(const json& j) {
                     t.rom_identity.sizes.push_back(v.get<std::uint64_t>());
             }
         }
+        if (id.contains("track_counts") && id.at("track_counts").is_array()) {
+            for (const auto& v : id.at("track_counts")) {
+                if (v.is_number_unsigned() || v.is_number_integer()) {
+                    const int n = v.get<int>();
+                    if (n >= 1) t.rom_identity.track_counts.push_back(n);
+                }
+            }
+        }
+        t.rom_identity.require_cue = id.value("require_cue", false);
+        if (!t.rom_identity.require_cue) {
+            for (int n : t.rom_identity.track_counts) {
+                if (n > 1) {
+                    t.rom_identity.require_cue = true;
+                    break;
+                }
+            }
+        }
     }
 
     if (j.contains("bios_identity") && j.at("bios_identity").is_object())
