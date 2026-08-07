@@ -23,7 +23,7 @@
     "sync_boxart": false
   },
   "netplay": {
-    "lobby_url": "ws://netplay.technicallycomputers.ca:8765",
+    "lobby_url": "ws://netplay.retcomm.net:8765",
     "display_name": "",
     "prefer_ice": false
   }

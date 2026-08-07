@@ -26,7 +26,7 @@ struct NetplayConfig {
 
 // Built-in default when config.netplay.lobby_url is empty.
 inline constexpr const char* kDefaultNetplayLobbyUrl =
-    "ws://netplay.technicallycomputers.ca:8765";
+    "ws://netplay.retcomm.net:8765";
 
 // User config (~/.config/retcomm/config.json). RomM/ES-style library layout:
 //   <library_root>/<platform_folder>/...
