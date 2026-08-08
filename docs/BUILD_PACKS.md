@@ -46,9 +46,11 @@ cmake-clang-v1-<os>/
 RetComM prepends `<pack>/bin` (or the single nested folder’s `bin/`) to `PATH`
 for configure/build. Prefer **downloading** `cmake-clang-v1` from
 [TechnicallyComputers/retcomm-toolchains](https://github.com/TechnicallyComputers/retcomm-toolchains)
-into the shared cache (`RETCOMM_TOOLCHAIN_DIR` overrides). Optionally **harvest**
-a legacy game-zip `toolchain/` when download is unavailable, then prune the
-per-title copy.
+into the shared cache (`RETCOMM_TOOLCHAIN_DIR` overrides when the directory
+exists; a missing/stale override — e.g. broken `latest/` junction — falls
+through to cache/GitHub). Hub “Update toolchain” uses `force` so an outdated
+override cannot block a newer release. Optionally **harvest** a legacy game-zip
+`toolchain/` when download is unavailable, then prune the per-title copy.
 
 | OS asset | Notes |
 |----------|--------|

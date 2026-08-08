@@ -1484,16 +1484,19 @@ PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, boo
         }
     }
     if (!ov.empty() && !force) {
-        if (!fs::is_directory(ov, ec)) {
-            r.message = "override pack dir missing: " + ov.string();
+        if (fs::is_directory(ov, ec)) {
+            r.ok = true;
+            r.root = unwrap_single_subdir(ov);
+            r.tag = "override";
+            r.message = "using override pack at " + r.root.string();
+            maybe_publish_toolchain_path(paths, pack.id, toolchain, r);
             return r;
         }
-        r.ok = true;
-        r.root = unwrap_single_subdir(ov);
-        r.tag = "override";
-        r.message = "using override pack at " + r.root.string();
-        maybe_publish_toolchain_path(paths, pack.id, toolchain, r);
-        return r;
+        // Stale RETCOMM_TOOLCHAIN_DIR / RETCOMM_SDK_DIR (e.g. missing latest/
+        // junction) must not block downloads — fall through to cache/GitHub.
+        progress(on_progress,
+                 "override pack dir missing (" + ov.string() + "); fetching pack…");
+        ov.clear();
     }
 
     if (pack.id.empty() || pack.github.empty()) {
@@ -2483,8 +2486,9 @@ PackEnsureResult update_toolchain_to_latest(const Paths& paths, BuildProgressFn 
         return r;
     }
 
-    // Download only when missing or newer than cache (do not force-replace same tag).
-    return ensure_pack(paths, pack, /*toolchain=*/true, {}, on_progress, /*force=*/false);
+    // force=true so a present-but-stale RETCOMM_TOOLCHAIN_DIR (e.g. latest/ →
+    // 1.0.5 while GitHub is 1.0.6) cannot short-circuit the download.
+    return ensure_pack(paths, pack, /*toolchain=*/true, {}, on_progress, /*force=*/true);
 }
 
 } // namespace retcomm

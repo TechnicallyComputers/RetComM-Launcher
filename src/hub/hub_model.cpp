@@ -1244,6 +1244,7 @@ void HubModel::open_settings() {
 
 void HubModel::open_setup() {
     // Reuse the same draft buffers as Library / RomM settings.
+    // Pre-populate from existing config.json when present (e.g. reinstall).
     cfg = load_app_config(paths.config_path);
     copy_buf(settings.library_root, sizeof(settings.library_root), cfg.library_root.string());
     copy_buf(settings.bios_root, sizeof(settings.bios_root), cfg.bios_root.string());
@@ -1260,6 +1261,12 @@ void HubModel::open_setup() {
     show_settings = false;
     show_romm_settings = false;
     show_setup = true;
+}
+
+bool HubModel::complete_setup(std::string* error) {
+    if (!mark_hub_setup_completed(paths, exe_dir, error)) return false;
+    show_setup = false;
+    return true;
 }
 
 void HubModel::apply_pending_folder_pick() {

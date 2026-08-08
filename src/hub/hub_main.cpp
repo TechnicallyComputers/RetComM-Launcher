@@ -1544,8 +1544,10 @@ void draw_setup_wizard(HubModel& hub, const Theme& th, SDL_Window* window) {
         } else if (!hub.save_romm_settings(&err, /*refresh_boxart=*/false)) {
             hub.append_log("setup RomM save failed: " + err);
             hub.set_status("Setup RomM save failed");
+        } else if (!hub.complete_setup(&err)) {
+            hub.append_log("setup marker failed: " + err);
+            hub.set_status("Setup marker failed");
         } else {
-            hub.show_setup = false;
             hub.set_status("Setup complete");
             hub.append_log("First-time setup saved");
             // One background job at a time — scan ROMs; user can Scan BIOS after.
@@ -1555,9 +1557,14 @@ void draw_setup_wizard(HubModel& hub, const Theme& th, SDL_Window* window) {
     ImGui::EndDisabled();
     ImGui::SameLine();
     if (ImGui::Button("Skip for now", ImVec2(140, 0))) {
-        hub.show_setup = false;
-        hub.set_status("Setup skipped — set library root in Library settings");
-        hub.append_log("First-time setup skipped");
+        std::string err;
+        if (!hub.complete_setup(&err)) {
+            hub.append_log("setup marker failed: " + err);
+            hub.set_status("Setup marker failed");
+        } else {
+            hub.set_status("Setup skipped — set library root in Library settings");
+            hub.append_log("First-time setup skipped");
+        }
     }
     if (!library_ok) {
         ImGui::Dummy(ImVec2(0, 6));
@@ -1676,22 +1683,6 @@ void draw_romm_settings_panel(HubModel& hub, const Theme& th) {
 }
 
 
-ImVec4 log_level_color(retcomm::hub::LogLevel level, const Theme& th) {
-    switch (level) {
-    case retcomm::hub::LogLevel::Good:
-        return th.good;
-    case retcomm::hub::LogLevel::Warn:
-        return th.warn;
-    case retcomm::hub::LogLevel::Error:
-        return ImVec4(1.f, 0.40f, 0.42f, 1.f);
-    case retcomm::hub::LogLevel::Accent:
-        return th.focus;
-    case retcomm::hub::LogLevel::Info:
-    default:
-        return th.text_muted;
-    }
-}
-
 void draw_log(HubModel& hub, const Theme& th, float height) {
     if (height < 60.f) height = 60.f;
     ImGui::BeginChild("log", ImVec2(0, height), ImGuiChildFlags_Borders);
@@ -1713,29 +1704,55 @@ void draw_log(HubModel& hub, const Theme& th, float height) {
         const float copy_w = ImGui::CalcTextSize("Copy").x + ImGui::GetStyle().FramePadding.x * 2.f;
         const float right = ImGui::GetWindowContentRegionMax().x;
         ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), right - copy_w));
-        if (ImGui::SmallButton("Copy")) ImGui::SetClipboardText(plain.c_str());
+        if (ImGui::SmallButton("Copy")) {
+            // Tail only — recent errors/status matter more than early startup noise.
+            constexpr size_t kCopyLines = 100;
+            const size_t n = lines.size();
+            const size_t start = n > kCopyLines ? n - kCopyLines : 0;
+            std::string clip;
+            for (size_t i = start; i < n; ++i) {
+                if (!clip.empty()) clip.push_back('\n');
+                clip += lines[i].text;
+            }
+            ImGui::SetClipboardText(clip.empty() ? "(no activity yet)" : clip.c_str());
+        }
     }
     ImGui::Separator();
 
-    // Fill remaining panel height; colored lines scroll inside.
+    // Read-only multiline so users can drag-select / Ctrl+C. Outer child keeps
+    // stick-to-bottom scroll; the input is sized to full content (no nested scroll).
     ImGui::BeginChild("activity_scroll", ImVec2(0, 0), ImGuiChildFlags_None);
     static size_t prev_count = 0;
+    static std::vector<char> activity_buf;
+    static std::string activity_plain;
     const bool grew = lines.size() != prev_count;
-    prev_count = lines.size();
     const bool at_bottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 8.f;
+    prev_count = lines.size();
 
-    if (lines.empty()) {
-        ImGui::TextColored(th.text_muted, "(no activity yet)");
-    } else {
-        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + ImGui::GetContentRegionAvail().x);
-        for (size_t i = 0; i < lines.size(); ++i) {
-            const auto& e = lines[i];
-            ImGui::PushStyleColor(ImGuiCol_Text, log_level_color(e.level, th));
-            ImGui::TextUnformatted(e.text.c_str());
-            ImGui::PopStyleColor();
-        }
-        ImGui::PopTextWrapPos();
+    if (activity_plain != plain) {
+        activity_plain = plain;
+        activity_buf.assign(plain.begin(), plain.end());
+        activity_buf.push_back('\0');
     }
+
+    const float wrap_w = ImGui::GetContentRegionAvail().x;
+    const ImVec2 text_sz =
+        ImGui::CalcTextSize(activity_buf.data(), activity_buf.data() + activity_buf.size() - 1,
+                            false, wrap_w > 1.f ? wrap_w : 0.f);
+    const float pad_y = ImGui::GetStyle().FramePadding.y * 2.f;
+    const float box_h = std::max(text_sz.y + pad_y, ImGui::GetTextLineHeight() + pad_y);
+
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Text, lines.empty() ? th.text_muted : th.text);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.f, 0.f));
+    ImGui::InputTextMultiline(
+        "##activity_text", activity_buf.data(), activity_buf.size(), ImVec2(wrap_w, box_h),
+        ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_NoUndoRedo);
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor(4);
 
     if (grew && at_bottom) ImGui::SetScrollHereY(1.f);
     ImGui::EndChild();
@@ -1777,7 +1794,6 @@ void draw_log_splitter(float& log_h, float& log_h_pref, float avail_y, const The
 
 int main(int argc, char** argv) {
     (void)argc;
-    (void)argv;
 
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
@@ -1822,6 +1838,11 @@ int main(int argc, char** argv) {
 
     HubModel hub;
     hub.paths = retcomm::default_paths();
+    if (argc > 0 && argv[0] && argv[0][0] != '\0') {
+        std::error_code ec;
+        hub.exe_dir = fs::weakly_canonical(fs::path(argv[0]).parent_path(), ec);
+        if (ec || hub.exe_dir.empty()) hub.exe_dir = fs::path(argv[0]).parent_path();
+    }
     hub.cfg = retcomm::load_app_config(hub.paths.config_path);
     bool catalog_updated = false;
     try {
@@ -1849,7 +1870,9 @@ int main(int argc, char** argv) {
     }
     hub.launcher_version = retcomm::retcomm_app_version();
     hub.refresh_rows(false);
-    if (hub.cfg.library_root.empty()) {
+    // Install-scoped marker (not library_root): new installs always prompt;
+    // existing config.json still pre-fills the wizard via open_setup().
+    if (!retcomm::hub_setup_completed(hub.paths, hub.exe_dir)) {
         hub.open_setup();
         hub.set_status("First-time setup — choose your ROM library folder");
     } else {

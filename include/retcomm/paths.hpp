@@ -40,4 +40,11 @@ bool open_path_in_file_manager(const fs::path& path, std::string* error = nullpt
 // Open an http(s) URL in the default browser (xdg-open / open / ShellExecute).
 bool open_url_in_browser(const std::string& url, std::string* error = nullptr);
 
+// Hub first-run wizard marker (install-scoped). Prefer exe_dir/retcomm-setup.done
+// so a clean Windows reinstall re-prompts; fall back to data_dir when the exe
+// directory is not writable (e.g. some AppImage mounts).
+bool hub_setup_completed(const Paths& paths, const fs::path& exe_dir);
+bool mark_hub_setup_completed(const Paths& paths, const fs::path& exe_dir,
+                              std::string* error = nullptr);
+
 } // namespace retcomm

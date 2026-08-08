@@ -265,6 +265,7 @@ enum class LibraryNav : int {
 
 struct HubModel {
     Paths paths;
+    fs::path exe_dir; // directory containing retcomm-hub (install / portable root)
     AppConfig cfg;
     Catalog catalog;
     LibraryIndex library;
@@ -342,6 +343,8 @@ struct HubModel {
 
     void open_settings();
     void open_setup();
+    // Continue / Skip: write install setup marker so the wizard does not reappear.
+    bool complete_setup(std::string* error = nullptr);
     bool save_settings(std::string* error = nullptr);
     void add_platform_folder_row();
 

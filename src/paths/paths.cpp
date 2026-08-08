@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 
@@ -213,6 +214,68 @@ bool open_url_in_browser(const std::string& url, std::string* error) {
     }
     return true;
 #endif
+}
+
+namespace {
+
+constexpr const char* kHubSetupMarkerName = "retcomm-setup.done";
+
+fs::path hub_setup_marker_exe(const fs::path& exe_dir) {
+    if (exe_dir.empty()) return {};
+    return exe_dir / kHubSetupMarkerName;
+}
+
+// When the install dir is read-only, keep a single data-dir marker so AppImage /
+// system installs still only prompt once per machine profile.
+fs::path hub_setup_marker_data(const Paths& paths) {
+    return paths.data_dir / kHubSetupMarkerName;
+}
+
+bool path_is_regular_file(const fs::path& p) {
+    std::error_code ec;
+    return !p.empty() && fs::is_regular_file(p, ec);
+}
+
+bool try_write_marker(const fs::path& marker, std::string* error) {
+    if (marker.empty()) {
+        if (error) *error = "empty setup marker path";
+        return false;
+    }
+    std::error_code ec;
+    fs::create_directories(marker.parent_path(), ec);
+    if (ec) {
+        if (error) *error = "cannot create " + marker.parent_path().string() + ": " + ec.message();
+        return false;
+    }
+    std::ofstream out(marker, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        if (error) *error = "cannot write " + marker.string();
+        return false;
+    }
+    out << "ok\n";
+    return static_cast<bool>(out);
+}
+
+} // namespace
+
+bool hub_setup_completed(const Paths& paths, const fs::path& exe_dir) {
+    if (path_is_regular_file(hub_setup_marker_exe(exe_dir))) return true;
+    if (path_is_regular_file(hub_setup_marker_data(paths))) return true;
+    return false;
+}
+
+bool mark_hub_setup_completed(const Paths& paths, const fs::path& exe_dir, std::string* error) {
+    const fs::path exe_marker = hub_setup_marker_exe(exe_dir);
+    if (!exe_marker.empty() && try_write_marker(exe_marker, nullptr)) return true;
+
+    std::string err;
+    if (try_write_marker(hub_setup_marker_data(paths), &err)) return true;
+    if (error) {
+        *error = err.empty() ? "failed to write hub setup marker" : err;
+        if (!exe_marker.empty())
+            *error += " (also failed at " + exe_marker.string() + ")";
+    }
+    return false;
 }
 
 } // namespace retcomm

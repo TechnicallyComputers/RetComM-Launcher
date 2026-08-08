@@ -113,6 +113,12 @@ is the **canonical** native-save library (ES-DE / other frontend layout:
 `saves_root/<platform folder>/`). First-time setup also accepts optional RomM
 `base_url` + Client API token (same fields as RomM Sync Settings).
 
+The hub wizard runs when `retcomm-setup.done` is missing next to the binary
+(or under the data dir if the install dir is not writable)—not when
+`library_root` is empty—so a clean Windows reinstall re-prompts even if
+`%APPDATA%\retcomm\config.json` still has paths (those fields pre-fill the
+form). Continue / Skip writes the marker.
+
 Flow:
 
 1. **Promote** — install `current/saves/` and `preserved/` native files are
