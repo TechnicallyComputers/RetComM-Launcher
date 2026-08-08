@@ -104,6 +104,45 @@ struct UninstallResult {
 UninstallResult uninstall_title(const Paths& paths, const Title& title,
                                 const UninstallOptions& opts = {});
 
+// Path-based uninstall (orphans / renamed install dirs). When save_globs is
+// empty, uses the default saves/states/config patterns.
+UninstallResult uninstall_install_root(const Paths& paths, const fs::path& install_root,
+                                       const UninstallOptions& opts = {},
+                                       const std::string& display_id = {},
+                                       const std::vector<std::string>& save_globs = {});
+
+// Local apps/<dir> with no matching catalog title.install_dir_name.
+struct OrphanInstall {
+    fs::path install_root;
+    std::string dir_name;
+    std::string title_id; // from install.json when present, else dir_name
+    std::string tag;
+    bool has_install_record = false;
+    bool has_preserved_only = false;
+};
+
+std::vector<OrphanInstall> list_orphan_installs(const Paths& paths, const Catalog& catalog);
+
+struct OrphanCleanupOptions {
+    bool keep_saves = true;
+    bool dry_run = false;
+    // Also drop library/BIOS/RomM/app_state/boxart keys for ids not in catalog.
+    bool prune_indexes = true;
+};
+
+struct OrphanCleanupResult {
+    bool ok = false;
+    int removed = 0;
+    int failed = 0;
+    int pruned_ids = 0;
+    std::vector<std::string> messages;
+    std::string message;
+};
+
+// Uninstall orphan install dirs and prune stale per-title index/state entries.
+OrphanCleanupResult cleanup_removed_catalog_titles(const Paths& paths, const Catalog& catalog,
+                                                   const OrphanCleanupOptions& opts = {});
+
 // Stash saves + user config from existing release trees into
 // apps/<install>/preserved/ before a wipe/rebuild/update.
 // Restores into a newly staged release_dir (skip_existing).

@@ -58,6 +58,11 @@ void print_help(const char* argv0) {
         << "      --keep-saves             Keep memcards/SRAM/savestates (default)\n"
         << "      --delete-saves           Also wipe saves / preserved stash\n"
         << "      --dry-run                Show what would be removed\n"
+        << "  orphans [list|remove] [opts] List/remove installs not in the catalog\n"
+        << "      --keep-saves             Keep memcards/SRAM/savestates (default)\n"
+        << "      --delete-saves           Also wipe saves / preserved stash\n"
+        << "      --dry-run                Show what would be removed\n"
+        << "      --no-prune               Don't prune stale index/state entries\n"
         << "  launch <title-id> [opts]     Launch title into its dedicated launcher\n"
         << "      --rom PATH               ROM/disc path (else library index)\n"
         << "      --bios PATH              BIOS path (else bios index)\n"
@@ -763,10 +768,53 @@ int cmd_catalog_update(const retcomm::Paths& paths, const retcomm::AppConfig& cf
     if (result.ok) {
         std::cout << result.message << "\n";
         if (!result.synced_at.empty()) std::cout << "  synced_at: " << result.synced_at << "\n";
+        try {
+            const auto cat = retcomm::load_catalog(paths.catalog_dir);
+            const auto orphans = retcomm::list_orphan_installs(paths, cat);
+            if (!orphans.empty()) {
+                std::cout << "  unlisted installs: " << orphans.size()
+                          << " (run: retcomm orphans list / remove)\n";
+            }
+        } catch (...) {
+        }
         return 0;
     }
     std::cerr << result.message << "\n";
     return 1;
+}
+
+int cmd_orphans(const retcomm::Paths& paths, const retcomm::Catalog& cat, bool do_remove,
+                const retcomm::OrphanCleanupOptions& opts) {
+    try {
+        retcomm::ensure_dirs(paths);
+    } catch (const std::exception& e) {
+        std::cerr << "data dir error: " << e.what() << "\n";
+        return 1;
+    }
+    const auto orphans = retcomm::list_orphan_installs(paths, cat);
+    if (!do_remove) {
+        if (orphans.empty()) {
+            std::cout << "No installs outside the catalog.\n";
+            return 0;
+        }
+        std::cout << orphans.size() << " install(s) not in catalog:\n";
+        for (const auto& o : orphans) {
+            std::cout << "  " << o.title_id;
+            if (o.title_id != o.dir_name) std::cout << " (" << o.dir_name << ")";
+            if (!o.tag.empty()) std::cout << " @" << o.tag;
+            if (o.has_preserved_only) std::cout << " [preserved]";
+            std::cout << "\n    " << o.install_root.string() << "\n";
+        }
+        return 0;
+    }
+    if (orphans.empty() && !opts.prune_indexes) {
+        std::cout << "Nothing to remove.\n";
+        return 0;
+    }
+    auto result = retcomm::cleanup_removed_catalog_titles(paths, cat, opts);
+    for (const auto& m : result.messages) std::cout << m;
+    std::cout << result.message;
+    return result.ok ? 0 : 1;
 }
 
 int cmd_romm(const retcomm::Paths& paths, const retcomm::AppConfig& cfg) {
@@ -1011,6 +1059,34 @@ int main(int argc, char** argv) {
                 }
             }
             return cmd_uninstall(paths, catalog, args[1], opts);
+        }
+        if (cmd == "orphans") {
+            bool do_remove = false;
+            retcomm::OrphanCleanupOptions opts;
+            size_t i = 1;
+            if (i < args.size() && (args[i] == "list" || args[i] == "remove")) {
+                do_remove = (args[i] == "remove");
+                ++i;
+            } else if (i < args.size() && args[i].rfind("-", 0) != 0) {
+                std::cerr << "usage: retcomm orphans [list|remove] "
+                             "[--keep-saves|--delete-saves] [--dry-run] [--no-prune]\n";
+                return 2;
+            }
+            for (; i < args.size(); ++i) {
+                if (args[i] == "--keep-saves")
+                    opts.keep_saves = true;
+                else if (args[i] == "--delete-saves" || args[i] == "--purge")
+                    opts.keep_saves = false;
+                else if (args[i] == "--dry-run")
+                    opts.dry_run = true;
+                else if (args[i] == "--no-prune")
+                    opts.prune_indexes = false;
+                else {
+                    std::cerr << "unexpected orphans arg: " << args[i] << "\n";
+                    return 2;
+                }
+            }
+            return cmd_orphans(paths, catalog, do_remove, opts);
         }
         if (cmd == "launch") {
             if (args.size() < 2) {

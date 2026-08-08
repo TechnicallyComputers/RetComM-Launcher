@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -34,6 +35,96 @@ using nlohmann::json;
 void progress(const BuildProgressFn& fn, const std::string& msg, float frac = -1.0f) {
     if (fn) fn(msg, frac);
     std::cerr << msg << "\n";
+}
+
+// Stream a file with throttled status updates (same cadence as RomM downloads).
+bool http_download_with_progress(const std::string& url, const fs::path& dest, std::string* error,
+                                 const std::vector<std::pair<std::string, std::string>>& headers,
+                                 const BuildProgressFn& on_progress, const std::string& label) {
+    int last_pct = -1;
+    std::uint64_t last_mib_bucket = static_cast<std::uint64_t>(-1);
+    return http_download(url, dest, error, headers,
+                         [&](std::uint64_t got, std::uint64_t total) {
+                             if (total == 0) {
+                                 const std::uint64_t mib = got >> 20;
+                                 if (mib == 0) return; // wait for Content-Length or ≥1 MiB
+                                 const std::uint64_t bucket = mib / 8; // every ~8 MiB
+                                 if (bucket == last_mib_bucket) return;
+                                 last_mib_bucket = bucket;
+                                 progress(on_progress,
+                                          label + "… " + std::to_string(mib) + " MiB");
+                                 return;
+                             }
+                             const int pct = static_cast<int>((got * 100) / total);
+                             if (pct == last_pct || (pct != 100 && pct % 5 != 0)) return;
+                             last_pct = pct;
+                             const float frac =
+                                 static_cast<float>(got) / static_cast<float>(total);
+                             progress(on_progress, label + "… " + std::to_string(pct) + "%", frac);
+                         });
+}
+
+std::string unique_pack_suffix() {
+    const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
+#if defined(_WIN32)
+    return std::to_string(GetCurrentProcessId()) + "-" + std::to_string(ticks);
+#else
+    return std::to_string(static_cast<unsigned>(::getpid())) + "-" + std::to_string(ticks);
+#endif
+}
+
+// Move extracted staging into dest. Prefer rename-aside of any previous dest so
+// activation stays fast; slow unlink of the old tree happens afterward.
+bool activate_pack_tree(const fs::path& staging, const fs::path& dest, fs::path* outgoing_for_cleanup,
+                        std::string* error, const BuildProgressFn& on_progress,
+                        const std::string& pack_label) {
+    std::error_code ec;
+    const fs::path parent = dest.parent_path();
+    fs::create_directories(parent, ec);
+
+    const fs::path incoming = parent / (dest.filename().string() + ".new");
+    fs::remove_all(incoming, ec);
+    progress(on_progress, "Activating " + pack_label + "…");
+    fs::rename(staging, incoming, ec);
+    if (ec) {
+        fs::copy(staging, incoming,
+                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+        fs::remove_all(staging, ec);
+        if (ec) {
+            if (error) *error = "pack stage failed: " + ec.message();
+            return false;
+        }
+    }
+
+    if (fs::exists(dest, ec)) {
+        const fs::path outgoing = parent / (dest.filename().string() + ".old-" + unique_pack_suffix());
+        ec.clear();
+        fs::rename(dest, outgoing, ec);
+        if (ec) {
+            progress(on_progress, "Removing previous " + pack_label + "…");
+            fs::remove_all(dest, ec);
+            if (ec) {
+                fs::remove_all(incoming, ec);
+                if (error) *error = "cannot replace existing pack: " + ec.message();
+                return false;
+            }
+        } else if (outgoing_for_cleanup) {
+            *outgoing_for_cleanup = outgoing;
+        }
+    }
+
+    ec.clear();
+    fs::rename(incoming, dest, ec);
+    if (ec) {
+        fs::copy(incoming, dest,
+                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+        fs::remove_all(incoming, ec);
+        if (ec) {
+            if (error) *error = "pack install failed: " + ec.message();
+            return false;
+        }
+    }
+    return true;
 }
 
 // Mirror retcomm-toolchains install.sh: latest pointer + idempotent user PATH.
@@ -1232,24 +1323,27 @@ PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, boo
     const fs::path stamp = dest / ".retcomm-pack.json";
     if (!force && fs::is_regular_file(stamp, ec) && fs::is_directory(dest, ec)) {
         const fs::path root = unwrap_single_subdir(dest);
-        if (toolchain) {
-            const std::string ver = read_toolchain_version(root);
-            if (!version_satisfies(ver.empty() ? rel.tag : ver, pack.min_version)) {
-                // Stale cache entry — re-download below.
+        const bool usable = !toolchain || toolchain_looks_usable(root);
+        if (usable) {
+            if (toolchain) {
+                const std::string ver = read_toolchain_version(root);
+                if (!version_satisfies(ver.empty() ? rel.tag : ver, pack.min_version)) {
+                    // Stale cache entry — re-download below.
+                } else {
+                    r.ok = true;
+                    r.root = root;
+                    r.tag = rel.tag;
+                    r.message = "pack cached: " + r.root.string();
+                    maybe_publish_toolchain_path(paths, pack.id, toolchain, r);
+                    return r;
+                }
             } else {
                 r.ok = true;
                 r.root = root;
                 r.tag = rel.tag;
                 r.message = "pack cached: " + r.root.string();
-                maybe_publish_toolchain_path(paths, pack.id, toolchain, r);
                 return r;
             }
-        } else {
-            r.ok = true;
-            r.root = root;
-            r.tag = rel.tag;
-            r.message = "pack cached: " + r.root.string();
-            return r;
         }
     }
 
@@ -1260,32 +1354,29 @@ PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, boo
     fs::create_directories(staging, ec);
     fs::create_directories(download.parent_path(), ec);
 
-    progress(on_progress, "Downloading " + asset->name + "…");
+    const std::string dl_label = "Downloading " + asset->name;
+    progress(on_progress, dl_label + "…");
     auto headers = github_http_headers();
     headers.erase(std::remove_if(headers.begin(), headers.end(),
                                  [](const auto& h) { return h.first == "Accept"; }),
                   headers.end());
     headers.emplace_back("Accept", "application/octet-stream");
-    if (!http_download(asset->browser_download_url, download, &err, headers)) {
+    if (!http_download_with_progress(asset->browser_download_url, download, &err, headers,
+                                     on_progress, dl_label)) {
         r.message = "pack download failed: " + err;
         return r;
     }
+    progress(on_progress, "Extracting " + asset->name + "…");
     if (!extract_archive_to(download, staging, &err)) {
         r.message = "pack extract failed: " + err;
         return r;
     }
 
-    fs::remove_all(dest, ec);
-    fs::create_directories(dest.parent_path(), ec);
-    fs::rename(staging, dest, ec);
-    if (ec) {
-        fs::copy(staging, dest, fs::copy_options::recursive | fs::copy_options::overwrite_existing,
-                 ec);
-        fs::remove_all(staging, ec);
-        if (ec) {
-            r.message = "pack install failed: " + ec.message();
-            return r;
-        }
+    const std::string pack_label = pack.id + " " + rel.tag;
+    fs::path outgoing;
+    if (!activate_pack_tree(staging, dest, &outgoing, &err, on_progress, pack_label)) {
+        r.message = err;
+        return r;
     }
     {
         json meta = {{"id", pack.id},
@@ -1295,6 +1386,7 @@ PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, boo
         std::ofstream out(stamp);
         out << meta.dump(2) << "\n";
     }
+    progress(on_progress, "Cleaning download cache…");
     fs::remove(download, ec);
 
     r.root = unwrap_single_subdir(dest);
@@ -1309,7 +1401,17 @@ PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, boo
     r.ok = true;
     r.tag = rel.tag;
     r.message = "installed pack " + pack.id + " " + rel.tag;
+    // Point latest/PATH at the new tree before the slow unlink of the previous copy.
     maybe_publish_toolchain_path(paths, pack.id, toolchain, r);
+    if (!outgoing.empty()) {
+        progress(on_progress, "Cleaning up previous " + pack_label + "…");
+        fs::remove_all(outgoing, ec);
+        if (ec) {
+            // Non-fatal: new pack is already active; leftover dir can be removed later.
+            if (!r.message.empty()) r.message += "; ";
+            r.message += "left previous pack at " + outgoing.string() + " (" + ec.message() + ")";
+        }
+    }
     return r;
 }
 
@@ -1392,7 +1494,8 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
                     return r;
                 }
 
-                progress(on_progress, "Downloading release source " + asset->name + "…");
+                const std::string dl_label = "Downloading release source " + asset->name;
+                progress(on_progress, dl_label + "…");
                 fs::remove_all(staging, ec);
                 fs::create_directories(staging, ec);
                 const fs::path download = download_dir / asset->name;
@@ -1401,8 +1504,10 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
                                              [](const auto& h) { return h.first == "Accept"; }),
                               headers.end());
                 headers.emplace_back("Accept", "application/octet-stream");
-                if (http_download(asset->browser_download_url, download, &err, headers) &&
-                    extract_archive_to(download, staging, &err) &&
+                const bool downloaded = http_download_with_progress(
+                    asset->browser_download_url, download, &err, headers, on_progress, dl_label);
+                if (downloaded) progress(on_progress, "Extracting " + asset->name + "…");
+                if (downloaded && extract_archive_to(download, staging, &err) &&
                     install_extracted_tree(staging, dest, &err)) {
                     fs::remove(download, ec);
                     if (source_tree_buildable(title, dest)) {
@@ -1437,7 +1542,8 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
         return r;
     }
 
-    progress(on_progress, "Downloading source zipball " + gh + "@" + ref + "…");
+    const std::string zip_label = "Downloading source zipball " + gh + "@" + ref;
+    progress(on_progress, zip_label + "…");
     fs::remove_all(staging, ec);
     fs::create_directories(staging, ec);
     const fs::path download = download_dir / (safe_ref + "-zipball.zip");
@@ -1448,10 +1554,11 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
                   headers.end());
     headers.emplace_back("Accept", "application/vnd.github+json");
     std::string err;
-    if (!http_download(url, download, &err, headers)) {
+    if (!http_download_with_progress(url, download, &err, headers, on_progress, zip_label)) {
         r.message = "source zipball download failed: " + err;
         return r;
     }
+    progress(on_progress, "Extracting source zipball…");
     if (!extract_archive_to(download, staging, &err)) {
         r.message = "source extract failed: " + err;
         return r;
@@ -2079,7 +2186,23 @@ PackEnsureResult update_toolchain_to_latest(const Paths& paths, BuildProgressFn 
     pack.asset_glob_windows = "*cmake-clang-v1*windows*";
     pack.asset_glob_macos = "*cmake-clang-v1*macos*";
     pack.min_version.clear();
-    return ensure_pack(paths, pack, /*toolchain=*/true, {}, on_progress, /*force=*/true);
+
+    // Avoid re-downloading ~700MiB / replacing ~2GiB when already on latest.
+    progress(on_progress, "Checking toolchain version…");
+    const auto info = check_toolchain_update(paths, pack.id, pack.github);
+    if (info.ok && info.installed && !info.update_available) {
+        PackEnsureResult r;
+        r.ok = true;
+        r.tag = info.latest_tag.empty() ? info.current_version : info.latest_tag;
+        r.root = find_cached_toolchain(paths, pack.id, {});
+        r.message = info.message;
+        maybe_publish_toolchain_path(paths, pack.id, /*toolchain=*/true, r);
+        progress(on_progress, r.message);
+        return r;
+    }
+
+    // Download only when missing or newer than cache (do not force-replace same tag).
+    return ensure_pack(paths, pack, /*toolchain=*/true, {}, on_progress, /*force=*/false);
 }
 
 } // namespace retcomm

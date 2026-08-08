@@ -60,7 +60,8 @@ ToolchainUpdateInfo check_toolchain_update(
     const Paths& paths, const std::string& pack_id = "cmake-clang-v1",
     const std::string& github = "TechnicallyComputers/retcomm-toolchains");
 
-// Download + install the latest toolchain pack (force), then refresh PATH/latest.
+// Ensure the latest toolchain pack is installed (skips download when already current),
+// then refresh PATH/latest.
 PackEnsureResult update_toolchain_to_latest(
     const Paths& paths, BuildProgressFn on_progress = {},
     const std::string& pack_id = "cmake-clang-v1",

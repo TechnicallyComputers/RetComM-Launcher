@@ -136,6 +136,14 @@ void HubModel::set_status(const std::string& s) {
     status = s;
 }
 
+size_t HubModel::refresh_orphan_installs() {
+    auto orphans = list_orphan_installs(paths, catalog);
+    const size_t n = orphans.size();
+    std::lock_guard<std::mutex> lock(mu);
+    pending_orphans = std::move(orphans);
+    return n;
+}
+
 void HubModel::refresh_rows(bool check_updates) {
     library = load_library_index(paths.library_index_path);
     romm_roms = load_romm_rom_index(paths.romm_rom_index_path);
@@ -722,13 +730,15 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 append_log(ur.message);
                 if (ur.ok) {
                     auto tc = check_toolchain_update(paths);
+                    // Assign status under mu — do not call set_status/append_log
+                    // while holding the lock (non-recursive mutex → SIGABRT).
                     std::lock_guard<std::mutex> lock(mu);
                     toolchain_current_version = tc.current_version.empty() ? ur.tag
                                                                           : tc.current_version;
                     toolchain_latest_tag = tc.latest_tag;
                     toolchain_update_available = false;
                     toolchain_status = "toolchain " + toolchain_current_version;
-                    set_status("Toolchain updated (" + toolchain_current_version + ")");
+                    status = "Toolchain updated (" + toolchain_current_version + ")";
                 } else {
                     set_status("Toolchain update failed");
                 }
@@ -902,6 +912,37 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     library = load_library_index(paths.library_index_path);
                     fetch_boxart_for_catalog(false);
                 }
+                {
+                    const size_t n = refresh_orphan_installs();
+                    if (n > 0) {
+                        append_log("Catalog: " + std::to_string(n) +
+                                   " local install(s) no longer in catalog");
+                        set_status("Catalog refreshed — " + std::to_string(n) +
+                                   " unlisted install(s)");
+                        orphan_prompt_pending.store(true);
+                    }
+                }
+                break;
+            }
+            case HubJob::CleanupOrphans:
+            case HubJob::CleanupOrphansPurge: {
+                const bool purge = (j == HubJob::CleanupOrphansPurge);
+                set_status(purge ? "Removing unlisted installs (delete saves)…"
+                                 : "Removing unlisted installs (keep saves)…");
+                OrphanCleanupOptions opts;
+                opts.keep_saves = !purge;
+                opts.prune_indexes = true;
+                auto cr = cleanup_removed_catalog_titles(paths, catalog, opts);
+                for (const auto& m : cr.messages) append_log(m);
+                append_log(cr.message);
+                library = load_library_index(paths.library_index_path);
+                bios = load_bios_index(paths.bios_index_path);
+                romm_roms = load_romm_rom_index(paths.romm_rom_index_path);
+                app_state = load_app_state(paths.state_path);
+                refresh_orphan_installs();
+                set_status(cr.ok ? ("Removed " + std::to_string(cr.removed) + " unlisted install(s)")
+                                 : ("Orphan cleanup finished with " + std::to_string(cr.failed) +
+                                    " error(s)"));
                 break;
             }
             case HubJob::None:

@@ -42,6 +42,8 @@ enum class HubJob : int {
     RefreshCatalog,
     CheckToolchainUpdate,
     UpdateToolchain,
+    CleanupOrphans,
+    CleanupOrphansPurge,
 };
 
 struct TitleRow {
@@ -250,6 +252,10 @@ struct HubModel {
     std::string toolchain_status; // short UI line
     bool toolchain_update_available = false;
 
+    // Apps/index entries left after a catalog title was removed (Refresh Catalog).
+    std::atomic<bool> orphan_prompt_pending{false};
+    std::vector<OrphanInstall> pending_orphans; // guarded by mu
+
     // Native folder picker (SDL_ShowOpenFolderDialog) — apply on main thread.
     std::mutex folder_pick_mu;
     FolderPickTarget folder_pick_target = FolderPickTarget::None;
@@ -259,6 +265,9 @@ struct HubModel {
     void refresh_rows(bool check_updates);
     void append_log(const std::string& line);
     void set_status(const std::string& s);
+    // Scan apps/ for installs not in the current catalog; store under pending_orphans.
+    // Returns count found. Safe on UI or worker thread.
+    size_t refresh_orphan_installs();
     // Download covers for catalog titles missing from the active cache (or all when force).
     // Safe to call from the hub worker thread.
     void fetch_boxart_for_catalog(bool force = false);

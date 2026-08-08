@@ -1166,6 +1166,15 @@ void draw_sidebar_actions(HubModel& hub, const Theme& th) {
         hub.refresh_rows(false);
         hub.set_status("Library refreshed");
     }
+    if (ImGui::Button("Clean Unlisted Installs…", ImVec2(-1, 0))) {
+        const size_t n = hub.refresh_orphan_installs();
+        if (n == 0) {
+            hub.set_status("No installs outside the catalog");
+            hub.append_log("Orphan scan: none");
+        } else {
+            hub.orphan_prompt_pending.store(true);
+        }
+    }
     ImGui::Dummy(ImVec2(0, 10));
     ImGui::Separator();
     ImGui::Dummy(ImVec2(0, 4));
@@ -1477,6 +1486,49 @@ int main(int argc, char** argv) {
             ImGui::SameLine();
             if (ImGui::Button("Later", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
             ImGui::EndDisabled();
+            ImGui::EndPopup();
+        }
+
+        if (hub.orphan_prompt_pending.exchange(false))
+            ImGui::OpenPopup("Unlisted installs###orphan_cleanup");
+        if (ImGui::BeginPopupModal("Unlisted installs###orphan_cleanup", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            std::vector<retcomm::OrphanInstall> orphans;
+            {
+                std::lock_guard<std::mutex> lock(hub.mu);
+                orphans = hub.pending_orphans;
+            }
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 420.f);
+            ImGui::TextWrapped(
+                "These local installs are no longer in the catalog. Remove them to free "
+                "disk space? Library ROMs and managed saves_root files are not deleted.");
+            ImGui::PopTextWrapPos();
+            ImGui::Dummy(ImVec2(0, 8));
+            ImGui::BeginChild("orphan_list", ImVec2(420, 140), ImGuiChildFlags_Borders);
+            for (const auto& o : orphans) {
+                std::string line = o.title_id;
+                if (o.title_id != o.dir_name) line += " (" + o.dir_name + ")";
+                if (!o.tag.empty()) line += " @" + o.tag;
+                if (o.has_preserved_only) line += " [preserved saves only]";
+                ImGui::BulletText("%s", line.c_str());
+            }
+            if (orphans.empty()) ImGui::TextDisabled("(none)");
+            ImGui::EndChild();
+            ImGui::Dummy(ImVec2(0, 10));
+            const bool busy = hub.job_running.load();
+            ImGui::BeginDisabled(busy || orphans.empty());
+            if (accent_button("Remove (keep saves)", th, ImVec2(180, 0))) {
+                hub.start_job(HubJob::CleanupOrphans);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Remove + delete saves", ImVec2(180, 0))) {
+                hub.start_job(HubJob::CleanupOrphansPurge);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Keep", ImVec2(100, 0))) ImGui::CloseCurrentPopup();
             ImGui::EndPopup();
         }
 

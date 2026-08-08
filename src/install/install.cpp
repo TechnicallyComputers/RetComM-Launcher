@@ -1,6 +1,10 @@
 #include "retcomm/install.hpp"
+#include "retcomm/app_state.hpp"
+#include "retcomm/bios_index.hpp"
 #include "retcomm/http.hpp"
+#include "retcomm/library_index.hpp"
 #include "retcomm/paths.hpp"
+#include "retcomm/romm_fetch.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -60,22 +64,145 @@ bool path_matches_glob(const std::string& rel_posix, const std::string& pattern)
     return match_glob(pattern, base);
 }
 
+std::vector<std::string> default_save_globs() {
+    return {"saves/*",     "saves/**", "*.mcd",           "*.mcr",
+            "*.srm",       "*.state",  "*.sts",           "states/*",
+            "savestates/*", "savestates/**"};
+}
+
 std::vector<std::string> save_globs_for_title(const Title& title) {
     std::vector<std::string> g = title.saves_sram_glob;
     g.insert(g.end(), title.saves_memcard_glob.begin(), title.saves_memcard_glob.end());
     // Always consider common save / savestate layouts next to the binary.
-    static const char* kDefaults[] = {"saves/*",
-                                      "saves/**",
-                                      "*.mcd",
-                                      "*.mcr",
-                                      "*.srm",
-                                      "*.state",
-                                      "*.sts",
-                                      "states/*",
-                                      "savestates/*",
-                                      "savestates/**"};
-    for (const char* d : kDefaults) g.emplace_back(d);
+    const auto defs = default_save_globs();
+    g.insert(g.end(), defs.begin(), defs.end());
     return g;
+}
+
+void remove_boxart_for_title(const Paths& paths, const std::string& title_id) {
+    if (title_id.empty()) return;
+    const fs::path root = paths.data_dir / "boxart";
+    std::error_code ec;
+    if (!fs::is_directory(root, ec)) return;
+    static const char* kExts[] = {".jpg", ".jpeg", ".png", ".webp", ".download"};
+    auto wipe_dir = [&](const fs::path& dir) {
+        if (!fs::is_directory(dir, ec)) return;
+        for (const char* ext : kExts) fs::remove(dir / (title_id + ext), ec);
+    };
+    wipe_dir(root);
+    for (auto it = fs::directory_iterator(root, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (it->is_directory(ec)) wipe_dir(it->path());
+    }
+}
+
+int prune_stale_title_indexes(const Paths& paths, const Catalog& catalog,
+                              std::vector<std::string>* messages) {
+    std::unordered_set<std::string> known;
+    known.reserve(catalog.titles.size() * 2);
+    for (const auto& t : catalog.titles) known.insert(t.id);
+
+    int pruned = 0;
+    auto note = [&](const std::string& s) {
+        if (messages) messages->push_back(s);
+    };
+
+    // Library index
+    {
+        LibraryIndex idx = load_library_index(paths.library_index_path);
+        bool dirty = false;
+        for (auto& f : idx.files) {
+            if (!f.title_id.empty() && !known.count(f.title_id)) {
+                f.title_id.clear();
+                f.matched_by.clear();
+                dirty = true;
+            }
+        }
+        const size_t before = idx.titles.size();
+        idx.titles.erase(std::remove_if(idx.titles.begin(), idx.titles.end(),
+                                        [&](const LibraryTitleBind& b) {
+                                            return !b.title_id.empty() && !known.count(b.title_id);
+                                        }),
+                         idx.titles.end());
+        if (idx.titles.size() != before) dirty = true;
+        if (dirty) {
+            save_library_index(paths.library_index_path, idx);
+            const int n = static_cast<int>(before - idx.titles.size());
+            pruned += n;
+            note("Pruned " + std::to_string(n) + " stale library title bind(s)");
+        }
+    }
+
+    // BIOS index
+    {
+        BiosIndex idx = load_bios_index(paths.bios_index_path);
+        bool dirty = false;
+        for (auto& f : idx.files) {
+            if (!f.title_id.empty() && !known.count(f.title_id)) {
+                f.title_id.clear();
+                f.matched_by.clear();
+                dirty = true;
+            }
+        }
+        const size_t before = idx.titles.size();
+        idx.titles.erase(std::remove_if(idx.titles.begin(), idx.titles.end(),
+                                        [&](const BiosTitleBind& b) {
+                                            return !b.title_id.empty() && !known.count(b.title_id);
+                                        }),
+                         idx.titles.end());
+        if (idx.titles.size() != before) dirty = true;
+        if (dirty) {
+            save_bios_index(paths.bios_index_path, idx);
+            const int n = static_cast<int>(before - idx.titles.size());
+            pruned += n;
+            note("Pruned " + std::to_string(n) + " stale BIOS title bind(s)");
+        }
+    }
+
+    // RomM availability cache
+    {
+        RommRomIndex idx = load_romm_rom_index(paths.romm_rom_index_path);
+        size_t removed = 0;
+        for (auto it = idx.by_title.begin(); it != idx.by_title.end();) {
+            if (!known.count(it->first)) {
+                it = idx.by_title.erase(it);
+                ++removed;
+            } else {
+                ++it;
+            }
+        }
+        if (removed > 0) {
+            save_romm_rom_index(paths.romm_rom_index_path, idx, nullptr);
+            pruned += static_cast<int>(removed);
+            note("Pruned " + std::to_string(removed) + " stale RomM index entr(y/ies)");
+        }
+    }
+
+    // Hub prefs
+    {
+        AppState st = load_app_state(paths.state_path);
+        auto erase_unknown = [&](auto& map) {
+            size_t n = 0;
+            for (auto it = map.begin(); it != map.end();) {
+                if (!known.count(it->first)) {
+                    it = map.erase(it);
+                    ++n;
+                } else {
+                    ++it;
+                }
+            }
+            return n;
+        };
+        const size_t n = erase_unknown(st.preferred_save) + erase_unknown(st.preferred_save_card2) +
+                         erase_unknown(st.preferred_bios);
+        if (n > 0) {
+            save_app_state(paths.state_path, st, nullptr);
+            pruned += static_cast<int>(n);
+            note("Pruned " + std::to_string(n) + " stale app-state preference(s)");
+        }
+    }
+
+    return pruned;
 }
 
 bool is_user_config_path(const std::string& rel_posix) {
@@ -1214,22 +1341,27 @@ InstallResult update_title(const Paths& paths, const Title& title, const Install
     return install_title(paths, title, o);
 }
 
-UninstallResult uninstall_title(const Paths& paths, const Title& title,
-                                const UninstallOptions& opts) {
+UninstallResult uninstall_install_root(const Paths& /*paths*/, const fs::path& install_root,
+                                       const UninstallOptions& opts,
+                                       const std::string& display_id,
+                                       const std::vector<std::string>& save_globs) {
     UninstallResult result;
-    result.plan = inspect_install(paths, title);
-    const fs::path install_root = result.plan.install_root;
+    result.plan.install_root = install_root;
+    result.plan.current_link = install_root / "current";
+    const std::string id =
+        !display_id.empty() ? display_id : install_root.filename().string();
 
     std::error_code ec;
     if (!fs::exists(install_root, ec)) {
         result.skipped = true;
         result.ok = true;
-        result.message = title.id + " is not installed (" + install_root.string() + ")\n";
+        result.message = id + " is not installed (" + install_root.string() + ")\n";
         return result;
     }
 
     const fs::path preserved = install_root / "preserved";
-    const auto globs = save_globs_for_title(title);
+    const std::vector<std::string> globs =
+        save_globs.empty() ? default_save_globs() : save_globs;
 
     // Only scan install_root/releases/<tag>/ trees (canonicalized + deduped).
     std::vector<fs::path> roots;
@@ -1251,9 +1383,10 @@ UninstallResult uninstall_title(const Paths& paths, const Title& title,
             }
         }
     }
-    // Active current/ release if it points outside releases/ (unusual).
-    if (!result.plan.binary_path.empty())
-        add_root(result.plan.binary_path.parent_path());
+    {
+        const fs::path current = resolve_current_dir(install_root);
+        if (!current.empty()) add_root(current);
+    }
 
     if (opts.keep_saves) {
         std::unordered_set<std::string> seen_rel;
@@ -1295,7 +1428,7 @@ UninstallResult uninstall_title(const Paths& paths, const Title& title,
     }
 
     std::ostringstream oss;
-    oss << "uninstall " << title.id << "\n"
+    oss << "uninstall " << id << "\n"
         << "  target: " << install_root.string() << "\n";
     if (opts.keep_saves) {
         oss << "  saves:  preserve (" << result.preserved_paths.size() << " file(s)";
@@ -1344,8 +1477,95 @@ UninstallResult uninstall_title(const Paths& paths, const Title& title,
 
     oss << "  status: removed\n";
     result.ok = true;
-    result.plan = inspect_install(paths, title);
+    result.plan.install_root = install_root;
+    result.plan.installed = false;
+    bool has_preserved = false, other = false;
+    result.plan.install_dir_present =
+        classify_install_root_leftovers(install_root, &has_preserved, &other);
+    result.plan.has_preserved_state = has_preserved;
     result.message = oss.str();
+    return result;
+}
+
+UninstallResult uninstall_title(const Paths& paths, const Title& title,
+                                const UninstallOptions& opts) {
+    return uninstall_install_root(paths, paths.apps_dir / title.install_dir_name, opts, title.id,
+                                  save_globs_for_title(title));
+}
+
+std::vector<OrphanInstall> list_orphan_installs(const Paths& paths, const Catalog& catalog) {
+    // Apps live under install_dir_name only (defaults to title id in the catalog).
+    std::unordered_set<std::string> claimed;
+    claimed.reserve(catalog.titles.size());
+    for (const auto& t : catalog.titles) {
+        if (!t.install_dir_name.empty()) claimed.insert(t.install_dir_name);
+    }
+
+    std::vector<OrphanInstall> out;
+    std::error_code ec;
+    if (!fs::is_directory(paths.apps_dir, ec)) return out;
+
+    for (auto it = fs::directory_iterator(paths.apps_dir, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        const fs::path root = it->path();
+        const std::string dir_name = root.filename().string();
+        if (dir_name.empty() || dir_name[0] == '.') continue;
+        if (claimed.count(dir_name)) continue;
+
+        OrphanInstall o;
+        o.install_root = root;
+        o.dir_name = dir_name;
+        const InstallRecord rec = load_install_record(root);
+        o.has_install_record = !rec.title_id.empty() || !rec.tag.empty() || !rec.binary.empty();
+        o.title_id = !rec.title_id.empty() ? rec.title_id : dir_name;
+        o.tag = rec.tag;
+        bool has_preserved = false, other = false;
+        classify_install_root_leftovers(root, &has_preserved, &other);
+        o.has_preserved_only = has_preserved && !other && !o.has_install_record;
+        out.push_back(std::move(o));
+    }
+
+    std::sort(out.begin(), out.end(), [](const OrphanInstall& a, const OrphanInstall& b) {
+        return a.dir_name < b.dir_name;
+    });
+    return out;
+}
+
+OrphanCleanupResult cleanup_removed_catalog_titles(const Paths& paths, const Catalog& catalog,
+                                                   const OrphanCleanupOptions& opts) {
+    OrphanCleanupResult result;
+    const auto orphans = list_orphan_installs(paths, catalog);
+    UninstallOptions uopts;
+    uopts.keep_saves = opts.keep_saves;
+    uopts.dry_run = opts.dry_run;
+
+    for (const auto& o : orphans) {
+        auto ur = uninstall_install_root(paths, o.install_root, uopts, o.title_id, {});
+        result.messages.push_back(ur.message);
+        if (ur.ok) {
+            ++result.removed;
+            if (!opts.dry_run) remove_boxart_for_title(paths, o.title_id);
+            if (!opts.dry_run && o.title_id != o.dir_name) remove_boxart_for_title(paths, o.dir_name);
+        } else {
+            ++result.failed;
+        }
+    }
+
+    if (opts.prune_indexes && !opts.dry_run) {
+        result.pruned_ids = prune_stale_title_indexes(paths, catalog, &result.messages);
+    } else if (opts.prune_indexes && opts.dry_run) {
+        result.messages.push_back("dry-run: would prune stale library/BIOS/RomM/app-state entries\n");
+    }
+
+    std::ostringstream oss;
+    oss << "Orphan cleanup: " << result.removed << " install(s)"
+        << (opts.dry_run ? " (dry-run)" : " removed");
+    if (result.failed) oss << ", " << result.failed << " failed";
+    if (result.pruned_ids) oss << ", pruned " << result.pruned_ids << " index/state entr(y/ies)";
+    oss << "\n";
+    result.message = oss.str();
+    result.ok = result.failed == 0;
     return result;
 }
 
