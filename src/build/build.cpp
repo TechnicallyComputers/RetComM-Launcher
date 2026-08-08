@@ -1,6 +1,7 @@
 #include "retcomm/build.hpp"
 #include "retcomm/http.hpp"
 #include "retcomm/library_index.hpp"
+#include "retcomm/process_env.hpp"
 #include "retcomm/toolchain_env.hpp"
 
 #include <nlohmann/json.hpp>
@@ -1102,6 +1103,9 @@ fs::path resolve_python() {
 int run_capture_lines(const std::string& cmd, const fs::path& cwd,
                       const std::function<void(const std::string&)>& on_line,
                       std::string* combined_err) {
+    // Drop AppImage LD_LIBRARY_PATH for cmake/git/python children so system
+    // git-remote-https is not poisoned by the mount's libcurl.
+    AppImageEnvGuard env_guard;
 #if defined(_WIN32)
     std::string full = "cmd /C \"cd /D " + cwd.string() + " && " + cmd + "\"";
     FILE* pipe = _popen(full.c_str(), "r");
@@ -1676,34 +1680,53 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
     if (!opts.sdk_dir.empty()) {
         sdk = ensure_pack(paths, title.build.sdk, false, opts.sdk_dir, opts.on_progress);
     } else {
-        progress(opts.on_progress, "Harvesting tools from game package…", 0.025f);
-        sdk = harvest_embedded_sdk(paths, title, src.root, src.tag);
-        if (sdk.ok) {
+        const std::string pack_id =
+            title.build.sdk.id.empty() ? "psxrecomp-tools" : title.build.sdk.id;
+        const fs::path cached_sdk =
+            paths.sdks_dir / pack_id / sanitize_tag(src.tag.empty() ? "embedded" : src.tag);
+        auto cached_sdk_complete = [&](const fs::path& root) -> bool {
+            if (find_sdk_cli(root).empty()) return false;
+            if (resolve_generate_engine(title) != "psxrecomp") return true;
+            std::error_code cec;
+            const bool game =
+                fs::is_regular_file(root / "recompiler/build/psxrecomp-game", cec) ||
+                fs::is_regular_file(root / "recompiler/build/psxrecomp-game.exe", cec);
+            const bool bios =
+                fs::is_regular_file(root / "recompiler/build/psxrecomp-bios", cec) ||
+                fs::is_regular_file(root / "recompiler/build/psxrecomp-bios.exe", cec);
+            return game && bios;
+        };
+
+        // After a prior successful harvest the emitters are pruned from src/.
+        // Reuse the shared SDK cache instead of failing harvest + wiping it.
+        if (cached_sdk_complete(cached_sdk)) {
+            sdk.ok = true;
+            sdk.root = cached_sdk;
+            sdk.tag = src.tag;
+            sdk.message = "reusing harvested SDK " + cached_sdk.string();
             progress(opts.on_progress, sdk.message, 0.03f);
-            prune_embedded_tool_bins(src.root, resolve_generate_engine(title));
-        } else if (!title.build.sdk.id.empty() && !title.build.sdk.github.empty()) {
-            // Legacy fallback: catalog still points at a separate tools zip.
-            {
-                const std::string pack_id = title.build.sdk.id.empty()
-                                                ? "psxrecomp-tools"
-                                                : title.build.sdk.id;
-                const fs::path stale =
-                    paths.sdks_dir / pack_id / sanitize_tag(src.tag.empty() ? "embedded" : src.tag);
-                std::error_code rm_ec;
-                fs::remove_all(stale, rm_ec);
-            }
-            progress(opts.on_progress,
-                     "No complete embedded tools (" + sdk.message + ") — fetching SDK pack…",
-                     0.03f);
-            sdk = ensure_pack(paths, title.build.sdk, false, {}, opts.on_progress);
         } else {
-            // Drop incomplete harvests so a broken SDK pin is not reused.
-            const std::string pack_id =
-                title.build.sdk.id.empty() ? "psxrecomp-tools" : title.build.sdk.id;
-            const fs::path stale =
-                paths.sdks_dir / pack_id / sanitize_tag(src.tag.empty() ? "embedded" : src.tag);
-            std::error_code rm_ec;
-            fs::remove_all(stale, rm_ec);
+            progress(opts.on_progress, "Harvesting tools from game package…", 0.025f);
+            sdk = harvest_embedded_sdk(paths, title, src.root, src.tag);
+            if (sdk.ok) {
+                progress(opts.on_progress, sdk.message, 0.03f);
+                prune_embedded_tool_bins(src.root, resolve_generate_engine(title));
+            } else if (!title.build.sdk.id.empty() && !title.build.sdk.github.empty()) {
+                // Legacy fallback: catalog still points at a separate tools zip.
+                if (!cached_sdk_complete(cached_sdk)) {
+                    std::error_code rm_ec;
+                    fs::remove_all(cached_sdk, rm_ec);
+                }
+                progress(opts.on_progress,
+                         "No complete embedded tools (" + sdk.message +
+                             ") — fetching SDK pack…",
+                         0.03f);
+                sdk = ensure_pack(paths, title.build.sdk, false, {}, opts.on_progress);
+            } else if (!cached_sdk_complete(cached_sdk)) {
+                // Drop incomplete harvests so a broken SDK pin is not reused.
+                std::error_code rm_ec;
+                fs::remove_all(cached_sdk, rm_ec);
+            }
         }
     }
     if (!sdk.ok) {

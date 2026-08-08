@@ -28,6 +28,7 @@ find_package(CURL REQUIRED)
 
 set(RETCOMM_CORE_SOURCES
     src/paths/paths.cpp
+    src/paths/process_env.cpp
     src/paths/toolchain_env.cpp
     src/core/hash.cpp
     src/core/config.cpp
