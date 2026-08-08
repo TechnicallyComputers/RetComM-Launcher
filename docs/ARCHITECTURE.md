@@ -52,7 +52,7 @@ CLI / (future) ImGui hub
 ~/.local/share/retcomm/
   apps/<install_dir_name>/
     install.json                       # method zip|build, tag, binary, pack pins
-    current -> releases/<tag>/         # symlink (or junction on Windows)
+    current -> releases/<tag>/         # symlink (or current.path / junction on Windows)
     releases/<tag>/
       <binary + assets>
     src/<ref>/                         # game source when method=build
@@ -174,7 +174,9 @@ Titles that ship recomp-net declare a catalog `netplay` block (`game_name` +
 active lobby. User defaults live in `config.json` → `netplay.lobby_url` /
 `display_name` / `prefer_ice`.
 
-Working directory is the release directory (`current/`). Cart titles get a
-positional ROM; disc titles never use a bare positional (psxrecomp treats that
-as BIOS) and do not pass `--disc` on current MotK (launcher preselect comes from
-staged `settings.toml` / `disc.cfg`).
+Working directory is the release directory (`current/`). Cart titles stage an
+install-local `library.<ext>` sidecar (symlink → hardlink → copy) so `rom.cfg`
+works without Windows Developer Mode; disc titles never use a bare positional
+(psxrecomp treats that as BIOS) and do not pass `--disc` on current MotK
+(launcher preselect comes from staged `settings.toml` / `disc.cfg`). Play spawn
+on Windows uses UTF-8 argv → `CreateProcessW` UTF-16.

@@ -36,6 +36,16 @@ bool is_disc_platform(const std::string& platform) {
     return platform == "psx" || platform == "ps2" || platform == "saturn";
 }
 
+// UTF-8 path for argv / cfg (Windows CreateProcess converts UTF-8 → UTF-16).
+std::string path_utf8(const fs::path& p) {
+#if defined(_WIN32)
+    const auto u8 = p.u8string();
+    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+#else
+    return p.string();
+#endif
+}
+
 // Normalize to an absolute host path (native), or Wine Z:/… guest path.
 // Use forward slashes for Wine: several recomp launchers interpret `\a` / `\r`
 // / `\n` in paths as C escapes, which corrupts `/home/...` into garbage.
@@ -50,14 +60,14 @@ std::string path_for_guest(const fs::path& host, bool use_wine) {
     }
 #if defined(_WIN32)
     (void)use_wine;
-    return abs.string();
+    return path_utf8(abs);
 #else
     const std::string s = abs.generic_string();
     if (use_wine) {
         if (!s.empty() && s[0] == '/') return "Z:" + s;
-        return host.string();
+        return path_utf8(host);
     }
-    return s.empty() ? host.string() : s;
+    return s.empty() ? path_utf8(host) : s;
 #endif
 }
 
@@ -123,7 +133,7 @@ void append_save_path_argv(LaunchPlan& plan, const Title& title) {
     plan.argv.push_back(arg);
 }
 
-bool replace_symlink(const fs::path& link, const fs::path& target, std::string* error) {
+fs::path absolute_target(const fs::path& target) {
     std::error_code ec;
     fs::path abs = fs::weakly_canonical(target, ec);
     if (ec || abs.empty()) {
@@ -131,47 +141,96 @@ bool replace_symlink(const fs::path& link, const fs::path& target, std::string* 
         abs = fs::absolute(target, ec);
         if (ec) abs = target;
     }
+    return abs;
+}
 
-    // Already correct — common when a prior launch staged the same ROM.
-    if (fs::is_symlink(link, ec)) {
-        const fs::path cur = fs::weakly_canonical(link, ec);
-        if (!ec && !cur.empty() && cur == abs) return true;
+// True when dest already exposes the same bytes as target (symlink, hardlink,
+// or a still-fresh copy). Avoids re-copying cart ROMs every Play on Windows.
+bool sidecar_already_staged(const fs::path& dest, const fs::path& abs_target) {
+    std::error_code ec;
+    if (!fs::exists(dest, ec) && !fs::is_symlink(dest, ec)) return false;
+    if (fs::equivalent(dest, abs_target, ec) && !ec) return true;
+    if (fs::is_symlink(dest, ec)) {
+        const fs::path cur = fs::weakly_canonical(dest, ec);
+        if (!ec && !cur.empty() && cur == abs_target) return true;
+    }
+    if (fs::is_regular_file(dest, ec) && fs::is_regular_file(abs_target, ec)) {
+        const auto sd = fs::file_size(dest, ec);
+        if (ec) return false;
+        const auto st = fs::file_size(abs_target, ec);
+        if (ec || sd != st) return false;
+        const auto td = fs::last_write_time(dest, ec);
+        if (ec) return false;
+        const auto tt = fs::last_write_time(abs_target, ec);
+        if (!ec && td == tt) return true;
+    }
+    return false;
+}
+
+// Stage dest → target for launch sidecars. Prefer symlink (Unix / Dev Mode),
+// then hardlink (same volume), then copy — Windows without symlink privilege
+// must still be able to Play cart titles.
+bool stage_sidecar_file(const fs::path& dest, const fs::path& target, std::string* method,
+                        std::string* error) {
+    const fs::path abs = absolute_target(target);
+    std::error_code ec;
+
+    if (sidecar_already_staged(dest, abs)) {
+        if (method) *method = "reuse";
+        return true;
     }
 
-    if (fs::exists(link, ec) || fs::is_symlink(link, ec)) {
-        fs::remove(link, ec);
+    if (fs::exists(dest, ec) || fs::is_symlink(dest, ec)) {
+        fs::remove(dest, ec);
         if (ec) {
             if (error)
-                *error = "cannot replace " + link.string() + ": " + ec.message() +
+                *error = "cannot replace " + dest.string() + ": " + ec.message() +
                          " (chown the install release dir to your user?)";
             return false;
         }
     }
-    ec.clear();
-    fs::create_symlink(abs, link, ec);
-    if (ec) {
-        if (error) *error = "symlink " + link.string() + " → " + abs.string() + ": " + ec.message();
-        return false;
-    }
-    return true;
-}
 
-// Point `link` at `target`, preferring a release-relative symlink when possible.
-bool point_link_at(const fs::path& link, const fs::path& target, std::string* error) {
-    std::error_code ec;
-    if (fs::exists(link, ec) || fs::is_symlink(link, ec)) fs::remove(link, ec);
-    ec.clear();
-
-    fs::path rel = fs::relative(target, link.parent_path(), ec);
-    if (!ec && !rel.empty()) {
-        const std::string s = rel.generic_string();
-        if (s.rfind("..", 0) != 0 && s.find("/../") == std::string::npos) {
-            fs::create_symlink(rel, link, ec);
-            if (!ec) return true;
-            ec.clear();
+    // Relative symlink when target is under dest's parent (nicer Wine / moves).
+    {
+        fs::path rel = fs::relative(abs, dest.parent_path(), ec);
+        if (!ec && !rel.empty()) {
+            const std::string s = rel.generic_string();
+            if (s.rfind("..", 0) != 0 && s.find("/../") == std::string::npos) {
+                ec.clear();
+                fs::create_symlink(rel, dest, ec);
+                if (!ec) {
+                    if (method) *method = "symlink";
+                    return true;
+                }
+            }
         }
     }
-    return replace_symlink(link, target, error);
+
+    ec.clear();
+    fs::create_symlink(abs, dest, ec);
+    if (!ec) {
+        if (method) *method = "symlink";
+        return true;
+    }
+
+    ec.clear();
+    fs::create_hard_link(abs, dest, ec);
+    if (!ec) {
+        if (method) *method = "hardlink";
+        return true;
+    }
+
+    ec.clear();
+    fs::copy_file(abs, dest, fs::copy_options::overwrite_existing, ec);
+    if (!ec) {
+        if (method) *method = "copy";
+        return true;
+    }
+
+    if (error) {
+        *error = "cannot stage " + dest.string() + " → " + abs.string() + ": " + ec.message();
+    }
+    return false;
 }
 
 // Stage install-local library.<ext> → library ROM so rom.cfg can use a path
@@ -187,7 +246,8 @@ bool stage_cart_launcher_sidecars(LaunchPlan& plan, const Title& title, std::str
 
     const fs::path rom_link = plan.cwd / ("library" + ext);
     std::string err;
-    if (!replace_symlink(rom_link, plan.media_path, &err)) {
+    std::string rom_method;
+    if (!stage_sidecar_file(rom_link, plan.media_path, &rom_method, &err)) {
         if (note) *note = err;
         return false;
     }
@@ -196,14 +256,17 @@ bool stage_cart_launcher_sidecars(LaunchPlan& plan, const Title& title, std::str
     if (title.platform == "gba" && !plan.save_path.empty() &&
         (fs::is_regular_file(plan.save_path, ec) || fs::is_symlink(plan.save_path, ec))) {
         const fs::path sav_link = plan.cwd / "library.sav";
-        if (!point_link_at(sav_link, plan.save_path, &err)) {
-            if (note) *note = "library" + ext + " ok; library.sav failed: " + err;
-            return true; // rom link still useful
+        std::string sav_method;
+        if (!stage_sidecar_file(sav_link, plan.save_path, &sav_method, &err)) {
+            if (note)
+                *note = "library" + ext + " (" + rom_method + "); library.sav failed: " + err;
+            return true; // rom sidecar still useful
         }
         if (note)
-            *note = "staged library" + ext + " + library.sav → " + plan.save_path.filename().string();
+            *note = "staged library" + ext + " (" + rom_method + ") + library.sav (" + sav_method +
+                    ") → " + plan.save_path.filename().string();
     } else if (note) {
-        *note = "staged library" + ext;
+        *note = "staged library" + ext + " (" + rom_method + ")";
     }
     return true;
 }
@@ -211,7 +274,7 @@ bool stage_cart_launcher_sidecars(LaunchPlan& plan, const Title& title, std::str
 // Rebuild argv for a cart direct boot (positional ROM, no --launcher).
 void set_cart_direct_argv(LaunchPlan& plan, const Title& title) {
     plan.argv.clear();
-    plan.argv.push_back(plan.binary.string());
+    plan.argv.push_back(path_utf8(plan.binary));
     if (!plan.media_path.empty()) {
         plan.argv.push_back(path_for_guest(plan.media_path, plan.use_wine));
     } else {
@@ -297,7 +360,7 @@ bool upsert_psxrecomp_settings(const fs::path& settings_path, const std::string&
 
 void append_default_argv(LaunchPlan& plan, const Title& title, bool open_launcher) {
     plan.argv.clear();
-    plan.argv.push_back(plan.binary.string());
+    plan.argv.push_back(path_utf8(plan.binary));
 
     const bool disc = is_disc_platform(title.platform);
     const bool open_ui = open_launcher && plan.mode != LaunchMode::Direct;
@@ -338,21 +401,54 @@ std::string format_argv(const std::vector<std::string>& argv) {
 
 #if defined(_WIN32)
 
+std::wstring utf8_to_wide(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), static_cast<int>(s.size()),
+                                nullptr, 0);
+    if (n > 0) {
+        std::wstring out(static_cast<size_t>(n), L'\0');
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), static_cast<int>(s.size()),
+                            out.data(), n);
+        return out;
+    }
+    // Legacy / ACP-sourced strings (path.string() without UTF-8).
+    n = MultiByteToWideChar(CP_ACP, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    if (n <= 0) return std::wstring(s.begin(), s.end());
+    std::wstring out(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_ACP, 0, s.data(), static_cast<int>(s.size()), out.data(), n);
+    return out;
+}
+
+std::wstring win_quote_arg(const std::wstring& arg) {
+    if (arg.empty()) return L"\"\"";
+    bool need = false;
+    for (wchar_t c : arg) {
+        if (c == L' ' || c == L'\t' || c == L'"') {
+            need = true;
+            break;
+        }
+    }
+    if (!need) return arg;
+    std::wstring out = L"\"";
+    for (wchar_t c : arg) {
+        if (c == L'"') out += L"\\\"";
+        else out += c;
+    }
+    out += L'"';
+    return out;
+}
+
 bool spawn_process(const LaunchPlan& plan, bool detach, int* exit_code, std::string* error) {
     std::wstring cmdline;
     for (size_t i = 0; i < plan.argv.size(); ++i) {
         if (i) cmdline.push_back(L' ');
-        std::wstring arg(plan.argv[i].begin(), plan.argv[i].end());
-        const bool quote = arg.find(L' ') != std::wstring::npos;
-        if (quote) cmdline.push_back(L'"');
-        cmdline += arg;
-        if (quote) cmdline.push_back(L'"');
+        cmdline += win_quote_arg(utf8_to_wide(plan.argv[i]));
     }
     std::vector<wchar_t> mutable_cmd(cmdline.begin(), cmdline.end());
     mutable_cmd.push_back(L'\0');
 
     std::wstring cwd;
-    if (!plan.cwd.empty()) cwd.assign(plan.cwd.wstring());
+    if (!plan.cwd.empty()) cwd = plan.cwd.wstring();
 
     STARTUPINFOW si{};
     si.cb = sizeof(si);

@@ -47,10 +47,20 @@ std::string narrow(const std::wstring& s) {
 }
 
 fs::path exe_path() {
-    wchar_t buf[MAX_PATH]{};
-    const DWORD n = GetModuleFileNameW(nullptr, buf, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return {};
-    return fs::path(buf);
+    // Grow past MAX_PATH so deep install directories still resolve.
+    DWORD cap = MAX_PATH;
+    std::wstring buf(cap, L'\0');
+    for (;;) {
+        const DWORD n = GetModuleFileNameW(nullptr, buf.data(), cap);
+        if (n == 0) return {};
+        if (n < cap) {
+            buf.resize(n);
+            return fs::path(buf);
+        }
+        if (cap >= 32768) return {};
+        cap *= 2;
+        buf.assign(cap, L'\0');
+    }
 }
 
 fs::path local_app_data() {
