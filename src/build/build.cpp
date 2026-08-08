@@ -14,9 +14,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <iostream>
+#include <map>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -1332,41 +1335,134 @@ std::string path_to_utf8(const fs::path& p) {
     const auto u8 = p.u8string();
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
 }
-#endif
 
-int run_capture_lines(const std::string& cmd, const fs::path& cwd,
-                      const std::function<void(const std::string&)>& on_line,
-                      std::string* combined_err) {
-    // Drop AppImage LD_LIBRARY_PATH for cmake/git/python children so system
-    // git-remote-https is not poisoned by the mount's libcurl.
-    AppImageEnvGuard env_guard;
-#if defined(_WIN32)
-    // Hidden console: CreateProcess + CREATE_NO_WINDOW (unlike _popen).
-    // Use cmd /S /C "…" so nested set "PATH=…" / quoted args survive; cwd via
-    // lpCurrentDirectory (avoid cd /D inside the same quoted string).
+std::wstring win_quote_arg(const std::wstring& arg) {
+    if (arg.empty()) return L"\"\"";
+    bool need = false;
+    for (wchar_t c : arg) {
+        if (c == L' ' || c == L'\t' || c == L'"') {
+            need = true;
+            break;
+        }
+    }
+    if (!need) return arg;
+    std::wstring out = L"\"";
+    for (wchar_t c : arg) {
+        if (c == L'"') out += L"\\\"";
+        else out += c;
+    }
+    out += L'"';
+    return out;
+}
+
+std::wstring win_lower(std::wstring s) {
+    for (wchar_t& c : s) {
+        if (c >= L'A' && c <= L'Z') c = static_cast<wchar_t>(c - L'A' + L'a');
+    }
+    return s;
+}
+
+// Prefer toolchain bin\<name>.exe, else leave bare name for PATH search.
+fs::path resolve_tool_exe(const std::string& name, const fs::path& path_prefix) {
+    std::error_code ec;
+    const fs::path as_path(name);
+    if (as_path.is_absolute() && fs::is_regular_file(as_path, ec)) return as_path;
+    if (!path_prefix.empty()) {
+        std::string base = as_path.filename().string();
+        if (base.empty()) base = name;
+        const fs::path cand = path_prefix / base;
+        if (fs::is_regular_file(cand, ec)) return cand;
+        const bool has_exe =
+            base.size() >= 4 &&
+            (base.compare(base.size() - 4, 4, ".exe") == 0 ||
+             base.compare(base.size() - 4, 4, ".EXE") == 0);
+        if (!has_exe) {
+            const fs::path cand_exe = path_prefix / (base + ".exe");
+            if (fs::is_regular_file(cand_exe, ec)) return cand_exe;
+        }
+    }
+    return as_path;
+}
+
+// Unicode environment block with PATH prepended and optional overrides.
+std::wstring build_env_block(const fs::path& path_prefix,
+                             const std::vector<std::pair<std::string, std::string>>& env_extra) {
+    std::map<std::wstring, std::wstring, std::less<>> vars;
+    LPWCH strings = GetEnvironmentStringsW();
+    if (strings) {
+        for (LPCWSTR p = strings; *p;) {
+            const std::wstring entry(p);
+            p += entry.size() + 1;
+            const size_t eq = entry.find(L'=');
+            if (eq == std::wstring::npos || eq == 0) continue;
+            vars[win_lower(entry.substr(0, eq))] = entry; // store "KEY=value"
+        }
+        FreeEnvironmentStringsW(strings);
+    }
+
+    auto put = [&](const std::wstring& key, const std::wstring& value) {
+        vars[win_lower(key)] = key + L"=" + value;
+    };
+
+    if (!path_prefix.empty()) {
+        std::wstring path = path_prefix.wstring();
+        auto it = vars.find(L"path");
+        if (it != vars.end()) {
+            const std::wstring& full = it->second;
+            const size_t eq = full.find(L'=');
+            if (eq != std::wstring::npos && eq + 1 < full.size()) {
+                path.push_back(L';');
+                path += full.substr(eq + 1);
+            }
+        }
+        put(L"PATH", path);
+    }
+    for (const auto& [k, v] : env_extra) {
+        if (k.empty()) continue;
+        put(narrow_to_wide(k), narrow_to_wide(v));
+    }
+
+    std::wstring block;
+    for (const auto& [_, entry] : vars) {
+        block += entry;
+        block.push_back(L'\0');
+    }
+    block.push_back(L'\0');
+    return block;
+}
+
+int run_capture_argv(const std::vector<std::string>& args, const fs::path& cwd,
+                     const fs::path& path_prefix,
+                     const std::vector<std::pair<std::string, std::string>>& env_extra,
+                     const std::function<void(const std::string&)>& on_line,
+                     std::string* combined_err) {
+    if (args.empty()) {
+        if (combined_err) *combined_err = "empty command";
+        return 127;
+    }
+
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
     HANDLE rd = nullptr;
     HANDLE wr = nullptr;
     if (!CreatePipe(&rd, &wr, &sa, 0)) {
-        if (combined_err) *combined_err = "CreatePipe failed for: " + cmd;
+        if (combined_err) *combined_err = "CreatePipe failed";
         return 127;
     }
     SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
 
-    std::string escaped;
-    escaped.reserve(cmd.size() + 8);
-    for (char c : cmd) {
-        if (c == '"') escaped.push_back('\\');
-        escaped.push_back(c);
+    const fs::path exe = resolve_tool_exe(args[0], path_prefix);
+    std::wstring cmdline = win_quote_arg(exe.wstring());
+    for (size_t i = 1; i < args.size(); ++i) {
+        cmdline.push_back(L' ');
+        cmdline += win_quote_arg(narrow_to_wide(args[i]));
     }
-    const std::wstring wcmd = L"cmd.exe /S /C \"" + narrow_to_wide(escaped) + L"\"";
-    std::vector<wchar_t> mutable_cmd(wcmd.begin(), wcmd.end());
+    std::vector<wchar_t> mutable_cmd(cmdline.begin(), cmdline.end());
     mutable_cmd.push_back(L'\0');
 
-    std::wstring wcwd;
-    if (!cwd.empty()) wcwd = cwd.wstring();
+    std::wstring env_block = build_env_block(path_prefix, env_extra);
+    std::wstring wcwd = cwd.empty() ? std::wstring() : cwd.wstring();
 
     STARTUPINFOW si{};
     si.cb = sizeof(si);
@@ -1377,15 +1473,16 @@ int run_capture_lines(const std::string& cmd, const fs::path& cwd,
     si.hStdInput = nullptr;
 
     PROCESS_INFORMATION pi{};
-    const BOOL ok =
-        CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
-                       nullptr, wcwd.empty() ? nullptr : wcwd.c_str(), &si, &pi);
+    const BOOL ok = CreateProcessW(
+        exe.is_absolute() ? exe.wstring().c_str() : nullptr, mutable_cmd.data(), nullptr, nullptr,
+        TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT, env_block.data(),
+        wcwd.empty() ? nullptr : wcwd.c_str(), &si, &pi);
     CloseHandle(wr);
-    wr = nullptr;
     if (!ok) {
         CloseHandle(rd);
         if (combined_err)
-            *combined_err = "CreateProcess failed (" + std::to_string(GetLastError()) + "): " + cmd;
+            *combined_err = "CreateProcess failed (" + std::to_string(GetLastError()) + "): " +
+                            path_to_utf8(exe);
         return 127;
     }
     CloseHandle(pi.hThread);
@@ -1423,28 +1520,8 @@ int run_capture_lines(const std::string& cmd, const fs::path& cwd,
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
     return static_cast<int>(code);
-#else
-    std::string full = "cd " + shell_quote(cwd.string()) + " && " + cmd + " 2>&1";
-    FILE* pipe = popen(full.c_str(), "r");
-    if (!pipe) {
-        if (combined_err) *combined_err = "failed to spawn: " + cmd;
-        return 127;
-    }
-    char buf[512];
-    std::string line;
-    while (std::fgets(buf, sizeof(buf), pipe)) {
-        line = buf;
-        while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
-        if (on_line) on_line(line);
-        if (combined_err) {
-            *combined_err += line;
-            *combined_err += '\n';
-        }
-    }
-    const int st = pclose(pipe);
-    return WIFEXITED(st) ? WEXITSTATUS(st) : 1;
-#endif
 }
+#endif
 
 std::string path_with_prefix(const fs::path& path_prefix) {
     const char* cur = std::getenv("PATH");
@@ -1482,29 +1559,64 @@ std::string read_cmake_cache_generator(const fs::path& cache_file) {
     return {};
 }
 
+int run_capture_lines(const std::string& cmd, const fs::path& cwd,
+                      const std::function<void(const std::string&)>& on_line,
+                      std::string* combined_err) {
+    // Drop AppImage LD_LIBRARY_PATH for cmake/git/python children so system
+    // git-remote-https is not poisoned by the mount's libcurl.
+    AppImageEnvGuard env_guard;
+#if defined(_WIN32)
+    (void)cmd;
+    (void)cwd;
+    (void)on_line;
+    if (combined_err)
+        *combined_err = "internal error: Windows builds must use run_with_path/argv spawn";
+    return 127;
+#else
+    std::string full = "cd " + shell_quote(cwd.string()) + " && " + cmd + " 2>&1";
+    FILE* pipe = popen(full.c_str(), "r");
+    if (!pipe) {
+        if (combined_err) *combined_err = "failed to spawn: " + cmd;
+        return 127;
+    }
+    char buf[512];
+    std::string line;
+    while (std::fgets(buf, sizeof(buf), pipe)) {
+        line = buf;
+        while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+        if (on_line) on_line(line);
+        if (combined_err) {
+            *combined_err += line;
+            *combined_err += '\n';
+        }
+    }
+    const int st = pclose(pipe);
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+#endif
+}
+
 int run_with_path(const std::vector<std::string>& args, const fs::path& cwd,
                   const fs::path& path_prefix, std::string* err_out,
-                  const std::function<void(const std::string&)>& on_line = {}) {
+                  const std::function<void(const std::string&)>& on_line = {},
+                  const std::vector<std::pair<std::string, std::string>>& env_extra = {}) {
+    AppImageEnvGuard env_guard;
+#if defined(_WIN32)
+    return run_capture_argv(args, cwd, path_prefix, env_extra, on_line, err_out);
+#else
     std::ostringstream cmd;
-#if !defined(_WIN32)
     if (!path_prefix.empty()) {
         cmd << "PATH=" << shell_quote(path_with_prefix(path_prefix)) << " ";
     }
-#endif
+    for (const auto& [k, v] : env_extra) {
+        if (k.empty()) continue;
+        cmd << k << "=" << shell_quote(v) << " ";
+    }
     for (size_t i = 0; i < args.size(); ++i) {
         if (i) cmd << ' ';
         cmd << shell_quote(args[i]);
     }
-#if defined(_WIN32)
-    std::string env_prefix;
-    if (!path_prefix.empty()) {
-        env_prefix = "set \"PATH=" + path_with_prefix(path_prefix) + "\" && ";
-    }
-    const std::string full = env_prefix + cmd.str();
-#else
-    const std::string full = cmd.str();
+    return run_capture_lines(cmd.str(), cwd, on_line, err_out);
 #endif
-    return run_capture_lines(full, cwd, on_line, err_out);
 }
 
 // Prefer a short summary when the caller already streamed CLI via on_output.
@@ -2265,36 +2377,28 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
             }
         }
 
-        std::ostringstream gen_cmd;
-#if !defined(_WIN32)
-        if (!path_prefix.empty())
-            gen_cmd << "PATH=" << shell_quote(path_with_prefix(path_prefix)) << " ";
-        if (!psxrecomp_game.empty())
-            gen_cmd << "PSXRECOMP_GAME=" << shell_quote(psxrecomp_game.string()) << " ";
-        if (!psxrecomp_bios.empty())
-            gen_cmd << "PSXRECOMP_BIOS=" << shell_quote(psxrecomp_bios.string()) << " ";
-#endif
+        std::ostringstream gen_preview;
         for (size_t i = 0; i < gen_args.size(); ++i) {
-            if (i) gen_cmd << ' ';
-            gen_cmd << shell_quote(gen_args[i]);
+            if (i) gen_preview << ' ';
+            gen_preview << shell_quote(gen_args[i]);
         }
+        std::vector<std::pair<std::string, std::string>> gen_env;
 #if defined(_WIN32)
-        std::string gen_full;
-        if (!path_prefix.empty())
-            gen_full = "set \"PATH=" + path_with_prefix(path_prefix) + "\" && ";
         if (!psxrecomp_game.empty())
-            gen_full += "set \"PSXRECOMP_GAME=" + psxrecomp_game.string() + "\" && ";
+            gen_env.emplace_back("PSXRECOMP_GAME", path_to_utf8(psxrecomp_game));
         if (!psxrecomp_bios.empty())
-            gen_full += "set \"PSXRECOMP_BIOS=" + psxrecomp_bios.string() + "\" && ";
-        gen_full += gen_cmd.str();
+            gen_env.emplace_back("PSXRECOMP_BIOS", path_to_utf8(psxrecomp_bios));
 #else
-        const std::string gen_full = gen_cmd.str();
+        if (!psxrecomp_game.empty())
+            gen_env.emplace_back("PSXRECOMP_GAME", psxrecomp_game.string());
+        if (!psxrecomp_bios.empty())
+            gen_env.emplace_back("PSXRECOMP_BIOS", psxrecomp_bios.string());
 #endif
 
-        if (opts.on_output) opts.on_output("$ " + gen_full);
+        if (opts.on_output) opts.on_output("$ " + gen_preview.str());
         std::string gen_log;
-        const int gen_rc = run_capture_lines(
-            gen_full, src.root,
+        const int gen_rc = run_with_path(
+            gen_args, src.root, path_prefix, &gen_log,
             [&](const std::string& line) {
                 // Stream human CLI; JSON progress ticks already go through on_progress.
                 if (opts.on_output && (line.empty() || line[0] != '{')) opts.on_output(line);
@@ -2316,7 +2420,7 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
                 } catch (...) {
                 }
             },
-            &gen_log);
+            gen_env);
         if (gen_rc != 0) {
             result.message = fail_with_log(
                 "generate failed (exit " + std::to_string(gen_rc) + ")", gen_log, opts.on_output);

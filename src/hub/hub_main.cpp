@@ -1765,47 +1765,45 @@ void draw_log(HubModel& hub, const Theme& th, float height) {
     }
     ImGui::Separator();
 
-    // Read-only multiline (drag-select / Ctrl+C). Terminal-style: pin to bottom
-    // when short, and keep following new lines until the user scrolls up.
+    // Console-style log: TextWrapped lines in one scroller (InputTextMultiline
+    // kept its own inner scroll and fought stick-to-bottom). Use Copy for
+    // clipboard; scroll follows new lines until the user scrolls up.
     ImGui::BeginChild("activity_scroll", ImVec2(0, 0), ImGuiChildFlags_None);
-    static std::vector<char> activity_buf;
-    static std::string activity_plain;
     static bool auto_scroll = true;
 
-    if (activity_plain != plain) {
-        activity_plain = plain;
-        activity_buf.assign(plain.begin(), plain.end());
-        activity_buf.push_back('\0');
-    }
-
-    // Wheel/scrollbar applied before layout — leave follow mode if not at bottom.
     const float prev_sy = ImGui::GetScrollY();
     const float prev_sm = ImGui::GetScrollMaxY();
     if (prev_sm > 1.f && prev_sy < prev_sm - 16.f) auto_scroll = false;
 
-    const float avail_x = ImGui::GetContentRegionAvail().x;
-    const float avail_y = ImGui::GetContentRegionAvail().y;
-    const char* text_end = activity_buf.data() + (activity_buf.empty() ? 0 : activity_buf.size() - 1);
-    const ImVec2 text_sz = ImGui::CalcTextSize(activity_buf.data(), text_end, false,
-                                               avail_x > 1.f ? avail_x : 0.f);
-    const float box_h = std::max(text_sz.y, ImGui::GetTextLineHeight());
+    if (lines.empty()) {
+        ImGui::TextColored(th.text_muted, "%s", plain.c_str());
+    } else {
+        for (const auto& line : lines) {
+            ImVec4 col = th.text;
+            switch (line.level) {
+            case retcomm::hub::LogLevel::Info:
+                col = th.text_muted;
+                break;
+            case retcomm::hub::LogLevel::Accent:
+                col = th.accent;
+                break;
+            case retcomm::hub::LogLevel::Good:
+                col = th.good;
+                break;
+            case retcomm::hub::LogLevel::Warn:
+                col = th.warn;
+                break;
+            case retcomm::hub::LogLevel::Error:
+                col = ImVec4(0.95f, 0.35f, 0.40f, 1.f); // no Theme::error token
+                break;
+            }
+            ImGui::PushStyleColor(ImGuiCol_Text, col);
+            ImGui::TextWrapped("%s", line.text.c_str());
+            ImGui::PopStyleColor();
+        }
+    }
 
-    // Short log: pad so the latest lines sit on the bottom edge of the panel.
-    if (box_h < avail_y) ImGui::Dummy(ImVec2(0.f, avail_y - box_h));
-
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_Text, lines.empty() ? th.text_muted : th.text);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.f, 0.f));
-    ImGui::InputTextMultiline(
-        "##activity_text", activity_buf.data(), activity_buf.size(), ImVec2(avail_x, box_h),
-        ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_NoUndoRedo);
-    ImGui::PopStyleVar(2);
-    ImGui::PopStyleColor(4);
-
-    if (auto_scroll) ImGui::SetScrollY(ImGui::GetScrollMaxY());
+    if (auto_scroll) ImGui::SetScrollHereY(1.f);
     if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 16.f) auto_scroll = true;
 
     ImGui::EndChild();

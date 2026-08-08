@@ -44,8 +44,9 @@ cmake-clang-v1-<os>/
 ```
 
 RetComM prepends `<pack>/bin` (or the single nested folder’s `bin/`) to `PATH`
-for configure/build. On Windows it forces `-G Ninja` when `ninja.exe` is present
-(wiping a stale NMake/`Visual Studio` `CMakeCache.txt` if needed) and passes
+for configure/build (Windows: `CreateProcess` + env block — not `cmd /C` quote
+soup). On Windows it forces `-G Ninja` when `ninja.exe` is present (wiping a
+stale NMake/`Visual Studio` `CMakeCache.txt` if needed) and passes
 `-DCMAKE_C_COMPILER` / `-DCMAKE_CXX_COMPILER` to the pack’s `clang` /
 `clang++`. Prefer **downloading** `cmake-clang-v1` from
 [TechnicallyComputers/retcomm-toolchains](https://github.com/TechnicallyComputers/retcomm-toolchains)
