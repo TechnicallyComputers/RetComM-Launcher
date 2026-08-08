@@ -494,6 +494,73 @@ RommRomScanResult scan_romm_rom_index(const Paths& paths, const AppConfig& cfg,
     return result;
 }
 
+std::string basename_only(std::string name) {
+    while (!name.empty() && (name.back() == '/' || name.back() == '\\')) name.pop_back();
+    const auto slash = name.find_last_of("/\\");
+    if (slash != std::string::npos) name = name.substr(slash + 1);
+    return name;
+}
+
+bool ends_with_ci_str(const std::string& s, const char* suf) {
+    const std::string lower = lower_copy(s);
+    const std::string suffix = lower_copy(suf);
+    return lower.size() >= suffix.size() &&
+           lower.compare(lower.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+struct RommRemoteFile {
+    int id = 0;
+    std::string name;
+    std::uint64_t size = 0;
+};
+
+bool download_romm_file(const std::string& base, int rom_id, const RommRemoteFile& file,
+                        const fs::path& dest,
+                        const std::vector<std::pair<std::string, std::string>>& headers,
+                        const RommProgressFn& on_progress, std::string* error) {
+    const std::string enc = url_encode_path_segment(file.name);
+    std::vector<std::string> urls;
+    if (file.id > 0) {
+        urls.push_back(base + "/api/roms/" + std::to_string(rom_id) + "/content/" + enc +
+                       "?file_ids=" + std::to_string(file.id));
+    }
+    urls.push_back(base + "/api/roms/" + std::to_string(rom_id) + "/content/" + enc);
+    if (file.id > 0) {
+        // Legacy path that some RomM builds still expose for multi-file parts.
+        urls.push_back(base + "/api/roms/" + std::to_string(file.id) + "/files/content/" + enc);
+    }
+
+    std::string last_err;
+    for (const auto& url : urls) {
+        progress(on_progress, "RomM: downloading " + file.name + "…");
+        int last_pct = -1;
+        std::string dl_err;
+        if (http_download(url, dest, &dl_err, headers,
+                          [&](std::uint64_t got, std::uint64_t total) {
+                              if (total == 0) {
+                                  if (got == 0 || (got & ((1u << 20) - 1)) == 0) {
+                                      progress(on_progress,
+                                               "RomM: downloading " + file.name + "… " +
+                                                   std::to_string(got >> 20) + " MiB");
+                                  }
+                                  return;
+                              }
+                              const int pct = static_cast<int>((got * 100) / total);
+                              if (pct == last_pct || (pct != 100 && pct % 5 != 0)) return;
+                              last_pct = pct;
+                              progress(on_progress, "RomM: downloading " + file.name + "… " +
+                                                        std::to_string(pct) + "%");
+                          })) {
+            return true;
+        }
+        last_err = dl_err;
+        std::error_code ec;
+        fs::remove(dest, ec);
+    }
+    if (error) *error = last_err.empty() ? "download failed" : last_err;
+    return false;
+}
+
 RommFetchResult fetch_rom_from_romm(const AppConfig& cfg, const Title& title,
                                     RommProgressFn on_progress) {
     if (cfg.library_root.empty()) return fail("library_root is empty — set it in Library settings");
@@ -502,58 +569,99 @@ RommFetchResult fetch_rom_from_romm(const AppConfig& cfg, const Title& title,
     if (!match.available) return fail(match.message.empty() ? "RomM: no match" : match.message);
 
     const std::string base = normalize_base(cfg.romm.base_url);
-    const fs::path dest_dir =
+    const fs::path plat_dir =
         ensure_platform_dir(cfg.library_root, cfg.folders_for_platform(title.platform));
-    if (dest_dir.empty())
+    if (plat_dir.empty())
         return fail("cannot create library folder under " + cfg.library_root.string());
 
-    const fs::path dest = dest_dir / match.file_name;
-    std::string url;
-    if (match.file_id > 0) {
-        url = base + "/api/roms/" + std::to_string(match.file_id) + "/files/content/" +
-              url_encode_path_segment(match.file_name);
-    } else {
-        url = base + "/api/roms/" + std::to_string(match.rom_id) + "/content/" +
-              url_encode_path_segment(match.file_name);
-    }
-
-    progress(on_progress, "RomM: downloading " + match.file_name + " (" + match.matched_by +
-                              ")…");
-    std::string dl_err;
     std::vector<std::pair<std::string, std::string>> dl_headers;
     if (!cfg.romm.api_token.empty())
         dl_headers.emplace_back("Authorization", "Bearer " + cfg.romm.api_token);
+    const auto headers = auth_headers(cfg.romm);
 
-    int last_pct = -1;
-    if (!http_download(url, dest, &dl_err, dl_headers,
-                       [&](std::uint64_t got, std::uint64_t total) {
-                           if (total == 0) {
-                               if (got == 0 || (got & ((1u << 20) - 1)) == 0) {
-                                   progress(on_progress,
-                                            "RomM: downloading " + match.file_name + "… " +
-                                                std::to_string(got >> 20) + " MiB");
-                               }
-                               return;
-                           }
-                           const int pct = static_cast<int>((got * 100) / total);
-                           if (pct == last_pct || (pct != 100 && pct % 5 != 0)) return;
-                           last_pct = pct;
-                           progress(on_progress, "RomM: downloading " + match.file_name + "… " +
-                                                     std::to_string(pct) + "%");
-                       })) {
-        return fail("RomM download failed: " + dl_err);
+    // Refresh ROM detail so multi-file sets (Redump .cue + tracks) download fully.
+    json detail;
+    std::string err;
+    progress(on_progress, "RomM: loading file list…");
+    if (!http_get_json(base + "/api/roms/" + std::to_string(match.rom_id), headers, detail, &err)) {
+        return fail("RomM detail failed: " + err);
     }
 
-    std::error_code ec;
-    const auto sz = fs::file_size(dest, ec);
+    std::vector<RommRemoteFile> files;
+    if (detail.contains("files") && detail.at("files").is_array()) {
+        for (const auto& f : detail.at("files")) {
+            if (!f.is_object()) continue;
+            RommRemoteFile rf;
+            rf.id = f.value("id", 0);
+            rf.name = basename_only(f.value("file_name", ""));
+            rf.size = f.value("file_size_bytes", 0ull);
+            if (!rf.name.empty()) files.push_back(std::move(rf));
+        }
+    }
+    if (files.empty()) {
+        RommRemoteFile rf;
+        rf.id = match.file_id;
+        rf.name = basename_only(match.file_name);
+        rf.size = 0;
+        if (rf.name.empty()) rf.name = basename_only(detail.value("fs_name", ""));
+        if (!rf.name.empty()) files.push_back(std::move(rf));
+    }
+    if (files.empty()) return fail("RomM: matched ROM has no downloadable files");
+
+    std::string set_name = basename_only(detail.value("fs_name", ""));
+    if (set_name.empty()) set_name = basename_only(match.file_name);
+    // Folder dumps often use the set name without an extension.
+    if (ends_with_ci_str(set_name, ".cue") || ends_with_ci_str(set_name, ".bin") ||
+        ends_with_ci_str(set_name, ".iso") || ends_with_ci_str(set_name, ".chd")) {
+        const auto dot = set_name.find_last_of('.');
+        if (dot != std::string::npos) set_name = set_name.substr(0, dot);
+    }
+
+    fs::path dest_dir = plat_dir;
+    if (files.size() >= 2 && !set_name.empty()) {
+        dest_dir = plat_dir / set_name;
+        std::error_code ec;
+        fs::create_directories(dest_dir, ec);
+        if (ec) return fail("cannot create " + dest_dir.string() + ": " + ec.message());
+    }
+
+    progress(on_progress, "RomM: downloading " + std::to_string(files.size()) + " file(s) (" +
+                              match.matched_by + ")…");
+
+    std::uint64_t total_bytes = 0;
+    fs::path cue_path;
+    fs::path first_path;
+    int saved = 0;
+    for (size_t i = 0; i < files.size(); ++i) {
+        const auto& f = files[i];
+        const fs::path dest = dest_dir / f.name;
+        progress(on_progress, "RomM: file " + std::to_string(i + 1) + "/" +
+                                  std::to_string(files.size()) + " — " + f.name);
+        std::string dl_err;
+        if (!download_romm_file(base, match.rom_id, f, dest, dl_headers, on_progress, &dl_err)) {
+            return fail("RomM download failed (" + f.name + "): " + dl_err);
+        }
+        std::error_code ec;
+        total_bytes += ec ? 0 : static_cast<std::uint64_t>(fs::file_size(dest, ec));
+        if (first_path.empty()) first_path = dest;
+        if (ends_with_ci_str(f.name, ".cue")) cue_path = dest;
+        ++saved;
+    }
+
     RommFetchResult r;
     r.ok = true;
-    r.saved_path = dest;
+    r.saved_path = !cue_path.empty() ? cue_path : first_path;
     r.matched_by = match.matched_by;
-    r.remote_name = match.file_name;
-    r.bytes = ec ? 0 : static_cast<std::uint64_t>(sz);
-    r.message =
-        "Downloaded " + match.file_name + " via " + match.matched_by + " → " + dest.string();
+    r.remote_name = !set_name.empty() ? set_name : match.file_name;
+    r.bytes = total_bytes;
+    r.files_saved = saved;
+    std::ostringstream oss;
+    oss << "Downloaded " << saved << " file(s) via " << match.matched_by << " → "
+        << (!cue_path.empty() ? cue_path.string() : dest_dir.string());
+    if (title.rom_identity.require_cue && cue_path.empty()) {
+        oss << " (warning: no .cue in RomM set — library match may fail)";
+    }
+    r.message = oss.str();
     return r;
 }
 

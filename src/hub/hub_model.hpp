@@ -297,6 +297,7 @@ struct HubModel {
     HubJob job = HubJob::None;
     std::string job_title_id;
     bool job_force_boxart = false; // FetchBoxart: re-download even when cached
+    bool job_fetch_romm_first = false;
     std::thread worker;
     std::thread launch_worker;
     std::string launcher_version; // display: running binary version (RETCOMM_VERSION)
@@ -329,8 +330,15 @@ struct HubModel {
     // Download covers for catalog titles missing from the active cache (or all when force).
     // Safe to call from the hub worker thread.
     void fetch_boxart_for_catalog(bool force = false);
-    bool start_job(HubJob j, const std::string& title_id = {}, bool force_boxart = false);
+    // fetch_romm_first: Install/Build searches RomM + rescans before building when
+    // the library has no verified ROM (set by the hub confirm modal).
+    bool start_job(HubJob j, const std::string& title_id = {}, bool force_boxart = false,
+                   bool fetch_romm_first = false);
     void join_worker();
+
+    // Build & Install with no local ROM → confirm RomM download modal.
+    bool show_romm_install_prompt = false;
+    std::string romm_install_prompt_id;
 
     void open_settings();
     void open_setup();

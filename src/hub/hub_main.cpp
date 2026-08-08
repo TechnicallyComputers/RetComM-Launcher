@@ -1108,14 +1108,31 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
     } else if (row.supports_local_build) {
         if (!row.has_rom) {
             ImGui::PushStyleColor(ImGuiCol_Text, th.warn);
-            ImGui::TextWrapped(
-                "Match a verified .cue / ROM in your library before Build & Install.");
+            if (row.romm_ready && row.has_rom_identity) {
+                ImGui::TextWrapped(
+                    "No verified .cue / ROM in your library yet. Build & Install can search "
+                    "RomM and download the matched dump first.");
+            } else if (row.has_rom_identity) {
+                ImGui::TextWrapped(
+                    "Match a verified .cue / ROM in your library, or configure RomM Sync "
+                    "to download it.");
+            } else {
+                ImGui::TextWrapped(
+                    "Match a verified .cue / ROM in your library before Build & Install.");
+            }
             ImGui::PopStyleColor();
         }
-        ImGui::BeginDisabled(block_title_mutate);
+        ImGui::BeginDisabled(block_title_mutate ||
+                             (!row.has_rom && !(row.romm_ready && row.has_rom_identity)));
         if (accent_button(row.install_dir_present ? "Retry Build & Install" : "Build & Install", th,
-                          ImVec2(-1, 0)))
-            hub.start_job(HubJob::Install, row.id);
+                          ImVec2(-1, 0))) {
+            if (!row.has_rom && row.romm_ready && row.has_rom_identity) {
+                hub.romm_install_prompt_id = row.id;
+                hub.show_romm_install_prompt = true;
+            } else {
+                hub.start_job(HubJob::Install, row.id);
+            }
+        }
         // Wine only when there is no native release path for this OS.
         if (row.can_wine_install && !has_native_install) {
             if (ImGui::Button("Install with WINE", ImVec2(-1, 0)))
@@ -1905,6 +1922,39 @@ int main(int argc, char** argv) {
         draw_log_splitter(log_h, log_h_pref, avail_y, th);
         draw_log(hub, th, log_h);
         draw_setup_wizard(hub, th, window);
+
+        if (hub.show_romm_install_prompt) {
+            ImGui::OpenPopup("Download ROM from RomM###romm_install_prompt");
+            hub.show_romm_install_prompt = false;
+        }
+        if (ImGui::BeginPopupModal("Download ROM from RomM###romm_install_prompt", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            const std::string tid = hub.romm_install_prompt_id;
+            const TitleRow* prow = nullptr;
+            for (const auto& r : hub.rows) {
+                if (r.id == tid) {
+                    prow = &r;
+                    break;
+                }
+            }
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 420.f);
+            ImGui::TextWrapped("%s", prow ? prow->name.c_str() : tid.c_str());
+            ImGui::Dummy(ImVec2(0, 6));
+            ImGui::TextWrapped(
+                "No verified ROM is in your library yet. Search RomM for a matching dump "
+                "(multi-track discs download the full .cue + track set), then run Build & "
+                "Install?");
+            ImGui::PopTextWrapPos();
+            ImGui::Dummy(ImVec2(0, 10));
+            ImGui::BeginDisabled(hub.job_running.load() || tid.empty());
+            if (accent_button("Download from RomM & Build", th, ImVec2(-1, 0))) {
+                hub.start_job(HubJob::Install, tid, false, true);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            if (ImGui::Button("Cancel", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+            ImGui::EndPopup();
+        }
 
         if (hub.toolchain_prompt_pending.exchange(false))
             ImGui::OpenPopup("Toolchain update###toolchain_update");

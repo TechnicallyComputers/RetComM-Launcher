@@ -19,10 +19,11 @@ using RommProgressFn = std::function<void(const std::string& status)>;
 struct RommFetchResult {
     bool ok = false;
     std::string message;
-    fs::path saved_path;
+    fs::path saved_path;     // preferred path (.cue when present, else primary dump)
     std::string matched_by;  // sha1 | crc32 | size | filename
-    std::string remote_name; // remote fs_name / file_name
+    std::string remote_name; // remote fs_name / primary file_name
     std::uint64_t bytes = 0;
+    int files_saved = 0; // multi-file disc sets download every RomM file
 };
 
 // Search RomM for a ROM whose hashes/size/name match the title's rom_identity,

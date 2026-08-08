@@ -553,7 +553,8 @@ void HubModel::fetch_boxart_for_catalog(bool force) {
     set_status(oss.str());
 }
 
-bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxart) {
+bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxart,
+                         bool fetch_romm_first) {
     // Play can overlap Build & Install / scans — dedicated thread.
     if (j == HubJob::Launch) {
         if (launch_running.exchange(true)) {
@@ -615,14 +616,76 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
     job = j;
     job_title_id = title_id;
     job_force_boxart = force_boxart;
+    job_fetch_romm_first = fetch_romm_first;
 
-    worker = std::thread([this, j, title_id, force_boxart] {
+    worker = std::thread([this, j, title_id, force_boxart, fetch_romm_first] {
         try {
             ensure_dirs(paths);
             cfg = load_app_config(paths.config_path);
 
             auto find_title = [&]() -> const Title* {
                 return catalog.find(title_id);
+            };
+
+            auto rescan_library_after_romm = [&](const Title& t,
+                                                 const RommFetchResult& fr) -> bool {
+                set_status("RomM: scanning library for new ROM…");
+                library = load_library_index(paths.library_index_path);
+                ScanOptions opts;
+                opts.index = &library;
+                auto scan = scan_rom_library(catalog, cfg, opts);
+                merge_scan_into_index(library, catalog, scan, cfg.library_root);
+                save_library_index(paths.library_index_path, library);
+                const fs::path bound = library.preferred_rom(t.id);
+                append_log("ROM scan after download: " + std::to_string(scan.matches.size()) +
+                           " matches" +
+                           (bound.empty() ? "" : (" (bound " + bound.string() + ")")));
+                {
+                    romm_roms = load_romm_rom_index(paths.romm_rom_index_path);
+                    RommRomIndexEntry e;
+                    e.available = true;
+                    e.file_name = fr.remote_name;
+                    e.matched_by = fr.matched_by;
+                    e.checked_at = "";
+                    romm_roms.by_title[t.id] = std::move(e);
+                    save_romm_rom_index(paths.romm_rom_index_path, romm_roms, nullptr);
+                }
+                return !bound.empty();
+            };
+
+            auto fetch_romm_and_bind = [&](const Title& t) -> bool {
+                if (!t.has_rom_identity()) {
+                    append_log("verified ROM required — catalog has no rom_identity for " + t.id);
+                    return false;
+                }
+                if (!cfg.romm.enabled() || cfg.romm.api_token.empty()) {
+                    append_log("verified ROM required — scan your library or configure RomM");
+                    return false;
+                }
+                if (cfg.library_root.empty()) {
+                    append_log("verified ROM required — set library_root before RomM download");
+                    return false;
+                }
+                set_status("RomM: finding ROM for " + t.id + "…");
+                auto fr = fetch_rom_from_romm(cfg, t, [this](const std::string& s) {
+                    set_status(s);
+                });
+                append_log(fr.message);
+                if (!fr.ok) return false;
+                if (!rescan_library_after_romm(t, fr)) {
+                    append_log("RomM download finished but library still has no verified match "
+                               "for " +
+                               t.id + " (multi-track discs need .cue + all tracks)");
+                    set_status("RomM ROM incomplete: " + t.id);
+                    return false;
+                }
+                set_status("RomM ROM ready: " + t.id);
+                return true;
+            };
+
+            auto ensure_rom_via_romm = [&](const Title& t) -> bool {
+                if (!library.preferred_rom(t.id).empty()) return true;
+                return fetch_romm_and_bind(t);
             };
 
             switch (j) {
@@ -639,6 +702,13 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 if (!t) {
                     append_log("unknown title: " + title_id);
                     break;
+                }
+                // Local builds need a verified ROM; hub confirm sets fetch_romm_first.
+                if (!prebuilt && t->build.enabled && fetch_romm_first) {
+                    if (!ensure_rom_via_romm(*t)) {
+                        set_status("Install failed: " + title_id);
+                        break;
+                    }
                 }
                 InstallOptions opts;
                 opts.force = false;
@@ -920,42 +990,21 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 break;
             }
             case HubJob::FetchRommRom: {
-                set_status("RomM: finding ROM for " + title_id + "…");
                 const auto* t = find_title();
                 if (!t) {
                     append_log("unknown title: " + title_id);
                     break;
                 }
-                auto fr = fetch_rom_from_romm(cfg, *t, [this](const std::string& s) {
-                    set_status(s);
-                });
-                append_log(fr.message);
-                if (!fr.ok) {
-                    set_status("RomM ROM fetch failed: " + title_id);
+                if (!fetch_romm_and_bind(*t)) {
+                    std::string st;
+                    {
+                        std::lock_guard<std::mutex> lock(mu);
+                        st = status;
+                    }
+                    if (st.find("incomplete") == std::string::npos)
+                        set_status("RomM ROM fetch failed: " + title_id);
                     break;
                 }
-                // Re-index so the new file binds to the title.
-                set_status("RomM: scanning library for new ROM…");
-                library = load_library_index(paths.library_index_path);
-                ScanOptions opts;
-                opts.index = &library;
-                auto scan = scan_rom_library(catalog, cfg, opts);
-                merge_scan_into_index(library, catalog, scan, cfg.library_root);
-                save_library_index(paths.library_index_path, library);
-                append_log("ROM scan after download: " + std::to_string(scan.matches.size()) +
-                           " matches");
-                // Mark available in RomM index cache.
-                {
-                    romm_roms = load_romm_rom_index(paths.romm_rom_index_path);
-                    RommRomIndexEntry e;
-                    e.available = true;
-                    e.file_name = fr.remote_name;
-                    e.matched_by = fr.matched_by;
-                    e.checked_at = "";
-                    romm_roms.by_title[title_id] = std::move(e);
-                    save_romm_rom_index(paths.romm_rom_index_path, romm_roms, nullptr);
-                }
-                set_status("RomM ROM ready: " + title_id);
                 break;
             }
             case HubJob::ScanRommRoms: {
