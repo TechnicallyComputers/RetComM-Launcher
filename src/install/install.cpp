@@ -17,8 +17,14 @@
 #include <sstream>
 #include <system_error>
 #include <unordered_set>
+#include <vector>
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <unistd.h>
 #endif
 
@@ -334,6 +340,112 @@ bool is_archive_path(const fs::path& p) {
            ends_with_ci(name, ".tar.xz") || ends_with_ci(name, ".tar.bz2");
 }
 
+#if defined(_WIN32)
+
+bool win_exe_on_path(const wchar_t* name) {
+    wchar_t buf[MAX_PATH];
+    return SearchPathW(nullptr, name, L".exe", MAX_PATH, buf, nullptr) != 0;
+}
+
+std::wstring win_quote_arg(const std::wstring& arg) {
+    if (arg.empty()) return L"\"\"";
+    bool need = false;
+    for (wchar_t c : arg) {
+        if (c == L' ' || c == L'\t' || c == L'"') {
+            need = true;
+            break;
+        }
+    }
+    if (!need) return arg;
+    std::wstring out = L"\"";
+    for (wchar_t c : arg) {
+        if (c == L'"') out += L"\\\"";
+        else out += c;
+    }
+    out += L'"';
+    return out;
+}
+
+// Spawn without a console window; returns process exit code, or -1 on spawn failure.
+int win_run_hidden(const std::wstring& exe, const std::vector<std::wstring>& args,
+                   std::string* err_out) {
+    std::wstring cmdline = win_quote_arg(exe);
+    for (const auto& a : args) {
+        cmdline.push_back(L' ');
+        cmdline += win_quote_arg(a);
+    }
+    std::vector<wchar_t> mutable_cmd(cmdline.begin(), cmdline.end());
+    mutable_cmd.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    const BOOL ok =
+        CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                       nullptr, nullptr, &si, &pi);
+    if (!ok) {
+        if (err_out)
+            *err_out = "CreateProcess failed (" + std::to_string(GetLastError()) + "): " +
+                       fs::path(exe).string();
+        return -1;
+    }
+    CloseHandle(pi.hThread);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    if (code != 0 && err_out) {
+        *err_out = "command failed (" + std::to_string(code) + "): " + fs::path(exe).string();
+    }
+    return static_cast<int>(code);
+}
+
+std::wstring win_ps_single_quote(const fs::path& p) {
+    std::wstring s = p.wstring();
+    std::wstring out;
+    out.reserve(s.size() + 2);
+    for (wchar_t c : s) {
+        if (c == L'\'') out += L"''";
+        else out += c;
+    }
+    return out;
+}
+
+bool extract_archive_windows(const fs::path& archive, const fs::path& dest, std::string* error) {
+    std::string err;
+
+    // Windows 10+ ships tar.exe (libarchive) — handles zip and common tar.* formats.
+    if (win_exe_on_path(L"tar")) {
+        if (win_run_hidden(L"tar.exe",
+                           {L"-xf", archive.wstring(), L"-C", dest.wstring()}, &err) == 0)
+            return true;
+    }
+
+    // PowerShell Expand-Archive for .zip (same approach as the portable stub).
+    const std::string name = archive.filename().string();
+    if (ends_with_ci(name, ".zip") && win_exe_on_path(L"powershell")) {
+        const std::wstring cmd =
+            L"Expand-Archive -LiteralPath '" + win_ps_single_quote(archive) +
+            L"' -DestinationPath '" + win_ps_single_quote(dest) + L"' -Force";
+        if (win_run_hidden(L"powershell.exe",
+                           {L"-NoProfile", L"-ExecutionPolicy", L"Bypass", L"-Command", cmd},
+                           &err) == 0)
+            return true;
+    }
+
+    // Optional 7-Zip on PATH.
+    if (win_exe_on_path(L"7z")) {
+        const std::wstring out_sw = L"-o" + dest.wstring();
+        if (win_run_hidden(L"7z.exe", {L"x", L"-y", out_sw, archive.wstring()}, &err) == 0)
+            return true;
+    }
+
+    if (error) *error = err.empty() ? "no extractor succeeded for " + archive.string() : err;
+    return false;
+}
+
+#else // !_WIN32
+
 int run_cmd(const std::string& cmd, std::string* err_out = nullptr) {
     const int rc = std::system(cmd.c_str());
     if (rc != 0 && err_out) *err_out = "command failed (" + std::to_string(rc) + "): " + cmd;
@@ -353,31 +465,42 @@ std::string shell_quote(const fs::path& p) {
     return out;
 }
 
+bool tool_on_path_unix(const char* name) {
+    return run_cmd(std::string("command -v ") + name + " >/dev/null 2>&1") == 0;
+}
+
+#endif
+
 bool extract_archive(const fs::path& archive, const fs::path& dest, std::string* error) {
     std::error_code ec;
     fs::create_directories(dest, ec);
+
+#if defined(_WIN32)
+    return extract_archive_windows(archive, dest, error);
+#else
     const std::string name = archive.filename().string();
     std::string err;
 
     // Prefer bsdtar (libarchive) — handles zip/tar/7z well on many systems.
     // --no-same-owner avoids failures when the archive records UIDs we can't set.
-    if (run_cmd("command -v bsdtar >/dev/null 2>&1") == 0) {
+    if (tool_on_path_unix("bsdtar")) {
         const std::string cmd = "bsdtar --no-same-owner -xf " + shell_quote(archive) +
                                 " -C " + shell_quote(dest);
         if (run_cmd(cmd, &err) == 0) return true;
     }
-    if (ends_with_ci(name, ".zip") && run_cmd("command -v unzip >/dev/null 2>&1") == 0) {
+    if (ends_with_ci(name, ".zip") && tool_on_path_unix("unzip")) {
         const std::string cmd =
             "unzip -qo " + shell_quote(archive) + " -d " + shell_quote(dest);
         if (run_cmd(cmd, &err) == 0) return true;
     }
-    if (run_cmd("command -v 7z >/dev/null 2>&1") == 0) {
+    if (tool_on_path_unix("7z")) {
         const std::string cmd =
             "7z x -y -o" + shell_quote(dest) + " " + shell_quote(archive) + " >/dev/null";
         if (run_cmd(cmd, &err) == 0) return true;
     }
     if (error) *error = err.empty() ? "no extractor succeeded for " + archive.string() : err;
     return false;
+#endif
 }
 
 std::vector<fs::path> list_archives(const fs::path& root) {
