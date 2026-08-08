@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
@@ -1341,6 +1342,8 @@ int run_capture_lines(const std::string& cmd, const fs::path& cwd,
     AppImageEnvGuard env_guard;
 #if defined(_WIN32)
     // Hidden console: CreateProcess + CREATE_NO_WINDOW (unlike _popen).
+    // Use cmd /S /C "…" so nested set "PATH=…" / quoted args survive; cwd via
+    // lpCurrentDirectory (avoid cd /D inside the same quoted string).
     SECURITY_ATTRIBUTES sa{};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
@@ -1352,10 +1355,18 @@ int run_capture_lines(const std::string& cmd, const fs::path& cwd,
     }
     SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
 
-    const std::string full = "cmd.exe /C \"cd /D " + path_to_utf8(cwd) + " && " + cmd + "\"";
-    std::wstring wcmd = narrow_to_wide(full);
+    std::string escaped;
+    escaped.reserve(cmd.size() + 8);
+    for (char c : cmd) {
+        if (c == '"') escaped.push_back('\\');
+        escaped.push_back(c);
+    }
+    const std::wstring wcmd = L"cmd.exe /S /C \"" + narrow_to_wide(escaped) + L"\"";
     std::vector<wchar_t> mutable_cmd(wcmd.begin(), wcmd.end());
     mutable_cmd.push_back(L'\0');
+
+    std::wstring wcwd;
+    if (!cwd.empty()) wcwd = cwd.wstring();
 
     STARTUPINFOW si{};
     si.cb = sizeof(si);
@@ -1368,7 +1379,7 @@ int run_capture_lines(const std::string& cmd, const fs::path& cwd,
     PROCESS_INFORMATION pi{};
     const BOOL ok =
         CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
-                       nullptr, nullptr, &si, &pi);
+                       nullptr, wcwd.empty() ? nullptr : wcwd.c_str(), &si, &pi);
     CloseHandle(wr);
     wr = nullptr;
     if (!ok) {
@@ -1443,12 +1454,32 @@ std::string path_with_prefix(const fs::path& path_prefix) {
     const char sep = ':';
 #endif
     if (path_prefix.empty()) return cur ? cur : "";
+#if defined(_WIN32)
+    std::string out = path_to_utf8(path_prefix);
+#else
     std::string out = path_prefix.string();
+#endif
     if (cur && *cur) {
         out += sep;
         out += cur;
     }
     return out;
+}
+
+// CMAKE_GENERATOR:STRING=Ninja (empty if missing / unreadable).
+std::string read_cmake_cache_generator(const fs::path& cache_file) {
+    std::error_code ec;
+    if (!fs::is_regular_file(cache_file, ec)) return {};
+    std::ifstream in(cache_file);
+    if (!in) return {};
+    std::string line;
+    while (std::getline(in, line)) {
+        constexpr const char* kKey = "CMAKE_GENERATOR:INTERNAL=";
+        constexpr const char* kKey2 = "CMAKE_GENERATOR:STRING=";
+        if (line.rfind(kKey, 0) == 0) return line.substr(std::strlen(kKey));
+        if (line.rfind(kKey2, 0) == 0) return line.substr(std::strlen(kKey2));
+    }
+    return {};
 }
 
 int run_with_path(const std::vector<std::string>& args, const fs::path& cwd,
@@ -2321,17 +2352,44 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
     if (title.supports_netplay()) {
         conf.push_back("-DPSX_NETPLAY=ON");
     }
-    // Prefer Ninja for fresh build dirs when the toolchain pack provides it.
-    // Do not override an existing generator (e.g. Unix Makefiles cache).
+    // Prefer Ninja when the toolchain pack provides it. On Windows, a prior
+    // failed configure often leaves CMakeCache.txt stuck on "NMake Makefiles"
+    // with no compiler — wipe that and force Ninja + clang from the pack.
     {
-        const bool fresh_build = !fs::exists(build_dir / "CMakeCache.txt", ec);
+        const fs::path cache_file = build_dir / "CMakeCache.txt";
         const bool have_ninja =
             !path_prefix.empty() &&
             (fs::exists(path_prefix / "ninja", ec) || fs::exists(path_prefix / "ninja.exe", ec));
+#if defined(_WIN32)
+        const fs::path clang_c =
+            fs::exists(path_prefix / "clang.exe", ec) ? (path_prefix / "clang.exe")
+            : fs::exists(path_prefix / "clang", ec)     ? (path_prefix / "clang")
+                                                       : fs::path{};
+        const fs::path clang_cxx =
+            fs::exists(path_prefix / "clang++.exe", ec) ? (path_prefix / "clang++.exe")
+            : fs::exists(path_prefix / "clang++", ec)     ? (path_prefix / "clang++")
+                                                         : fs::path{};
+        if (have_ninja) {
+            const std::string cached_gen = read_cmake_cache_generator(cache_file);
+            if (!cached_gen.empty() && cached_gen != "Ninja") {
+                progress(opts.on_progress,
+                         "Replacing cmake generator \"" + cached_gen + "\" with Ninja…", 0.54f);
+                fs::remove_all(build_dir, ec);
+            }
+            conf.push_back("-G");
+            conf.push_back("Ninja");
+        }
+        if (!clang_c.empty())
+            conf.push_back("-DCMAKE_C_COMPILER=" + path_to_utf8(clang_c));
+        if (!clang_cxx.empty())
+            conf.push_back("-DCMAKE_CXX_COMPILER=" + path_to_utf8(clang_cxx));
+#else
+        const bool fresh_build = !fs::exists(cache_file, ec);
         if (fresh_build && have_ninja) {
             conf.push_back("-G");
             conf.push_back("Ninja");
         }
+#endif
     }
     const auto stream_cli = [&](const std::string& line) {
         if (opts.on_output) opts.on_output(line);
