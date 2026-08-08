@@ -149,6 +149,22 @@ void HubModel::refresh_rows(bool check_updates) {
     romm_roms = load_romm_rom_index(paths.romm_rom_index_path);
     app_state = load_app_state(paths.state_path);
     bios = load_bios_index(paths.bios_index_path);
+    // New catalog titles share dumps already in the BIOS index — rematch
+    // without a filesystem rescan so Play shows BIOS after Refresh Catalog.
+    {
+        std::unordered_set<std::string> before;
+        before.reserve(bios.titles.size());
+        for (const auto& t : bios.titles) before.insert(t.title_id);
+        rematch_bios_titles(bios, catalog);
+        bool gained = false;
+        for (const auto& t : bios.titles) {
+            if (!before.count(t.title_id)) {
+                gained = true;
+                break;
+            }
+        }
+        if (gained) save_bios_index(paths.bios_index_path, bios);
+    }
 
     std::vector<TitleRow> next;
     next.reserve(catalog.titles.size());
@@ -172,7 +188,10 @@ void HubModel::refresh_rows(bool check_updates) {
         row.installed_tag = plan.installed_tag;
         row.install_root = plan.install_root.string();
         row.binary_path = plan.binary_path.string();
-        if (plan.record) row.runtime = plan.record->runtime;
+        if (plan.record) {
+            row.runtime = plan.record->runtime;
+            row.install_method = plan.record->method;
+        }
         row.can_wine_install =
             host_supports_wine() && t.supports_wine_install() && host_os_key() != "windows";
         row.supports_local_build = t.supports_local_build();
@@ -494,7 +513,39 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 bopts.on_progress = [this](const std::string& msg, float) { set_status(msg); };
                 auto r = update_title_auto(paths, *t, {}, bopts);
                 append_log(r.message);
-                set_status(r.ok ? ("Updated " + title_id) : ("Update failed: " + title_id));
+                set_status(r.ok ? (r.skipped ? ("Up to date: " + title_id)
+                                             : ("Updated " + title_id))
+                                : ("Update failed: " + title_id));
+                break;
+            }
+            case HubJob::GenerateRebuild: {
+                set_status("Generate & Rebuild " + title_id + "…");
+                const auto* t = find_title();
+                if (!t) {
+                    append_log("unknown title: " + title_id);
+                    break;
+                }
+                if (!t->supports_local_build()) {
+                    append_log("catalog has no local build recipe for " + title_id);
+                    set_status("Generate & Rebuild unavailable: " + title_id);
+                    break;
+                }
+                BuildOptions bopts;
+                bopts.force = true;
+                bopts.force_generate = true;
+                bopts.rom_path = library.preferred_rom(title_id);
+                if (bopts.rom_path.empty()) {
+                    append_log("Generate & Rebuild needs a matched .cue in the library");
+                    set_status("Generate & Rebuild failed: no disc");
+                    break;
+                }
+                app_state = load_app_state(paths.state_path);
+                apply_bios_choice_to_build(*t, bios, app_state, bopts);
+                bopts.on_progress = [this](const std::string& msg, float) { set_status(msg); };
+                auto r = build_title(paths, *t, bopts);
+                append_log(r.message);
+                set_status(r.ok ? ("Generated & rebuilt " + title_id)
+                                : ("Generate & Rebuild failed: " + title_id));
                 break;
             }
             case HubJob::Uninstall:
@@ -906,6 +957,14 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     append_log(std::string("catalog reload failed: ") + e.what());
                     set_status("Catalog refresh failed — reload error");
                     break;
+                }
+                // Rematch BIOS against the new catalog from cached dumps (no rehash).
+                {
+                    bios = load_bios_index(paths.bios_index_path);
+                    const size_t n = rematch_bios_titles(bios, catalog);
+                    save_bios_index(paths.bios_index_path, bios);
+                    append_log("BIOS rematch: " + std::to_string(n) +
+                               " title binding(s) from index");
                 }
                 // Fill covers for any new/missing titles (skip already-cached).
                 if (!cr.skipped) {

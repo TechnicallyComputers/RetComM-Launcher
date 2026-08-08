@@ -438,34 +438,151 @@ fs::path find_named_file(const fs::path& root, const std::string& filename) {
     return {};
 }
 
-// Likely launch candidates for error messages / catalog fixes (Windows .exe, ELF-ish names).
-std::vector<std::string> list_launch_candidates(const fs::path& root, size_t limit = 12) {
-    std::vector<std::string> out;
+std::string to_lower_ascii_copy(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+bool is_junk_launch_name(const std::string& name) {
+    const std::string lower = to_lower_ascii_copy(name);
+    if (lower.empty() || lower[0] == '.') return true;
+    static const char* kJunk[] = {"license",     "makefile", "readme",   "version",
+                                  "vagrantfile", "ctors",    "asm64",    "hello_32",
+                                  "uninstall.exe"};
+    for (const char* j : kJunk) {
+        if (lower == j) return true;
+    }
+    if (lower.rfind("crash-", 0) == 0 || lower.find("crashpad") != std::string::npos)
+        return true;
+    return false;
+}
+
+std::string alnum_lower(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char c : s) {
+        if (std::isalnum(c)) out.push_back(static_cast<char>(std::tolower(c)));
+    }
+    return out;
+}
+
+// Score a candidate launch binary. Higher is better; <0 means reject.
+int score_launch_candidate(const fs::path& root, const fs::path& file,
+                           const std::string& expected_name, const std::string& target_os) {
+    std::error_code ec;
+    const std::string name = file.filename().string();
+    if (is_junk_launch_name(name)) return -100;
+    const std::string lower = to_lower_ascii_copy(name);
+    const bool want_exe = target_os == "windows";
+    const bool is_exe =
+        lower.size() >= 4 && lower.compare(lower.size() - 4, 4, ".exe") == 0;
+    const bool no_ext = name.find('.') == std::string::npos;
+    if (want_exe && !is_exe) return -40;
+    if (!want_exe && is_exe) return -40;
+    if (!want_exe && !no_ext) return -20;
+
+    int score = 10;
+    // Prefer archive root (direct child of staging/release root).
+    const fs::path parent = file.parent_path();
+    if (parent == root || fs::equivalent(parent, root, ec)) score += 40;
+    else score -= 15;
+
+    if (lower.find("recompiled") != std::string::npos) score += 50;
+
+    const auto sz = fs::file_size(file, ec);
+    if (!ec) {
+        if (sz >= 1024 * 1024) score += 20;      // >= 1 MiB
+        else if (sz < 4096) score -= 30;         // tiny stubs / scripts
+    }
+
+    if (!expected_name.empty()) {
+        if (filename_eq_ci(name, expected_name)) return 1000;
+        const std::string a = alnum_lower(name);
+        const std::string b = alnum_lower(expected_name);
+        if (!a.empty() && !b.empty()) {
+            if (a == b) score += 80;
+            else if (a.find(b) != std::string::npos || b.find(a) != std::string::npos)
+                score += 35;
+            else {
+                // TwistedMetal4Recomp ↔ TwistedMetal4_Recompiled
+                std::string b2 = b;
+                if (b2.size() > 6 && b2.compare(b2.size() - 6, 6, "recomp") == 0)
+                    b2 = b2.substr(0, b2.size() - 6) + "recompiled";
+                if (a == b2 || a.find(b2) != std::string::npos) score += 45;
+            }
+        }
+    }
+    return score;
+}
+
+struct LaunchCandidate {
+    fs::path path;
+    std::string name;
+    int score = 0;
+};
+
+std::vector<LaunchCandidate> collect_launch_candidates(const fs::path& root,
+                                                       const std::string& expected_name,
+                                                       const std::string& target_os,
+                                                       size_t limit = 24) {
+    std::vector<LaunchCandidate> out;
     std::error_code ec;
     if (!fs::exists(root, ec)) return out;
     for (auto it = fs::recursive_directory_iterator(
              root, fs::directory_options::skip_permission_denied, ec);
-         !ec && it != fs::recursive_directory_iterator() && out.size() < limit;
-         it.increment(ec)) {
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
         if (!it->is_regular_file(ec)) continue;
-        const std::string name = it->path().filename().string();
-        if (name.empty() || name[0] == '.') continue;
-        const std::string lower = [&] {
-            std::string s = name;
-            for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            return s;
-        }();
-        const bool exe = lower.size() >= 4 && lower.compare(lower.size() - 4, 4, ".exe") == 0;
-        const bool no_ext = name.find('.') == std::string::npos;
-        if (!exe && !no_ext) continue;
-        // Skip obvious non-launch junk.
-        if (lower == "uninstall.exe" || lower.find("crashpad") != std::string::npos) continue;
-        out.push_back(name);
+        const int score =
+            score_launch_candidate(root, it->path(), expected_name, target_os);
+        if (score < 0) continue;
+        LaunchCandidate c;
+        c.path = it->path();
+        c.name = it->path().filename().string();
+        c.score = score;
+        out.push_back(std::move(c));
     }
-    std::sort(out.begin(), out.end());
-    out.erase(std::unique(out.begin(), out.end()), out.end());
-    if (out.size() > limit) out.resize(limit);
+    std::sort(out.begin(), out.end(), [](const LaunchCandidate& a, const LaunchCandidate& b) {
+        if (a.score != b.score) return a.score > b.score;
+        return a.name < b.name;
+    });
+    // Unique by filename (keep best score).
+    std::vector<LaunchCandidate> uniq;
+    std::unordered_set<std::string> seen;
+    for (auto& c : out) {
+        const std::string key = to_lower_ascii_copy(c.name);
+        if (!seen.insert(key).second) continue;
+        uniq.push_back(std::move(c));
+        if (uniq.size() >= limit) break;
+    }
+    return uniq;
+}
+
+// Likely launch candidates for error messages / catalog fixes.
+std::vector<std::string> list_launch_candidates(const fs::path& root, size_t limit = 12) {
+    const auto scored = collect_launch_candidates(root, {}, host_os_key(), limit);
+    std::vector<std::string> out;
+    out.reserve(scored.size());
+    for (const auto& c : scored) out.push_back(c.name);
     return out;
+}
+
+// When catalog launch.<os> misses, pick a unique high-confidence binary.
+fs::path resolve_launch_binary(const fs::path& root, const std::string& expected_name,
+                               const std::string& target_os, std::string* resolved_name) {
+    fs::path exact = find_named_file(root, expected_name);
+    if (!exact.empty()) {
+        if (resolved_name) *resolved_name = exact.filename().string();
+        return exact;
+    }
+    const auto cands = collect_launch_candidates(root, expected_name, target_os, 16);
+    if (cands.empty()) return {};
+    const LaunchCandidate& best = cands.front();
+    // Accept: clear winner (recompiled / fuzzy / large+root) and not tied.
+    const bool clear =
+        best.score >= 70 && (cands.size() == 1 || best.score >= cands[1].score + 15);
+    if (!clear) return {};
+    if (resolved_name) *resolved_name = best.name;
+    return best.path;
 }
 
 bool promote_staging_to_release(const fs::path& staging, const fs::path& release_dir,
@@ -823,25 +940,56 @@ void fill_from_disk(InstallPlan& plan) {
 
     // Accept only a finished install layout — never the setup host vendored
     // inside src/<tag>/ from a release/source zip (that falsely enables Play).
-    if (!bin.empty()) {
-        const fs::path top = plan.install_root / bin;
-        if (fs::is_regular_file(top, ec)) {
-            plan.binary_path = top;
-            plan.installed = true;
-            plan.install_dir_present = true;
-            plan.message = "installed (flat): " + top.string();
-            return;
+    {
+        const std::string target_os =
+            (plan.record && !plan.record->target_os.empty()) ? plan.record->target_os
+                                                            : host_os_key();
+        if (!bin.empty()) {
+            const fs::path top = plan.install_root / bin;
+            if (fs::is_regular_file(top, ec)) {
+                plan.binary_path = top;
+                plan.installed = true;
+                plan.install_dir_present = true;
+                plan.message = "installed (flat): " + top.string();
+                return;
+            }
         }
         const fs::path releases = plan.install_root / "releases";
         if (fs::is_directory(releases, ec)) {
-            const fs::path under_releases = find_named_file(releases, bin);
-            if (!under_releases.empty()) {
-                plan.binary_path = under_releases;
+            // Prefer the tagged release dir when known.
+            std::vector<fs::path> search_roots;
+            if (plan.record && !plan.record->tag.empty()) {
+                const fs::path tagged =
+                    releases / sanitize_tag(plan.record->tag);
+                if (fs::is_directory(tagged, ec)) search_roots.push_back(tagged);
+            }
+            if (search_roots.empty()) {
+                for (auto it = fs::directory_iterator(releases, ec);
+                     !ec && it != fs::directory_iterator(); it.increment(ec)) {
+                    if (it->is_directory(ec)) search_roots.push_back(it->path());
+                }
+            }
+            for (const auto& root : search_roots) {
+                std::string resolved;
+                fs::path hit = resolve_launch_binary(root, bin, target_os, &resolved);
+                if (hit.empty()) continue;
+                plan.binary_path = hit;
                 plan.installed = true;
                 plan.install_dir_present = true;
-                plan.message = "installed: " + under_releases.string();
+                plan.message = "installed: " + hit.string();
                 if (!plan.installed_tag.empty())
                     plan.message += " [" + plan.installed_tag + "]";
+                // Heal install.json so later launches don't re-guess.
+                if (plan.record &&
+                    (plan.record->binary.empty() ||
+                     !filename_eq_ci(fs::path(plan.record->binary).filename().string(),
+                                     resolved))) {
+                    InstallRecord rec = *plan.record;
+                    const fs::path rel_bin = fs::relative(hit, root, ec);
+                    rec.binary = ec ? resolved : rel_bin.generic_string();
+                    save_install_record(plan.install_root, rec);
+                    plan.record = rec;
+                }
                 return;
             }
         }
@@ -1231,7 +1379,8 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
         return result;
     }
 
-    fs::path binary = find_named_file(staging, launch_name);
+    std::string resolved_launch = launch_name;
+    fs::path binary = resolve_launch_binary(staging, launch_name, target_os, &resolved_launch);
     if (binary.empty()) {
         const auto candidates = list_launch_candidates(staging);
         std::string place_err;
@@ -1258,6 +1407,7 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
         }
         return result;
     }
+    const bool launch_name_guessed = !filename_eq_ci(resolved_launch, launch_name);
     make_executable(binary);
 
     // Keep saves + user config across same-tag force reinstall / overwrite.
@@ -1269,8 +1419,10 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
         return result;
     }
 
-    // Re-resolve binary under release_dir.
-    binary = find_named_file(release_dir, launch_name);
+    // Re-resolve binary under release_dir (prefer the name we actually found).
+    binary = resolve_launch_binary(release_dir, resolved_launch, target_os, &resolved_launch);
+    if (binary.empty())
+        binary = resolve_launch_binary(release_dir, launch_name, target_os, &resolved_launch);
     if (binary.empty()) {
         write_partial_install_record(install_root, title, rel.tag, asset->name, rel.html_url,
                                      target_os, use_wine, tag);
@@ -1315,6 +1467,10 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
     result.message = "installed " + title.id + " " + rel.tag +
                      (use_wine ? " (wine)\n" : "\n") + "  asset:  " + asset->name +
                      "\n  binary: " + result.plan.binary_path.string() + "\n";
+    if (launch_name_guessed) {
+        result.message += "  note: catalog launch." + target_os + " was '" + launch_name +
+                          "'; used '" + resolved_launch + "' from the archive\n";
+    }
     if (!stash_note.empty()) result.message += "  " + stash_note;
     if (!restore_note.empty()) result.message += "  " + restore_note;
     return result;

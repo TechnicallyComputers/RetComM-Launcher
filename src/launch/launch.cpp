@@ -60,8 +60,8 @@ std::string path_for_guest(const fs::path& host, bool use_wine) {
 #endif
 }
 
-// Disc titles usually want a .cue; if the library preferred a raw dump, use a
-// companion .cue (same stem or FILE reference) when present.
+// Disc titles must launch from a .cue only — never stage .bin/.img/.iso/.chd.
+// If the library preferred a raw dump, resolve a companion .cue when present.
 fs::path prefer_media_path(const Title& title, fs::path media) {
     if (media.empty()) return media;
     std::error_code ec;
@@ -69,15 +69,13 @@ fs::path prefer_media_path(const Title& title, fs::path media) {
 
     if (is_disc_platform(title.platform)) {
         const std::string ext = lower_ext(media);
-        // .iso/.chd cannot become multi-track Redump dumps — refuse.
-        if (ext == ".iso" || ext == ".chd") return {};
+        if (ext == ".cue") return media;
         if (ext == ".bin" || ext == ".img") {
             const fs::path cue = companion_cue_for_disc_dump(media);
             if (!cue.empty() && fs::is_regular_file(cue, ec)) return cue;
-            if (title.rom_identity.require_cue ||
-                !title.rom_identity.track_counts.empty())
-                return {};
         }
+        // Refuse dumps / cooked images — Play must pass a .cue sheet.
+        return {};
     }
     return media;
 }
@@ -539,6 +537,24 @@ LaunchPlan plan_launch(const Paths& paths, const Title& title, const LaunchOptio
 
     lp.cwd = lp.binary.parent_path();
     lp.media_path = prefer_media_path(title, opts.rom_path);
+    if (is_disc_platform(title.platform)) {
+        if (!opts.rom_path.empty() && lp.media_path.empty()) {
+            lp.ready = false;
+            std::ostringstream oss;
+            oss << "cannot launch: disc titles require a .cue (not a .bin/.img)\n"
+                << "  bound:  " << opts.rom_path.string() << "\n"
+                << "  tip: keep the Redump .cue next to the track images, then "
+                   "Refresh Library / ROM scan\n";
+            lp.message = oss.str();
+            return lp;
+        }
+        if (!lp.media_path.empty() && lower_ext(lp.media_path) != ".cue") {
+            lp.ready = false;
+            lp.message = "cannot launch: internal error — refusing non-.cue disc path: " +
+                         lp.media_path.string() + "\n";
+            return lp;
+        }
+    }
     lp.bios_path = opts.bios_path;
     if (!opts.save_path.empty()) {
         std::error_code ec;
@@ -683,11 +699,16 @@ LaunchResult launch_title(const Paths& paths, const Title& title, const LaunchOp
                                                  : result.plan.media_path;
         const std::string guest_media = path_for_guest(cfg_media, result.plan.use_wine);
         if (!write_text_file(result.plan.staged_cfg, guest_media, &err)) {
+            // Disc: never keep a stale disc.cfg (often a prior .bin path).
+            if (is_disc_platform(title.platform)) {
+                result.message = result.plan.message + "  error: " + err + "\n" +
+                                 "  tip: chown the install dir so RetComM can write disc.cfg\n";
+                return result;
+            }
             // Cart + --launcher seeds ONLY via rom.cfg. A stale file (often the
             // .exe path left by a prior root-owned install) causes Wrong ROM.
             // Fall back to a positional direct boot so Play still works.
-            const bool cart_launcher =
-                !is_disc_platform(title.platform) && opts.mode == LaunchMode::Default;
+            const bool cart_launcher = opts.mode == LaunchMode::Default;
             result.plan.message += "  warning: " + err + "\n";
             if (cart_launcher) {
                 set_cart_direct_argv(result.plan, title);
@@ -715,6 +736,11 @@ LaunchResult launch_title(const Paths& paths, const Title& title, const LaunchOp
                 result.plan.staged_settings,
                 path_for_guest(result.plan.bios_path, result.plan.use_wine),
                 path_for_guest(result.plan.media_path, result.plan.use_wine), &err)) {
+            if (is_disc_platform(title.platform)) {
+                result.message = result.plan.message + "  error: " + err + "\n" +
+                                 "  tip: chown the install dir so RetComM can write settings.toml\n";
+                return result;
+            }
             result.plan.message += "  warning: " + err + "\n";
         }
     }

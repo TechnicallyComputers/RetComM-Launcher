@@ -538,6 +538,28 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
             hub.start_job(HubJob::Launch, row.id);
         ImGui::SameLine(0, 8);
         if (ImGui::Button("Update", ImVec2(btn_w, 0))) hub.start_job(HubJob::Update, row.id);
+        if (row.supports_local_build) {
+            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+            ImGui::TextWrapped(
+                "Update fetches the latest release and rebuilds; codegen is reused when "
+                "your disc / emitters still match. Use Generate & Rebuild to force disc→C.");
+            ImGui::PopStyleColor();
+            ImGui::BeginDisabled(!row.has_rom);
+            if (ImGui::Button("Generate & Rebuild", ImVec2(-1, 0)))
+                hub.start_job(HubJob::GenerateRebuild, row.id);
+            ImGui::EndDisabled();
+            if (!row.has_rom) {
+                ImGui::PushStyleColor(ImGuiCol_Text, th.warn);
+                ImGui::TextWrapped("Match a verified .cue before Generate & Rebuild.");
+                ImGui::PopStyleColor();
+            } else if (row.install_method == "zip") {
+                ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+                ImGui::TextWrapped(
+                    "Installed from a prebuilt zip — Generate & Rebuild switches this "
+                    "title to a RetComM local build (saves/settings are kept).");
+                ImGui::PopStyleColor();
+            }
+        }
 
         ImGui::Dummy(ImVec2(0, 6));
         if (row.save_labels.empty()) {
@@ -653,9 +675,13 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
             if (!row.has_rom) {
                 ImGui::PushStyleColor(ImGuiCol_Text, th.warn);
                 ImGui::TextWrapped(
-                    "Match a verified ROM in your library before Build & Install.");
+                    "Match a verified .cue / ROM in your library before Build & Install.");
                 ImGui::PopStyleColor();
             }
+            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+            ImGui::TextWrapped(
+                "Build & Install runs generate + cmake in RetComM (not the in-game wizard).");
+            ImGui::PopStyleColor();
             if (accent_button(row.install_dir_present ? "Retry Build & Install" : "Build & Install",
                               th, ImVec2(-1, 0)))
                 hub.start_job(HubJob::Install, row.id);

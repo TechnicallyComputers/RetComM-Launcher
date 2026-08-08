@@ -173,7 +173,9 @@ fs::path LibraryIndex::preferred_rom(const std::string& title_id) const {
         fs::path preferred = best;
         if (is_disc_dump_ext(lower_ext_str(preferred))) {
             const fs::path cue = companion_cue_path(preferred);
+            // Disc Play stages .cue only — never surface a naked .bin/.img.
             if (!cue.empty()) return cue;
+            return {};
         }
         return preferred;
     }

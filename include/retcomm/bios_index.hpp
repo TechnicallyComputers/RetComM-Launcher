@@ -89,4 +89,10 @@ BiosScanResult scan_bios_roots(const Catalog& catalog, const AppConfig& cfg,
 void merge_bios_scan_into_index(BiosIndex& index, const Catalog& catalog,
                                 const BiosScanResult& scan, const fs::path& bios_root);
 
+// Rebuild title↔BIOS binds from already-hashed index files against the current
+// catalog. No filesystem walk / re-hash — use after Refresh Catalog when new
+// titles appear that share dumps already in the index.
+// Returns the number of titles with at least one matching BIOS dump.
+std::size_t rematch_bios_titles(BiosIndex& index, const Catalog& catalog);
+
 } // namespace retcomm

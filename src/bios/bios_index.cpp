@@ -518,6 +518,42 @@ BiosScanResult scan_bios_library(const Catalog& catalog, const AppConfig& cfg,
     return scan_bios_roots(catalog, cfg, roots, opts);
 }
 
+std::size_t rematch_bios_titles(BiosIndex& index, const Catalog& catalog) {
+    std::map<std::string, BiosTitleBind> binds;
+    for (const auto& t : catalog.titles) {
+        if (!t.has_bios_identity()) continue;
+        BiosTitleBind b;
+        b.title_id = t.id;
+        std::vector<std::pair<int, std::string>> ranked;
+        for (auto& f : index.files) {
+            BiosFile trial = f;
+            trial.title_id.clear();
+            trial.matched_by.clear();
+            if (!try_match_title(t, trial)) continue;
+            // Keep a display hint on the file row (last matching title wins).
+            f.title_id = trial.title_id;
+            f.matched_by = trial.matched_by;
+            ranked.emplace_back(match_rank(trial.matched_by) * 100 - path_preference(f.path, t),
+                                f.path);
+            b.paths.push_back(f.path);
+        }
+        if (ranked.empty()) continue;
+        std::sort(ranked.begin(), ranked.end());
+        b.preferred_path = ranked.front().second;
+        std::sort(b.paths.begin(), b.paths.end());
+        b.paths.erase(std::unique(b.paths.begin(), b.paths.end()), b.paths.end());
+        binds[t.id] = std::move(b);
+    }
+
+    index.titles.clear();
+    for (auto& [id, b] : binds) index.titles.push_back(std::move(b));
+    std::sort(index.titles.begin(), index.titles.end(),
+              [](const BiosTitleBind& a, const BiosTitleBind& b) {
+                  return a.title_id < b.title_id;
+              });
+    return index.titles.size();
+}
+
 void merge_bios_scan_into_index(BiosIndex& index, const Catalog& catalog,
                                 const BiosScanResult& scan, const fs::path& bios_root) {
     if (!bios_root.empty()) index.bios_root = bios_root.string();
@@ -547,40 +583,9 @@ void merge_bios_scan_into_index(BiosIndex& index, const Catalog& catalog,
     }
     index.rebuild_path_map();
 
-    // Rebuild title binds from scan matches + any leftover index files.
-    std::map<std::string, BiosTitleBind> binds;
-    for (const auto& m : scan.matches) binds[m.title_id] = m;
-
-    // Ensure every title with bios_identity has an entry if index files match.
-    for (const auto& t : catalog.titles) {
-        if (!t.has_bios_identity()) continue;
-        if (binds.count(t.id)) continue;
-        BiosTitleBind b;
-        b.title_id = t.id;
-        std::vector<std::pair<int, std::string>> ranked;
-        for (const auto& f : index.files) {
-            BiosFile trial = f;
-            trial.title_id.clear();
-            trial.matched_by.clear();
-            if (!try_match_title(t, trial)) continue;
-            ranked.emplace_back(match_rank(trial.matched_by) * 100 - path_preference(f.path, t),
-                                f.path);
-            b.paths.push_back(f.path);
-        }
-        if (ranked.empty()) continue;
-        std::sort(ranked.begin(), ranked.end());
-        b.preferred_path = ranked.front().second;
-        std::sort(b.paths.begin(), b.paths.end());
-        b.paths.erase(std::unique(b.paths.begin(), b.paths.end()), b.paths.end());
-        binds[t.id] = std::move(b);
-    }
-
-    index.titles.clear();
-    for (auto& [id, b] : binds) index.titles.push_back(std::move(b));
-    std::sort(index.titles.begin(), index.titles.end(),
-              [](const BiosTitleBind& a, const BiosTitleBind& b) {
-                  return a.title_id < b.title_id;
-              });
+    // Full catalog rematch from the merged file set (covers new titles that
+    // share dumps already hashed in the index).
+    rematch_bios_titles(index, catalog);
 }
 
 } // namespace retcomm

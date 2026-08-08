@@ -24,6 +24,8 @@ enum class HubJob : int {
     InstallPrebuilt,
     InstallWine,
     Update,
+    // Force disc→C generate + cmake rebuild (ignores codegen-cache).
+    GenerateRebuild,
     Uninstall,
     UninstallPurge,
     Launch,
@@ -85,6 +87,8 @@ struct TitleRow {
     bool can_wine_install = false;
     bool supports_local_build = false;
     bool can_prebuilt_install = false;
+    // install.json method: "build" | "zip" | "" (unknown / not installed).
+    std::string install_method;
     bool has_rom_identity = false;
     bool romm_ready = false; // base_url + api_token configured
     bool busy = false;
