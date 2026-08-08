@@ -9,6 +9,7 @@
 #include "retcomm/self_update.hpp"
 
 #include "imgui.h"
+#include "imgui_internal.h"
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_sdl3.h"
 
@@ -274,6 +275,7 @@ void draw_hub_menu(HubModel& hub, const Theme& th) {
     // Settings stay reachable during Build & Install / scans.
     if (ImGui::MenuItem("Library Settings")) hub.open_settings();
     if (ImGui::MenuItem("RomM Sync Settings")) hub.open_romm_settings();
+    if (ImGui::MenuItem("Scans")) hub.pending_open_scans = true;
     ImGui::Separator();
     ImGui::BeginDisabled(busy);
     if (ImGui::MenuItem("Check Updates")) hub.start_job(HubJob::CheckUpdates);
@@ -727,6 +729,19 @@ void center_modal_next() {
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 }
 
+// Dismiss the topmost modal when the user clicks the dimmed backdrop (not the
+// modal itself). Nested confirms stay sticky until they are topmost. Call just
+// before EndPopup() inside BeginPopupModal. Skip first-run setup wizard.
+void close_modal_on_outside_click() {
+    if (!ImGui::IsMouseClicked(ImGuiMouseButton_Left)) return;
+    if (ImGui::GetTopMostPopupModal() != ImGui::GetCurrentWindow()) return;
+    const ImVec2 tl = ImGui::GetWindowPos();
+    const ImVec2 br(tl.x + ImGui::GetWindowSize().x, tl.y + ImGui::GetWindowSize().y);
+    const ImVec2 m = ImGui::GetIO().MousePos;
+    if (m.x >= tl.x && m.y >= tl.y && m.x < br.x && m.y < br.y) return;
+    ImGui::CloseCurrentPopup();
+}
+
 void draw_detail_save_controls(HubModel& hub, const TitleRow& row, const Theme& th) {
     // Match spacing used below Create Save before Manage Data / RomM Sync.
     constexpr float kSaveBtnPad = 12.f;
@@ -898,6 +913,7 @@ void draw_detail_manage_data_popup(HubModel& hub, const TitleRow& row, const The
     ImGui::EndDisabled();
     ImGui::Dummy(ImVec2(0, 8));
     if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+    close_modal_on_outside_click();
     ImGui::EndPopup();
 }
 
@@ -917,6 +933,7 @@ void draw_detail_romm_sync_popup(HubModel& hub, const TitleRow& row, const Theme
         ImGui::TextColored(th.warn, "RomM is not configured.");
         ImGui::TextColored(th.text_muted, "Open Menu → RomM Sync Settings to add a URL and API key.");
         if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+        close_modal_on_outside_click();
         ImGui::EndPopup();
         return;
     }
@@ -979,6 +996,118 @@ void draw_detail_romm_sync_popup(HubModel& hub, const TitleRow& row, const Theme
 
     ImGui::Dummy(ImVec2(0, 8));
     if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+    close_modal_on_outside_click();
+    ImGui::EndPopup();
+}
+
+void draw_scans_popup(HubModel& hub, const Theme& th) {
+    if (hub.pending_open_scans) {
+        ImGui::OpenPopup("Scans###scan_panel");
+        hub.pending_open_scans = false;
+    }
+
+    // Only set next-window pos/size when this popup will actually begin — otherwise
+    // SetNextWindow* leaks onto the following modal in the frame.
+    if (!ImGui::IsPopupOpen("Scans###scan_panel")) return;
+    center_modal_next();
+    ImGui::SetNextWindowSize(ImVec2(440.f, 0.f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Scans###scan_panel", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextUnformatted("SCANS");
+    ImGui::PopStyleColor();
+    ImGui::TextWrapped(
+        "Scan uses the saved library/BIOS roots and RomM settings. Save path changes in "
+        "Library Settings or RomM Sync Settings before scanning. Normal scan reuses the "
+        "index; full rescan clears caches and re-hashes everything.");
+    ImGui::Separator();
+
+    const bool busy = hub.job_running.load();
+
+    ImGui::TextColored(th.text_muted, "Library");
+    ImGui::BeginDisabled(busy);
+    if (ImGui::Button("Scan ROMs", ImVec2(-1, 0))) hub.start_job(HubJob::ScanRoms);
+    if (ImGui::Button("Full Rescan ROMs", ImVec2(-1, 0)))
+        ImGui::OpenPopup("Full ROM rescan###confirm_full_rom_rescan");
+    if (ImGui::Button("Scan BIOS", ImVec2(-1, 0))) hub.start_job(HubJob::ScanBios);
+    if (ImGui::Button("Full Rescan BIOS", ImVec2(-1, 0)))
+        ImGui::OpenPopup("Full BIOS rescan###confirm_full_bios_rescan");
+    ImGui::EndDisabled();
+
+    ImGui::Dummy(ImVec2(0, 10));
+    ImGui::Separator();
+    ImGui::TextColored(th.text_muted, "RomM");
+    {
+        const bool can_scan =
+            !busy && hub.cfg.romm.enabled() && !hub.cfg.romm.api_token.empty();
+        ImGui::BeginDisabled(!can_scan);
+        if (ImGui::Button("Scan RomM library", ImVec2(-1, 0)))
+            hub.start_job(HubJob::ScanRommRoms);
+        ImGui::EndDisabled();
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        if (!hub.cfg.romm.enabled() || hub.cfg.romm.api_token.empty())
+            ImGui::TextWrapped("RomM not configured — set URL + API key in RomM Sync Settings.");
+        else
+            ImGui::TextWrapped(
+                "Match catalog rom_identity against your RomM library (ON ROMM chip).");
+        ImGui::PopStyleColor();
+
+        ImGui::Dummy(ImVec2(0, 6));
+        const bool can_resync = can_scan && hub.cfg.romm.sync_boxart;
+        ImGui::BeginDisabled(!can_resync);
+        if (ImGui::Button("Resync RomM boxart", ImVec2(-1, 0)))
+            hub.start_job(HubJob::FetchBoxart, {}, true);
+        ImGui::EndDisabled();
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        if (!hub.cfg.romm.sync_boxart)
+            ImGui::TextWrapped("Enable Sync Boxart in RomM Sync Settings to refresh covers.");
+        else
+            ImGui::TextWrapped(
+                "Deletes cached RomM covers and re-downloads each title's menu cover.");
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Dummy(ImVec2(0, 10));
+    if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+
+    // Nested confirms (must be inside the Scans modal's ID stack).
+    if (ImGui::BeginPopupModal("Full ROM rescan###confirm_full_rom_rescan", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 360.f);
+        ImGui::TextWrapped(
+            "This clears the library index cache and re-hashes every candidate ROM under "
+            "your library root. On a large collection it can take a long time.");
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 8));
+        if (accent_button("Rescan", th, ImVec2(120, 0))) {
+            hub.start_job(HubJob::FullScanRoms);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+        close_modal_on_outside_click();
+        ImGui::EndPopup();
+    }
+    if (ImGui::BeginPopupModal("Full BIOS rescan###confirm_full_bios_rescan", nullptr,
+                               ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 360.f);
+        ImGui::TextWrapped(
+            "This clears the BIOS index cache and re-hashes every candidate dump under "
+            "your BIOS root.");
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 8));
+        if (accent_button("Rescan", th, ImVec2(120, 0))) {
+            hub.start_job(HubJob::FullScanBios);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+        close_modal_on_outside_click();
+        ImGui::EndPopup();
+    }
+
+    close_modal_on_outside_click();
     ImGui::EndPopup();
 }
 
@@ -1315,60 +1444,9 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
 
     ImGui::Dummy(ImVec2(0, 12));
     ImGui::Separator();
-    ImGui::TextColored(th.text_muted, "Library scans");
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextWrapped(
-        "Scan uses the saved library/BIOS roots (Save above first if you changed paths). "
-        "Normal scan reuses the index — files already hashed with unchanged size/mtime are "
-        "skipped. Full rescan clears the index and re-hashes everything.");
+    ImGui::TextWrapped("ROM and BIOS scans are under Menu → Scans.");
     ImGui::PopStyleColor();
-    ImGui::Dummy(ImVec2(0, 6));
-    {
-        const bool busy = hub.job_running.load();
-        ImGui::BeginDisabled(busy);
-        if (ImGui::Button("Scan ROMs", ImVec2(160, 0))) hub.start_job(HubJob::ScanRoms);
-        ImGui::SameLine();
-        if (ImGui::Button("Full Rescan ROMs", ImVec2(180, 0)))
-            ImGui::OpenPopup("Full ROM rescan###confirm_full_rom_rescan");
-        if (ImGui::Button("Scan BIOS", ImVec2(160, 0))) hub.start_job(HubJob::ScanBios);
-        ImGui::SameLine();
-        if (ImGui::Button("Full Rescan BIOS", ImVec2(180, 0)))
-            ImGui::OpenPopup("Full BIOS rescan###confirm_full_bios_rescan");
-        ImGui::EndDisabled();
-    }
-    // Confirmation modals (outside BeginDisabled so they stay interactive).
-    if (ImGui::BeginPopupModal("Full ROM rescan###confirm_full_rom_rescan", nullptr,
-                               ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 360.f);
-        ImGui::TextWrapped(
-            "This clears the library index cache and re-hashes every candidate ROM under "
-            "your library root. On a large collection it can take a long time.");
-        ImGui::PopTextWrapPos();
-        ImGui::Dummy(ImVec2(0, 8));
-        if (accent_button("Rescan", th, ImVec2(120, 0))) {
-            hub.start_job(HubJob::FullScanRoms);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
-    if (ImGui::BeginPopupModal("Full BIOS rescan###confirm_full_bios_rescan", nullptr,
-                               ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 360.f);
-        ImGui::TextWrapped(
-            "This clears the BIOS index cache and re-hashes every candidate dump under "
-            "your BIOS root.");
-        ImGui::PopTextWrapPos();
-        ImGui::Dummy(ImVec2(0, 8));
-        if (accent_button("Rescan", th, ImVec2(120, 0))) {
-            hub.start_job(HubJob::FullScanBios);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
-    }
 
     ImGui::Dummy(ImVec2(0, 10));
     ImGui::Separator();
@@ -1388,7 +1466,7 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     ImGui::TextWrapped(
         "Hide catalog titles that do not have a ROM available — neither on your local ROM "
         "library path nor (when scanned) on RomM. Installed titles stay visible. Save, then "
-        "run Scan RomM library under RomM Sync Settings so remote-only matches appear.");
+        "run Scan RomM library under Menu → Scans so remote-only matches appear.");
     ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0, 8));
@@ -1622,43 +1700,11 @@ void draw_romm_settings_panel(HubModel& hub, const Theme& th) {
 
     ImGui::Dummy(ImVec2(0, 12));
     ImGui::Separator();
-    ImGui::Dummy(ImVec2(0, 6));
-    ImGui::TextColored(th.text_muted, "Catalog ROMs");
-    {
-        const bool busy = hub.job_running.load();
-        const bool can_scan =
-            !busy && hub.cfg.romm.enabled() && !hub.cfg.romm.api_token.empty();
-        ImGui::BeginDisabled(!can_scan);
-        if (ImGui::Button("Scan RomM library", ImVec2(-1, 0)))
-            hub.start_job(HubJob::ScanRommRoms);
-        ImGui::EndDisabled();
-        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-        ImGui::TextWrapped(
-            "Match each catalog title's rom_identity against your RomM library and cache "
-            "availability (ON ROMM chip). Used by Filter Unsupported Titles so titles that "
-            "exist only on RomM stay visible. Requires a saved URL + API key.");
-        ImGui::PopStyleColor();
-    }
-
-    ImGui::Dummy(ImVec2(0, 12));
-    ImGui::Separator();
-    ImGui::Dummy(ImVec2(0, 6));
-    ImGui::TextColored(th.text_muted, "Cover art");
-    {
-        const bool busy = hub.job_running.load();
-        const bool can_resync = !busy && hub.cfg.romm.enabled() && !hub.cfg.romm.api_token.empty() &&
-                                hub.cfg.romm.sync_boxart;
-        ImGui::BeginDisabled(!can_resync);
-        if (ImGui::Button("Resync boxart", ImVec2(-1, 0)))
-            hub.start_job(HubJob::FetchBoxart, {}, true);
-        ImGui::EndDisabled();
-        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-        ImGui::TextWrapped(
-            "Deletes cached RomM covers and re-downloads each title's menu cover "
-            "(path_cover) from your instance — including custom/themed artwork. "
-            "Requires Sync Boxart on and saved URL + API key.");
-        ImGui::PopStyleColor();
-    }
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextWrapped(
+        "Scan RomM library and Resync RomM boxart are under Menu → Scans "
+        "(requires a saved URL + API key; Sync Boxart for cover resync).");
+    ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0, 12));
     if (accent_button("Save", th, ImVec2(160, 0))) {
@@ -1719,15 +1765,12 @@ void draw_log(HubModel& hub, const Theme& th, float height) {
     }
     ImGui::Separator();
 
-    // Read-only multiline so users can drag-select / Ctrl+C. Outer child keeps
-    // stick-to-bottom scroll; the input is sized to full content (no nested scroll).
+    // Read-only multiline (drag-select / Ctrl+C). Terminal-style: pin to bottom
+    // when short, and keep following new lines until the user scrolls up.
     ImGui::BeginChild("activity_scroll", ImVec2(0, 0), ImGuiChildFlags_None);
-    static size_t prev_count = 0;
     static std::vector<char> activity_buf;
     static std::string activity_plain;
-    const bool grew = lines.size() != prev_count;
-    const bool at_bottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 8.f;
-    prev_count = lines.size();
+    static bool auto_scroll = true;
 
     if (activity_plain != plain) {
         activity_plain = plain;
@@ -1735,12 +1778,20 @@ void draw_log(HubModel& hub, const Theme& th, float height) {
         activity_buf.push_back('\0');
     }
 
-    const float wrap_w = ImGui::GetContentRegionAvail().x;
-    const ImVec2 text_sz =
-        ImGui::CalcTextSize(activity_buf.data(), activity_buf.data() + activity_buf.size() - 1,
-                            false, wrap_w > 1.f ? wrap_w : 0.f);
-    const float pad_y = ImGui::GetStyle().FramePadding.y * 2.f;
-    const float box_h = std::max(text_sz.y + pad_y, ImGui::GetTextLineHeight() + pad_y);
+    // Wheel/scrollbar applied before layout — leave follow mode if not at bottom.
+    const float prev_sy = ImGui::GetScrollY();
+    const float prev_sm = ImGui::GetScrollMaxY();
+    if (prev_sm > 1.f && prev_sy < prev_sm - 16.f) auto_scroll = false;
+
+    const float avail_x = ImGui::GetContentRegionAvail().x;
+    const float avail_y = ImGui::GetContentRegionAvail().y;
+    const char* text_end = activity_buf.data() + (activity_buf.empty() ? 0 : activity_buf.size() - 1);
+    const ImVec2 text_sz = ImGui::CalcTextSize(activity_buf.data(), text_end, false,
+                                               avail_x > 1.f ? avail_x : 0.f);
+    const float box_h = std::max(text_sz.y, ImGui::GetTextLineHeight());
+
+    // Short log: pad so the latest lines sit on the bottom edge of the panel.
+    if (box_h < avail_y) ImGui::Dummy(ImVec2(0.f, avail_y - box_h));
 
     ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
     ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0, 0, 0, 0));
@@ -1749,12 +1800,14 @@ void draw_log(HubModel& hub, const Theme& th, float height) {
     ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.f);
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0.f, 0.f));
     ImGui::InputTextMultiline(
-        "##activity_text", activity_buf.data(), activity_buf.size(), ImVec2(wrap_w, box_h),
+        "##activity_text", activity_buf.data(), activity_buf.size(), ImVec2(avail_x, box_h),
         ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_NoUndoRedo);
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor(4);
 
-    if (grew && at_bottom) ImGui::SetScrollHereY(1.f);
+    if (auto_scroll) ImGui::SetScrollY(ImGui::GetScrollMaxY());
+    if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 16.f) auto_scroll = true;
+
     ImGui::EndChild();
     ImGui::EndChild();
 }
@@ -1976,6 +2029,7 @@ int main(int argc, char** argv) {
         draw_log_splitter(log_h, log_h_pref, avail_y, th);
         draw_log(hub, th, log_h);
         draw_setup_wizard(hub, th, window);
+        draw_scans_popup(hub, th);
 
         if (hub.show_romm_install_prompt) {
             ImGui::OpenPopup("Download ROM from RomM###romm_install_prompt");
@@ -2007,6 +2061,7 @@ int main(int argc, char** argv) {
             }
             ImGui::EndDisabled();
             if (ImGui::Button("Cancel", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+            close_modal_on_outside_click();
             ImGui::EndPopup();
         }
 
@@ -2039,6 +2094,7 @@ int main(int argc, char** argv) {
             ImGui::SameLine();
             if (ImGui::Button("Later", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
             ImGui::EndDisabled();
+            close_modal_on_outside_click();
             ImGui::EndPopup();
         }
 
@@ -2082,6 +2138,7 @@ int main(int argc, char** argv) {
             ImGui::EndDisabled();
             ImGui::SameLine();
             if (ImGui::Button("Keep", ImVec2(100, 0))) ImGui::CloseCurrentPopup();
+            close_modal_on_outside_click();
             ImGui::EndPopup();
         }
 

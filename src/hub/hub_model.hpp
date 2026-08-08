@@ -283,6 +283,7 @@ struct HubModel {
     bool show_settings = false;
     bool show_romm_settings = false;
     bool show_setup = false; // first-time library/BIOS/RomM wizard
+    bool pending_open_scans = false; // Menu → Scans (open modal next frame)
     SettingsDraft settings;
     RommSettingsDraft romm_settings;
     NetplayLobbyState netplay;
