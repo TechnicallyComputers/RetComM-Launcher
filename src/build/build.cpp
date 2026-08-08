@@ -975,6 +975,8 @@ fs::path find_cached_toolchain(const Paths& paths, const std::string& pack_id,
         if (!it->is_directory(ec)) continue;
         const auto name = it->path().filename().string();
         if (!name.empty() && name[0] == '.') continue;
+        // Skip symlink/junction pointer and renamed leftover full copies.
+        if (name == "latest" || name.rfind("latest.old-", 0) == 0) continue;
         if (!toolchain_looks_usable(it->path())) continue;
         const fs::path root = unwrap_single_subdir(it->path());
         std::string ver = read_toolchain_version(root);
@@ -2482,6 +2484,14 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
             }
             conf.push_back("-G");
             conf.push_back("Ninja");
+            const fs::path ninja_exe = fs::exists(path_prefix / "ninja.exe", ec)
+                                          ? (path_prefix / "ninja.exe")
+                                          : (path_prefix / "ninja");
+            conf.push_back("-DCMAKE_MAKE_PROGRAM=" + path_to_utf8(ninja_exe));
+        } else if (opts.on_output) {
+            opts.on_output(
+                "warning: ninja.exe not found under toolchain bin — cmake may pick "
+                "NMake Makefiles (install/update cmake-clang-v1)");
         }
         if (!clang_c.empty())
             conf.push_back("-DCMAKE_C_COMPILER=" + path_to_utf8(clang_c));
@@ -2732,6 +2742,9 @@ PackEnsureResult update_toolchain_to_latest(const Paths& paths, BuildProgressFn 
         r.tag = info.latest_tag.empty() ? info.current_version : info.latest_tag;
         r.root = find_cached_toolchain(paths, pack.id, {});
         r.message = info.message;
+        // Refresh latest→pack junction / user PATH (must stay cheap on Windows —
+        // never recursively copy the toolchain into latest\).
+        progress(on_progress, "Refreshing toolchain PATH…");
         maybe_publish_toolchain_path(paths, pack.id, /*toolchain=*/true, r);
         progress(on_progress, r.message);
         return r;

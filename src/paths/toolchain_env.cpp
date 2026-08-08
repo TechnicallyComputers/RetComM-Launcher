@@ -58,30 +58,118 @@ bool path_list_contains(const std::string& path_list, const std::string& dir, Pa
     return false;
 }
 
+#if defined(_WIN32)
+bool win_is_reparse_point(const fs::path& p) {
+    const DWORD attrs = GetFileAttributesW(p.wstring().c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+}
+
+// Unlink a junction/symlink without descending into the target. A previous bug
+// fell back to a full recursive copy of the toolchain into latest\ — never
+// remove_all that here (multi‑GB hang); rename it aside instead.
+void win_remove_latest_entry(const fs::path& latest) {
+    std::error_code ec;
+    const DWORD attrs = GetFileAttributesW(latest.wstring().c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        // Broken symlink / already gone.
+        fs::remove(latest, ec);
+        return;
+    }
+    if ((attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        if ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0)
+            RemoveDirectoryW(latest.wstring().c_str());
+        else
+            DeleteFileW(latest.wstring().c_str());
+        return;
+    }
+    if ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        // Real directory (likely the old full-copy fallback). Move aside so
+        // publish does not block on deleting gigabytes of LLVM.
+        const fs::path aside =
+            latest.parent_path() /
+            ("latest.old-" + std::to_string(GetTickCount64()));
+        fs::rename(latest, aside, ec);
+        if (ec) {
+            // Last resort: leave it; caller can publish pack_root directly.
+            ec.clear();
+        }
+        return;
+    }
+    fs::remove(latest, ec);
+}
+
+#ifndef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+#define SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE 0x2
+#endif
+
+bool win_create_directory_junction(const fs::path& link, const fs::path& target) {
+    // mklink /J does not require admin / Developer Mode.
+    std::wstring cmd = L"cmd.exe /C mklink /J \"";
+    cmd += link.wstring();
+    cmd += L"\" \"";
+    cmd += target.wstring();
+    cmd += L"\"";
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        return false;
+    }
+    WaitForSingleObject(pi.hProcess, 15000);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return code == 0 && win_is_reparse_point(link);
+}
+#endif
+
 void set_latest_pointer(const fs::path& cache_base, const fs::path& pack_root) {
     std::error_code ec;
     const fs::path latest = cache_base / "latest";
-    if (fs::exists(latest, ec) || fs::is_symlink(latest, ec)) {
-        fs::remove_all(latest, ec);
+    fs::create_directories(cache_base, ec);
+
+    // Fast path: already linked/copied to the same tree.
+    if (fs::equivalent(latest, pack_root, ec)) return;
+    ec.clear();
+
+#if defined(_WIN32)
+    win_remove_latest_entry(latest);
+
+    const std::wstring target = pack_root.wstring();
+    const std::wstring link = latest.wstring();
+    // Dev Mode / elevated: real directory symlink.
+    if (CreateSymbolicLinkW(link.c_str(), target.c_str(),
+                            SYMBOLIC_LINK_FLAG_DIRECTORY |
+                                SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) ||
+        CreateSymbolicLinkW(link.c_str(), target.c_str(), SYMBOLIC_LINK_FLAG_DIRECTORY)) {
+        return;
     }
-#if !defined(_WIN32)
+    // No privilege needed; preferred portable Windows approach.
+    if (win_create_directory_junction(latest, pack_root)) return;
+
+    // Never fs::copy the whole toolchain — that hung the Hub for minutes.
+    // publish_toolchain_user_env will fall back to pack_root for PATH.
+    std::ofstream pointer(cache_base / "latest.path", std::ios::binary | std::ios::trunc);
+    if (pointer) pointer << pack_root.string();
+#else
+    if (fs::exists(latest, ec) || fs::is_symlink(latest, ec)) {
+        fs::remove(latest, ec);
+        if (ec) {
+            ec.clear();
+            fs::remove_all(latest, ec);
+        }
+    }
     fs::create_directory_symlink(pack_root, latest, ec);
     if (!ec) return;
     ec.clear();
+    std::ofstream pointer(cache_base / "latest.path", std::ios::binary | std::ios::trunc);
+    if (pointer) pointer << pack_root.string();
 #endif
-#if defined(_WIN32)
-    // Prefer a directory junction (no admin); fall back to copy.
-    const std::wstring target = pack_root.wstring();
-    const std::wstring link = latest.wstring();
-    if (CreateSymbolicLinkW(link.c_str(), target.c_str(),
-                            SYMBOLIC_LINK_FLAG_DIRECTORY)) {
-        return;
-    }
-    // Junction via mklink needs a process; copy is the portable fallback.
-#endif
-    fs::create_directories(latest.parent_path(), ec);
-    fs::copy(pack_root, latest,
-             fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
 }
 
 #if !defined(_WIN32)
@@ -329,17 +417,32 @@ bool publish_toolchain_user_env(const Paths& paths, const std::string& pack_id,
 
     const fs::path cache_base = paths.toolchains_dir / pack_id;
     fs::create_directories(cache_base, ec);
-    set_latest_pointer(cache_base, fs::weakly_canonical(pack_root, ec));
-    const fs::path latest = cache_base / "latest";
-    if (!fs::exists(latest, ec)) {
-        if (message) *message = "toolchain PATH: failed to create latest pointer";
+    const fs::path canonical = fs::weakly_canonical(pack_root, ec);
+    set_latest_pointer(cache_base, canonical);
+    fs::path publish_root = cache_base / "latest";
+    if (!fs::exists(publish_root, ec)) {
+        // Junction/symlink unavailable — use the versioned pack dir (and any
+        // latest.path note left by set_latest_pointer).
+        const fs::path path_file = cache_base / "latest.path";
+        if (fs::is_regular_file(path_file, ec)) {
+            std::ifstream in(path_file);
+            std::string line;
+            if (std::getline(in, line) && !line.empty()) {
+                const fs::path from_file(line);
+                if (fs::is_directory(from_file, ec)) publish_root = from_file;
+            }
+        }
+        if (!fs::exists(publish_root, ec)) publish_root = canonical;
+    }
+    if (!fs::is_directory(publish_root, ec)) {
+        if (message) *message = "toolchain PATH: failed to resolve pack root";
         return false;
     }
 
 #if defined(_WIN32)
-    publish_windows(latest, message);
+    publish_windows(publish_root, message);
 #else
-    publish_unix(cache_base, pack_id, latest, message);
+    publish_unix(cache_base, pack_id, publish_root, message);
 #endif
     return true;
 }
