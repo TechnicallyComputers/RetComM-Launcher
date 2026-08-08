@@ -190,6 +190,7 @@ install(FILES assets/retcomm.svg DESTINATION share/icons/hicolor/scalable/apps
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/retcomm.png")
     install(FILES assets/retcomm.png DESTINATION share/icons/hicolor/512x512/apps
             RENAME retcomm.png)
+    install(FILES assets/retcomm.png DESTINATION share/retcomm)
 endif()
 # Hub UI fonts (Lato Latin — same face as recomp-ui). Required when hub is built.
 set(RETCOMM_FONT_REGULAR "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/LatoLatin-Regular.ttf")
@@ -204,6 +205,12 @@ if(EXISTS "${RETCOMM_FONT_REGULAR}")
         assets/fonts/LatoLatin-Bold.ttf
         assets/fonts/NOTICE.md
         DESTINATION share/retcomm/fonts)
+endif()
+# Hub platform controller icons (library platform cards).
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/platforms/psx.png")
+    install(DIRECTORY assets/platforms/
+            DESTINATION share/retcomm/platforms
+            FILES_MATCHING PATTERN "*.png")
 endif()
 
 # Windows: ship vcpkg/shared runtime DLLs next to the installed exes.

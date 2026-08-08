@@ -30,9 +30,9 @@ namespace fs = std::filesystem;
 
 namespace {
 
-// Resolve Lato Latin (same face as recomp-ui). Prefer packaged locations, then
-// walk up from the app base path for a source-tree assets/fonts (local builds).
-fs::path find_hub_font_file(const char* filename) {
+// Resolve hub assets (fonts, platform icons). Prefer packaged locations, then
+// walk up from the app base path for a source-tree assets/<kind> (local builds).
+fs::path find_hub_asset_file(const char* kind, const char* filename) {
     std::error_code ec;
     auto try_file = [&](const fs::path& p) -> fs::path {
         if (p.empty()) return {};
@@ -46,24 +46,24 @@ fs::path find_hub_font_file(const char* filename) {
     // AppImage runtime sets APPDIR to the mounted squashfs root.
     if (const char* appdir = std::getenv("APPDIR")) {
         const fs::path ad(appdir);
-        dirs.push_back(ad / "usr" / "share" / "retcomm" / "fonts");
-        dirs.push_back(ad / "usr" / "bin" / "fonts");
-        dirs.push_back(ad / "fonts");
+        dirs.push_back(ad / "usr" / "share" / "retcomm" / kind);
+        dirs.push_back(ad / "usr" / "bin" / kind);
+        dirs.push_back(ad / kind);
     }
     // SDL3: cached string — do not free. Often …/usr/bin/ inside an AppImage.
     if (const char* base = SDL_GetBasePath()) {
         fs::path b(base);
         dirs.push_back(b);
-        dirs.push_back(b / "fonts");
-        dirs.push_back(b / ".." / "share" / "retcomm" / "fonts");
-        dirs.push_back(b / ".." / "Resources" / "fonts");
-        dirs.push_back(b / ".." / ".." / "Resources" / "fonts");
-        // Local cmake: build/ → ../assets/fonts
+        dirs.push_back(b / kind);
+        dirs.push_back(b / ".." / "share" / "retcomm" / kind);
+        dirs.push_back(b / ".." / "Resources" / kind);
+        dirs.push_back(b / ".." / ".." / "Resources" / kind);
+        // Local cmake: build/ → ../assets/<kind>
         fs::path walk = b;
         for (int i = 0; i < 6 && !walk.empty(); ++i) {
-            dirs.push_back(walk / "assets" / "fonts");
-            dirs.push_back(walk / "fonts");
-            dirs.push_back(walk / "share" / "retcomm" / "fonts");
+            dirs.push_back(walk / "assets" / kind);
+            dirs.push_back(walk / kind);
+            dirs.push_back(walk / "share" / "retcomm" / kind);
             walk = walk.parent_path();
         }
     }
@@ -72,6 +72,44 @@ fs::path find_hub_font_file(const char* filename) {
         if (auto hit = try_file(dir / filename); !hit.empty()) return hit;
     }
     return {};
+}
+
+fs::path find_hub_font_file(const char* filename) {
+    return find_hub_asset_file("fonts", filename);
+}
+
+// Catalog platform slug → human-readable label for library cards.
+const char* platform_display_name(const std::string& slug) {
+    if (slug.empty()) return "Library";
+    if (slug == "psx" || slug == "ps1" || slug == "ps") return "PlayStation";
+    if (slug == "snes") return "Super Nintendo";
+    if (slug == "gba") return "Game Boy Advance";
+    if (slug == "n64") return "Nintendo 64";
+    if (slug == "genesis" || slug == "md" || slug == "megadrive") return "Genesis / Mega Drive";
+    if (slug == "gb" || slug == "dmg") return "Game Boy";
+    if (slug == "gbc") return "Game Boy Color";
+    if (slug == "nds") return "Nintendo DS";
+    if (slug == "psp") return "PlayStation Portable";
+    return slug.c_str();
+}
+
+// Resolve assets/platforms/<slug>.png (falls back to all.png).
+fs::path platform_icon_path(const std::string& slug) {
+    std::string key = slug.empty() ? "all" : slug;
+    for (char& c : key) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    fs::path hit = find_hub_asset_file("platforms", (key + ".png").c_str());
+    if (!hit.empty()) return hit;
+    if (key == "ps1" || key == "ps") {
+        hit = find_hub_asset_file("platforms", "psx.png");
+        if (!hit.empty()) return hit;
+    }
+    if (key == "md" || key == "megadrive") {
+        hit = find_hub_asset_file("platforms", "genesis.png");
+        if (!hit.empty()) return hit;
+    }
+    return find_hub_asset_file("platforms", "all.png");
 }
 
 // Load Lato like recomp-ui (18px body, oversample 2). Falls back to ImGui default.
@@ -211,16 +249,82 @@ ImVec4 chip_color(const TitleRow& r, const Theme& th) {
 }
 
 bool accent_button(const char* label, const Theme& th, const ImVec2& size = ImVec2(0, 0)) {
-    ImGui::PushStyleColor(ImGuiCol_Button, th.accent);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, th.accent_dim);
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, th.accent_dim);
+    ImGui::PushStyleColor(ImGuiCol_Button, th.accent_button);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, th.accent_button_hovered);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, th.accent_button_active);
     ImGui::PushStyleColor(ImGuiCol_Text, th.accent_text);
     const bool clicked = ImGui::Button(label, size);
     ImGui::PopStyleColor(4);
     return clicked;
 }
 
-void draw_marquee(const Theme& th, float width) {
+// Play / success actions — muted green fill; bright th.good stays for status text.
+bool good_button(const char* label, const Theme& th, const ImVec2& size = ImVec2(0, 0)) {
+    ImGui::PushStyleColor(ImGuiCol_Button, th.good_button);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, th.good_button_hovered);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, th.good_button_active);
+    ImGui::PushStyleColor(ImGuiCol_Text, th.good_button_text);
+    const bool clicked = ImGui::Button(label, size);
+    ImGui::PopStyleColor(4);
+    return clicked;
+}
+
+void draw_hub_menu(HubModel& hub, const Theme& th) {
+    const bool busy = hub.job_running.load();
+    // Settings stay reachable during Build & Install / scans.
+    if (ImGui::MenuItem("Library Settings")) hub.open_settings();
+    if (ImGui::MenuItem("RomM Sync Settings")) hub.open_romm_settings();
+    ImGui::Separator();
+    ImGui::BeginDisabled(busy);
+    if (ImGui::MenuItem("Check Updates")) hub.start_job(HubJob::CheckUpdates);
+    if (ImGui::MenuItem("Refresh Catalog")) hub.start_job(HubJob::RefreshCatalog);
+    if (ImGui::MenuItem("Refresh Library")) {
+        hub.refresh_rows(false);
+        hub.set_status("Library refreshed");
+    }
+    if (ImGui::MenuItem("Clean Unlisted Installs…")) {
+        const size_t n = hub.refresh_orphan_installs();
+        if (n == 0) {
+            hub.set_status("No installs outside the catalog");
+            hub.append_log("Orphan scan: none");
+        } else {
+            hub.orphan_prompt_pending.store(true);
+        }
+    }
+    ImGui::Separator();
+    {
+        const retcomm::RetcommInstallInfo install = retcomm::retcomm_install_info();
+        ImGui::BeginDisabled(!install.self_update_supported);
+        if (ImGui::MenuItem("Update RetComM")) hub.start_job(HubJob::SelfUpdate);
+        ImGui::EndDisabled();
+    }
+    {
+        bool tc_upd = false;
+        std::string tc_line;
+        {
+            std::lock_guard<std::mutex> lock(hub.mu);
+            tc_upd = hub.toolchain_update_available;
+            tc_line = hub.toolchain_status;
+            if (tc_line.empty() && !hub.toolchain_current_version.empty())
+                tc_line = "Toolchain " + hub.toolchain_current_version;
+        }
+        if (ImGui::MenuItem(tc_upd ? "Update Toolchain (available)" : "Update Toolchain"))
+            hub.start_job(HubJob::UpdateToolchain);
+        ImGui::Separator();
+        {
+            // Binary compile version is authoritative (not launcher.json).
+            const std::string ver = retcomm::retcomm_app_version();
+            const retcomm::RetcommInstallInfo install = retcomm::retcomm_install_info();
+            ImGui::TextColored(th.text_muted, "Launcher %s", ver.c_str());
+            if (install.self_update_supported && !install.channel_id.empty())
+                ImGui::TextColored(th.text_muted, "Channel %s", install.channel_id.c_str());
+            if (!tc_line.empty()) ImGui::TextColored(th.text_muted, "%s", tc_line.c_str());
+        }
+    }
+    ImGui::EndDisabled();
+}
+
+void draw_marquee(HubModel& hub, const Theme& th, float width) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     const float h = 72.f;
@@ -243,82 +347,267 @@ void draw_marquee(const Theme& th, float width) {
     ImGui::PopStyleColor();
     ImGui::SetCursorScreenPos(ImVec2(p0.x + 20.f, p0.y + 40.f));
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextUnformatted("Multi-title recomp / decomp hub");
+    ImGui::TextUnformatted("Retro Compilation Manager");
     ImGui::PopStyleColor();
+
+    // Top-right: Menu popup, or a one-click Back when editing settings.
+    constexpr float kMenuH = 36.f;
+    const bool in_settings = hub.show_settings || hub.show_romm_settings;
+    const char* btn_label = in_settings ? "Back to Library" : "Menu";
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.f, 8.f));
+    const float btn_w =
+        std::max(88.f, ImGui::CalcTextSize(btn_label).x + ImGui::GetStyle().FramePadding.x * 2.f);
+    ImGui::SetCursorScreenPos(ImVec2(p0.x + width - btn_w - 16.f, p0.y + (h - kMenuH) * 0.5f));
+    if (ImGui::Button(btn_label, ImVec2(btn_w, kMenuH))) {
+        if (in_settings) {
+            hub.show_settings = false;
+            hub.show_romm_settings = false;
+            hub.settings.dirty = false;
+            hub.romm_settings.dirty = false;
+        } else {
+            ImGui::OpenPopup("##hub_menu");
+        }
+    }
+    ImGui::PopStyleVar();
+    if (!in_settings && ImGui::BeginPopup("##hub_menu")) {
+        draw_hub_menu(hub, th);
+        ImGui::EndPopup();
+    }
+
     ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + h + 8.f));
 }
 
-void draw_library_card(const ImVec2& row_min, float row_w, float row_h, bool selected,
-                       const Theme& th, const char* title, const char* subtitle,
-                       const char* chip, const ImVec4& chip_col, float pad_x, float pad_y,
-                       float line_h, float line_gap) {
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImU32 bg = ImGui::ColorConvertFloat4ToU32(selected ? th.panel_hovered : th.panel);
-    dl->AddRectFilled(row_min, ImVec2(row_min.x + row_w, row_min.y + row_h), bg, th.radius_sm);
-    dl->AddRect(row_min, ImVec2(row_min.x + row_w, row_min.y + row_h),
-                ImGui::ColorConvertFloat4ToU32(selected ? th.accent : th.border), th.radius_sm);
+// Typical Named_Boxarts width/height per platform (placeholder when art missing).
+// Real textures always size with their own aspect — never stretched to this.
+float platform_boxart_aspect(const std::string& slug) {
+    if (slug == "psx" || slug == "ps1" || slug == "ps" || slug == "psp") return 1.0f;
+    if (slug == "gba" || slug == "gb" || slug == "gbc" || slug == "dmg") return 0.62f;
+    if (slug == "nds") return 0.90f;
+    // Cartridge / NA retail boxes tend to be portrait.
+    if (slug == "snes" || slug == "n64" || slug == "genesis" || slug == "md" ||
+        slug == "megadrive")
+        return 0.72f;
+    return 0.75f;
+}
 
-    const float text_x = row_min.x + pad_x;
-    const float text_y = row_min.y + pad_y;
-    ImGui::SetCursorScreenPos(ImVec2(text_x, text_y));
-    ImGui::Text("%s", title);
-    if (subtitle && subtitle[0]) {
-        ImGui::SetCursorScreenPos(ImVec2(text_x, text_y + line_h + line_gap));
-        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-        ImGui::TextUnformatted(subtitle);
-        ImGui::PopStyleColor();
+// Fit image into max box without cropping or stretching (letterbox unused space).
+ImVec2 contain_size(float src_w, float src_h, float max_w, float max_h) {
+    if (src_w <= 0.f || src_h <= 0.f) return ImVec2(max_w, max_h);
+    const float scale = std::min(max_w / src_w, max_h / src_h);
+    return ImVec2(src_w * scale, src_h * scale);
+}
+
+void draw_ellipsized_centered(const char* text, float max_w, const ImVec4& col) {
+    if (!text || !text[0] || max_w <= 4.f) return;
+    std::string shown = text;
+    ImVec2 sz = ImGui::CalcTextSize(shown.c_str());
+    if (sz.x > max_w) {
+        const char* ell = "...";
+        while (shown.size() > 1 &&
+               ImGui::CalcTextSize((shown + ell).c_str()).x > max_w)
+            shown.pop_back();
+        shown += ell;
+        sz = ImGui::CalcTextSize(shown.c_str());
     }
-    if (chip && chip[0]) {
-        const ImVec2 chip_sz = ImGui::CalcTextSize(chip);
-        ImGui::SetCursorScreenPos(
-            ImVec2(row_min.x + row_w - chip_sz.x - pad_x, row_min.y + (row_h - chip_sz.y) * 0.5f));
-        ImGui::PushStyleColor(ImGuiCol_Text, chip_col);
-        ImGui::TextUnformatted(chip);
-        ImGui::PopStyleColor();
+    const float x = ImGui::GetCursorScreenPos().x;
+    const float y = ImGui::GetCursorScreenPos().y;
+    ImGui::SetCursorScreenPos(ImVec2(x + std::max(0.f, (max_w - sz.x) * 0.5f), y));
+    ImGui::PushStyleColor(ImGuiCol_Text, col);
+    ImGui::TextUnformatted(shown.c_str());
+    ImGui::PopStyleColor();
+}
+
+// Portrait/platform grid tile: art on top (aspect preserved), labels below.
+// Content is clipped inside the frame; colored border is drawn last on top.
+// Returns total tile height used.
+void draw_art_dim(ImDrawList* dl, const ImVec2& art0, const ImVec2& art1, float radius) {
+    dl->AddRectFilled(art0, art1, IM_COL32(8, 10, 18, 155), radius, ImDrawFlags_RoundCornersTop);
+}
+
+void draw_busy_spinner(ImDrawList* dl, const ImVec2& art0, const ImVec2& art1, const Theme& th) {
+    const ImVec2 c((art0.x + art1.x) * 0.5f, (art0.y + art1.y) * 0.5f);
+    const float rad = std::min(art1.x - art0.x, art1.y - art0.y) * 0.16f;
+    const float t = static_cast<float>(ImGui::GetTime()) * 4.8f;
+    constexpr int kSeg = 11;
+    for (int i = 0; i < kSeg; ++i) {
+        const float a0 = t + (static_cast<float>(i) / static_cast<float>(kSeg)) * 6.2831853f;
+        const float a1 = a0 + 0.5f;
+        ImVec4 col = th.accent;
+        col.w = 0.22f + 0.78f * (static_cast<float>(i + 1) / static_cast<float>(kSeg));
+        dl->PathClear();
+        dl->PathArcTo(c, rad, a0, a1, 10);
+        dl->PathStroke(ImGui::ColorConvertFloat4ToU32(col), 0, 3.0f);
     }
 }
 
-void draw_library(HubModel& hub, const Theme& th) {
-    const bool busy = hub.job_running.load();
+float draw_grid_tile(const ImVec2& tile_min, float tile_w, bool selected, const Theme& th,
+                     const BoxartTexture* tex, float art_aspect_wh, const char* title,
+                     const char* subtitle, const ImVec4* badge_col, bool busy_spinner = false,
+                     bool dim_art = false) {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    constexpr float kArtPad = 8.f;
+    constexpr float kLabelGap = 4.f;
+    constexpr float kFrameInset = 2.f; // keep art/badge inside the border stroke
+    const float line_h = ImGui::GetTextLineHeight();
+    const float label_h = line_h + (subtitle && subtitle[0] ? line_h + 2.f : 0.f) + 6.f;
+
+    // Art frame height follows platform/boxart aspect (width fixed by grid column).
+    const float art_box_w = tile_w;
+    const float art_box_h = art_box_w / std::max(0.35f, art_aspect_wh);
+    const float tile_h = art_box_h + kLabelGap + label_h;
+    const ImVec2 tile_max(tile_min.x + tile_w, tile_min.y + tile_h);
+
+    const ImU32 bg = ImGui::ColorConvertFloat4ToU32(selected ? th.panel_hovered : th.panel);
+    dl->AddRectFilled(tile_min, tile_max, bg, th.radius_sm);
+
+    // Clip all inner content so it cannot paint over the frame edge.
+    dl->PushClipRect(ImVec2(tile_min.x + kFrameInset, tile_min.y + kFrameInset),
+                     ImVec2(tile_max.x - kFrameInset, tile_max.y - kFrameInset), true);
+
+    const ImVec2 art0(tile_min.x, tile_min.y);
+    const ImVec2 art1(tile_min.x + art_box_w, tile_min.y + art_box_h);
+    dl->AddRectFilled(art0, art1, ImGui::ColorConvertFloat4ToU32(th.control), th.radius_sm,
+                      ImDrawFlags_RoundCornersTop);
+
+    if (tex && tex->gl_id && tex->width > 0 && tex->height > 0) {
+        const ImVec2 fit =
+            contain_size(static_cast<float>(tex->width), static_cast<float>(tex->height),
+                         art_box_w - kArtPad * 2.f, art_box_h - kArtPad * 2.f);
+        const float ix = art0.x + (art_box_w - fit.x) * 0.5f;
+        const float iy = art0.y + (art_box_h - fit.y) * 0.5f;
+        dl->AddImage((ImTextureID)(intptr_t)tex->gl_id, ImVec2(ix, iy),
+                     ImVec2(ix + fit.x, iy + fit.y));
+    }
+
+    if (dim_art || busy_spinner) draw_art_dim(dl, art0, art1, th.radius_sm);
+    if (busy_spinner) draw_busy_spinner(dl, art0, art1, th);
+
+    if (badge_col) {
+        const float r = 7.f;
+        const ImVec2 c(art1.x - 12.f, art0.y + 12.f);
+        dl->AddCircleFilled(c, r, ImGui::ColorConvertFloat4ToU32(*badge_col), 16);
+        dl->AddCircle(c, r, ImGui::ColorConvertFloat4ToU32(th.background), 16, 1.5f);
+    }
+
+    ImGui::SetCursorScreenPos(ImVec2(tile_min.x + 4.f, tile_min.y + art_box_h + kLabelGap));
+    draw_ellipsized_centered(title, tile_w - 8.f, th.text);
+    if (subtitle && subtitle[0]) {
+        ImGui::SetCursorScreenPos(
+            ImVec2(tile_min.x + 4.f, tile_min.y + art_box_h + kLabelGap + line_h + 2.f));
+        draw_ellipsized_centered(subtitle, tile_w - 8.f, th.text_muted);
+    }
+
+    dl->PopClipRect();
+
+    // Frame stroke last so selection/border always sits above clipped content.
+    const float border_t = selected ? 2.5f : 1.5f;
+    dl->AddRect(tile_min, tile_max,
+                ImGui::ColorConvertFloat4ToU32(selected ? th.accent : th.border), th.radius_sm,
+                0, border_t);
+    return tile_h;
+}
+
+void select_first_visible_title(HubModel& hub) {
+    hub.selected = 0;
+    for (int i = 0; i < static_cast<int>(hub.rows.size()); ++i) {
+        const TitleRow& cand = hub.rows[static_cast<size_t>(i)];
+        if (!title_passes_library_filter(cand, hub)) continue;
+        if (hub.library_platform.empty() || cand.platform == hub.library_platform) {
+            hub.selected = i;
+            break;
+        }
+    }
+}
+
+void enter_platform_titles(HubModel& hub, const char* platform_id) {
+    if (!platform_id || !platform_id[0]) return;
+    hub.library_nav = retcomm::hub::LibraryNav::Titles;
+    hub.library_platform = platform_id;
+    bool ok = hub.selected >= 0 && hub.selected < static_cast<int>(hub.rows.size());
+    if (ok) {
+        const TitleRow& sel = hub.rows[static_cast<size_t>(hub.selected)];
+        if (!title_passes_library_filter(sel, hub)) ok = false;
+        if (ok && sel.platform != hub.library_platform) ok = false;
+    }
+    if (!ok) select_first_visible_title(hub);
+}
+
+void draw_library(HubModel& hub, BoxartCache& boxart, const Theme& th) {
+    const bool job_busy = hub.job_running.load();
+    const bool install_busy = job_busy && retcomm::hub::hub_job_is_install(hub.job);
+    std::string busy_title_id;
+    if (install_busy) busy_title_id = hub.job_title_id;
     ImGui::BeginChild("library", ImVec2(0, 0), ImGuiChildFlags_Borders);
 
-    // Title frame: LIBRARY + optional Back (titles level only).
+    // Header: LIBRARY on platform picker; platform display name on title grid.
+    // Fixed row height so the divider matches with/without Back (Back still fits).
     {
-        const float back_w = 56.f;
         const bool show_back = hub.library_nav == retcomm::hub::LibraryNav::Titles;
+        const char* header = "LIBRARY";
+        if (show_back && !hub.library_platform.empty())
+            header = platform_display_name(hub.library_platform);
+
+        constexpr float kHeaderScale = 1.25f;
+        constexpr float kBackPadX = 14.f;
+        constexpr float kBackPadY = 6.f;
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(kBackPadX, kBackPadY));
+        const ImVec2 back_txt = ImGui::CalcTextSize("Back");
+        const float back_w = back_txt.x + kBackPadX * 2.f;
+        const float back_h = back_txt.y + kBackPadY * 2.f;
+        ImGui::PopStyleVar();
+
+        ImGui::SetWindowFontScale(kHeaderScale);
+        const float title_h = ImGui::GetTextLineHeight();
+        ImGui::SetWindowFontScale(1.f);
+        // Same band on both screens — tall enough for the padded Back control.
+        const float row_h = std::max(title_h, back_h);
+
+        const ImVec2 row0 = ImGui::GetCursorScreenPos();
+        const float content_right =
+            ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+        ImGui::Dummy(ImVec2(ImGui::GetContentRegionAvail().x, row_h));
+
+        ImGui::SetWindowFontScale(kHeaderScale);
+        const ImVec2 title_sz = ImGui::CalcTextSize(header);
+        ImGui::SetCursorScreenPos(
+            ImVec2(row0.x, row0.y + (row_h - title_sz.y) * 0.5f));
         ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-        ImGui::TextUnformatted("LIBRARY");
+        ImGui::TextUnformatted(header);
         ImGui::PopStyleColor();
+        ImGui::SetWindowFontScale(1.f);
+
         if (show_back) {
-            const float y = ImGui::GetItemRectMin().y;
-            const float right = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
-            ImGui::SetCursorScreenPos(ImVec2(right - back_w, y - 2.f));
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8.f, 2.f));
-            if (ImGui::SmallButton("Back") && !busy) {
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(kBackPadX, kBackPadY));
+            ImGui::SetCursorScreenPos(
+                ImVec2(content_right - back_w, row0.y + (row_h - back_h) * 0.5f));
+            if (ImGui::Button("Back", ImVec2(back_w, back_h))) {
                 hub.library_nav = retcomm::hub::LibraryNav::Platforms;
                 hub.library_platform.clear();
             }
             ImGui::PopStyleVar();
         }
+
+        ImGui::SetCursorScreenPos(ImVec2(row0.x, row0.y + row_h + 4.f));
         ImGui::Separator();
     }
 
-    constexpr float kPadX = 14.f;
-    constexpr float kPadY = 12.f;
-    constexpr float kLineGap = 4.f;
-    const float line_h = ImGui::GetTextLineHeight();
-    const float content_h = line_h * 2.f + kLineGap;
-    const float row_h = (std::max)(th.row_height, content_h + kPadY * 2.f);
-
     std::lock_guard<std::mutex> lock(hub.mu);
 
+    constexpr float kGap = 12.f;
+    const float avail_w = ImGui::GetContentRegionAvail().x;
+
+    // Wrapping grid: fixed column width; tile height follows boxart aspect.
+    auto begin_grid = [&](float prefer_tile_w, int min_cols, int max_cols) -> float {
+        int cols = (std::max)(min_cols, static_cast<int>((avail_w + kGap) / (prefer_tile_w + kGap)));
+        cols = (std::clamp)(cols, min_cols, max_cols);
+        const float tile_w = (avail_w - kGap * static_cast<float>(cols - 1)) / static_cast<float>(cols);
+        return (std::max)(72.f, tile_w);
+    };
+
     if (hub.library_nav == retcomm::hub::LibraryNav::Platforms) {
-        // Platforms present in the (filtered) catalog, plus All at top.
         std::map<std::string, int> counts;
-        int visible_total = 0;
         for (const auto& r : hub.rows) {
             if (!title_passes_library_filter(r, hub)) continue;
-            ++visible_total;
             if (!r.platform.empty()) counts[r.platform]++;
         }
         std::vector<std::string> platforms;
@@ -326,115 +615,612 @@ void draw_library(HubModel& hub, const Theme& th) {
         for (const auto& [plat, _] : counts) platforms.push_back(plat);
         std::sort(platforms.begin(), platforms.end());
 
-        auto draw_platform_row = [&](const char* id, const char* title, const char* subtitle) {
-            ImGui::PushID(id);
-            const ImVec2 row_min = ImGui::GetCursorScreenPos();
-            const float row_w = ImGui::GetContentRegionAvail().x;
-            draw_library_card(row_min, row_w, row_h, false, th, title, subtitle, nullptr,
-                              th.text_muted, kPadX, kPadY, line_h, kLineGap);
-            ImGui::SetCursorScreenPos(row_min);
-            if (ImGui::InvisibleButton("##plat", ImVec2(row_w, row_h)) && !busy) {
-                hub.library_nav = retcomm::hub::LibraryNav::Titles;
-                hub.library_platform = (std::strcmp(id, "__all__") == 0) ? std::string{} : id;
-                // Prefer keeping current selection if it matches the filter.
-                bool ok = hub.selected >= 0 && hub.selected < static_cast<int>(hub.rows.size());
-                if (ok) {
-                    const TitleRow& sel = hub.rows[static_cast<size_t>(hub.selected)];
-                    if (!title_passes_library_filter(sel, hub)) ok = false;
-                    if (ok && !hub.library_platform.empty() && sel.platform != hub.library_platform)
-                        ok = false;
-                }
-                if (!ok) {
-                    hub.selected = 0;
-                    for (int i = 0; i < static_cast<int>(hub.rows.size()); ++i) {
-                        const TitleRow& cand = hub.rows[static_cast<size_t>(i)];
-                        if (!title_passes_library_filter(cand, hub)) continue;
-                        if (hub.library_platform.empty() ||
-                            cand.platform == hub.library_platform) {
-                            hub.selected = i;
-                            break;
-                        }
-                    }
-                }
-            }
-            ImGui::Dummy(ImVec2(0, 6.f));
-            ImGui::PopID();
+        struct PlatCard {
+            std::string id;
+            std::string title;
+            std::string subtitle;
         };
-
-        const std::string all_sub =
-            std::to_string(visible_total) + (visible_total == 1 ? " title" : " titles");
-        draw_platform_row("__all__", "All platforms", all_sub.c_str());
+        std::vector<PlatCard> cards;
         for (const auto& plat : platforms) {
             const int n = counts[plat];
-            const std::string sub = std::to_string(n) + (n == 1 ? " title" : " titles");
-            draw_platform_row(plat.c_str(), plat.c_str(), sub.c_str());
+            cards.push_back({plat, platform_display_name(plat),
+                             std::to_string(n) + (n == 1 ? " title" : " titles")});
         }
-    } else {
-        // Titles for selected platform (or all).
-        for (int i = 0; i < static_cast<int>(hub.rows.size()); ++i) {
-            const TitleRow& r = hub.rows[static_cast<size_t>(i)];
-            if (!hub.library_platform.empty() && r.platform != hub.library_platform) continue;
-            if (!title_passes_library_filter(r, hub)) continue;
 
-            const bool selected = (hub.selected == i);
-            ImGui::PushID(r.id.c_str());
+        // Platform tiles: portrait cards (~ES style).
+        const float tile_w = begin_grid(148.f, 2, 8);
+        const float start_x = ImGui::GetCursorPosX();
+        float x = 0.f;
+        float y = ImGui::GetCursorPosY();
+        float row_h = 0.f;
 
-            const ImVec2 row_min = ImGui::GetCursorScreenPos();
-            const float row_w = ImGui::GetContentRegionAvail().x;
-            const char* chip = chip_label(r);
-            std::string sub = r.platform + " · " + r.kind;
-            if (r.has_romm && !r.has_rom) sub += " · RomM";
-            draw_library_card(row_min, row_w, row_h, selected, th, r.name.c_str(), sub.c_str(),
-                              chip, chip_color(r, th), kPadX, kPadY, line_h, kLineGap);
+        for (const auto& card : cards) {
+            if (x > 0.f && x + tile_w > avail_w + 0.5f) {
+                x = 0.f;
+                y += row_h + kGap;
+                row_h = 0.f;
+            }
+            ImGui::PushID(card.id.c_str());
+            ImGui::SetCursorPos(ImVec2(start_x + x, y));
+            const ImVec2 tile_min = ImGui::GetCursorScreenPos();
 
-            ImGui::SetCursorScreenPos(row_min);
-            if (ImGui::InvisibleButton("##row", ImVec2(row_w, row_h)) && !busy) hub.selected = i;
+            const fs::path icon = platform_icon_path(card.id);
+            const BoxartTexture* tex =
+                icon.empty() ? nullptr : boxart.get(std::string("platform:") + card.id, icon);
+            // Controller icons are landscape; tile frame is portrait — contain, no stretch.
+            constexpr float kPlatAspect = 0.78f;
+            const float tile_h =
+                draw_grid_tile(tile_min, tile_w, false, th, tex, kPlatAspect, card.title.c_str(),
+                               card.subtitle.c_str(), nullptr);
 
-            ImGui::Dummy(ImVec2(0, 6.f));
+            ImGui::SetCursorScreenPos(tile_min);
+            if (ImGui::InvisibleButton("##plat", ImVec2(tile_w, tile_h)))
+                enter_platform_titles(hub, card.id.c_str());
+
+            row_h = (std::max)(row_h, tile_h);
+            x += tile_w + kGap;
             ImGui::PopID();
         }
+        ImGui::SetCursorPos(ImVec2(start_x, y + row_h + kGap));
+        ImGui::Dummy(ImVec2(0, 0));
+    } else {
+        // Title cover grid for one platform (no mixed "All" view).
+        const std::string& plat_filter = hub.library_platform;
+        const float filter_aspect = platform_boxart_aspect(plat_filter);
+        const float prefer_w = (filter_aspect >= 0.95f) ? 140.f : 120.f;
+        const float tile_w = begin_grid(prefer_w, 2, 10);
+
+        const float start_x = ImGui::GetCursorPosX();
+        float x = 0.f;
+        float y = ImGui::GetCursorPosY();
+        float row_h = 0.f;
+
+        for (int i = 0; i < static_cast<int>(hub.rows.size()); ++i) {
+            const TitleRow& r = hub.rows[static_cast<size_t>(i)];
+            if (r.platform != plat_filter) continue;
+            if (!title_passes_library_filter(r, hub)) continue;
+
+            const float aspect = filter_aspect;
+
+            if (x > 0.f && x + tile_w > avail_w + 0.5f) {
+                x = 0.f;
+                y += row_h + kGap;
+                row_h = 0.f;
+            }
+
+            ImGui::PushID(r.id.c_str());
+            ImGui::SetCursorPos(ImVec2(start_x + x, y));
+            const ImVec2 tile_min = ImGui::GetCursorScreenPos();
+            const bool selected = (hub.selected == i);
+            const bool title_busy = install_busy && r.id == busy_title_id;
+            const bool dim_uninstalled = !r.installed;
+            const BoxartTexture* tex =
+                r.boxart_path.empty() ? nullptr : boxart.get(r.id, r.boxart_path);
+            const ImVec4 badge = chip_color(r, th);
+            const float tile_h =
+                draw_grid_tile(tile_min, tile_w, selected, th, tex, aspect, r.name.c_str(),
+                               nullptr, &badge, title_busy, dim_uninstalled);
+
+            ImGui::SetCursorScreenPos(tile_min);
+            if (ImGui::InvisibleButton("##row", ImVec2(tile_w, tile_h))) {
+                hub.selected = i;
+                hub.detail_scroll_top = true;
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip("%s\n%s · %s\n%s", r.name.c_str(),
+                                  platform_display_name(r.platform), r.kind.c_str(),
+                                  chip_label(r));
+            }
+
+            row_h = (std::max)(row_h, tile_h);
+            x += tile_w + kGap;
+            ImGui::PopID();
+        }
+        ImGui::SetCursorPos(ImVec2(start_x, y + row_h + kGap));
+        ImGui::Dummy(ImVec2(0, 0));
     }
     ImGui::EndChild();
 }
 
-void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
-    const bool busy = hub.job_running.load();
-    ImGui::BeginChild("detail", ImVec2(0, 0), ImGuiChildFlags_Borders);
+void center_modal_next() {
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+}
 
-    TitleRow row;
-    {
-        std::lock_guard<std::mutex> lock(hub.mu);
-        if (hub.rows.empty() || hub.selected < 0 ||
-            hub.selected >= static_cast<int>(hub.rows.size())) {
-            ImGui::TextColored(th.text_muted, "Select a title from the library.");
-            ImGui::EndChild();
-            return;
+void draw_detail_save_controls(HubModel& hub, const TitleRow& row, const Theme& th) {
+    // Match spacing used below Create Save before Manage Data / RomM Sync.
+    constexpr float kSaveBtnPad = 12.f;
+
+    if (row.save_labels.empty()) {
+        ImGui::TextColored(th.text_muted, "Save file");
+        ImGui::TextColored(th.text_muted,
+                           "None yet — Create Save, Play (auto-creates), or RomM Sync");
+        ImGui::Dummy(ImVec2(0, kSaveBtnPad));
+        if (ImGui::Button("Create Save", ImVec2(-1, 0))) {
+            std::string err;
+            if (!hub.create_title_save(row.id, &err))
+                hub.append_log("Create Save failed: " + err);
         }
-        row = hub.rows[static_cast<size_t>(hub.selected)];
+        return;
     }
 
-    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextUnformatted("TITLE");
-    ImGui::PopStyleColor();
-    ImGui::Text("%s", row.name.c_str());
-    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextWrapped("%s  ·  %s / %s", row.id.c_str(), row.platform.c_str(), row.kind.c_str());
-    ImGui::PopStyleColor();
-
-    if (!row.boxart_path.empty()) {
-        ImGui::Dummy(ImVec2(0, 8));
-        if (const BoxartTexture* tex = boxart.get(row.id, row.boxart_path)) {
-            const float max_w = std::min(ImGui::GetContentRegionAvail().x, 220.f);
-            const float scale = max_w / static_cast<float>(tex->width);
-            const float draw_w = max_w;
-            const float draw_h = static_cast<float>(tex->height) * scale;
-            ImGui::Image((ImTextureID)(intptr_t)tex->gl_id, ImVec2(draw_w, draw_h));
-        } else {
-            ImGui::TextColored(th.text_muted, "(boxart failed to load)");
+    if (row.dual_memcard) {
+        auto draw_memcard_combo = [&](const char* combo_id, int index, bool is_card2) {
+            const char* preview = "(Blank card)";
+            if (index >= 0 && index < static_cast<int>(row.save_labels.size()))
+                preview = row.save_labels[static_cast<size_t>(index)].c_str();
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo(combo_id, preview)) {
+                if (is_card2) {
+                    const bool blank_sel = index < 0;
+                    if (ImGui::Selectable("(Blank card)", blank_sel)) {
+                        std::string err;
+                        if (!hub.set_title_preferred_save_card2(row.id, retcomm::kBlankMemcardId,
+                                                                &err))
+                            hub.append_log("Could not save preference: " + err);
+                    }
+                    if (blank_sel) ImGui::SetItemDefaultFocus();
+                }
+                for (size_t i = 0; i < row.save_labels.size(); ++i) {
+                    const bool selected = static_cast<int>(i) == index;
+                    if (ImGui::Selectable(row.save_labels[i].c_str(), selected)) {
+                        std::string err;
+                        const bool ok =
+                            is_card2 ? hub.set_title_preferred_save_card2(row.id, row.save_ids[i],
+                                                                          &err)
+                                     : hub.set_title_preferred_save(row.id, row.save_ids[i], &err);
+                        if (!ok) hub.append_log("Could not save preference: " + err);
+                    }
+                    if (selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+        };
+        ImGui::TextColored(th.text_muted, "Memcard 1 & 2");
+        draw_memcard_combo("##memcard1", row.preferred_save_index, false);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 2.f));
+        draw_memcard_combo("##memcard2", row.preferred_save_card2_index, true);
+        ImGui::PopStyleVar();
+        ImGui::Dummy(ImVec2(0, kSaveBtnPad));
+        if (ImGui::Button("Create Save", ImVec2(-1, 0))) {
+            std::string err;
+            if (!hub.create_title_save(row.id, &err))
+                hub.append_log("Create Save failed: " + err);
         }
+        return;
+    }
+
+    ImGui::TextColored(th.text_muted, "Save file");
+    const char* preview =
+        (row.preferred_save_index >= 0 &&
+         row.preferred_save_index < static_cast<int>(row.save_labels.size()))
+            ? row.save_labels[static_cast<size_t>(row.preferred_save_index)].c_str()
+            : row.save_labels.front().c_str();
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::BeginCombo("##save_file", preview)) {
+        for (size_t i = 0; i < row.save_labels.size(); ++i) {
+            const bool selected = static_cast<int>(i) == row.preferred_save_index;
+            if (ImGui::Selectable(row.save_labels[i].c_str(), selected)) {
+                std::string err;
+                if (!hub.set_title_preferred_save(row.id, row.save_ids[i], &err))
+                    hub.append_log("Could not save preference: " + err);
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    ImGui::Dummy(ImVec2(0, kSaveBtnPad));
+    if (ImGui::Button("Create Save", ImVec2(-1, 0))) {
+        std::string err;
+        if (!hub.create_title_save(row.id, &err))
+            hub.append_log("Create Save failed: " + err);
+    }
+}
+
+void draw_detail_manage_data_popup(HubModel& hub, const TitleRow& row, const Theme& th,
+                                   bool busy) {
+    center_modal_next();
+    ImGui::SetNextWindowSize(ImVec2(420.f, 0.f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Manage Data###detail_manage_data", nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+
+    ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 380.f);
+    ImGui::TextWrapped("%s", row.name.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::Separator();
+    ImGui::BeginDisabled(busy);
+
+    const bool can_open =
+        row.installed || row.install_dir_present || row.has_preserved_state;
+    if (can_open && ImGui::Button("Open Folder", ImVec2(-1, 0))) {
+        std::string err;
+        if (!retcomm::open_path_in_file_manager(row.install_root, &err))
+            hub.append_log("Open Folder failed: " + err);
+    }
+
+    if (row.installed) {
+        if (ImGui::Button("Uninstall (keep saves)", ImVec2(-1, 0))) {
+            hub.start_job(HubJob::Uninstall, row.id);
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::Button("Uninstall + delete saves", ImVec2(-1, 0))) {
+            hub.start_job(HubJob::UninstallPurge, row.id);
+            ImGui::CloseCurrentPopup();
+        }
+    } else if (row.install_dir_present) {
+        if (ImGui::Button("Clean install folder (keep saves)", ImVec2(-1, 0))) {
+            hub.start_job(HubJob::Uninstall, row.id);
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::Button("Clean install folder + delete saves", ImVec2(-1, 0))) {
+            hub.start_job(HubJob::UninstallPurge, row.id);
+            ImGui::CloseCurrentPopup();
+        }
+    } else if (row.has_preserved_state) {
+        if (ImGui::Button("Delete preserved data", ImVec2(-1, 0))) {
+            hub.start_job(HubJob::UninstallPurge, row.id);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Removes the entire apps folder for this title, including preserved "
+            "saves and config.");
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::TextColored(th.text_muted, "No install folder or preserved data yet.");
     }
 
     ImGui::Dummy(ImVec2(0, 8));
+    ImGui::TextColored(th.text_muted, "Paths");
+    if (!row.install_root.empty())
+        ImGui::TextWrapped("install: %s", row.install_root.c_str());
+    if (!row.binary_path.empty())
+        ImGui::TextWrapped("binary:  %s", row.binary_path.c_str());
+    if (row.install_root.empty() && row.binary_path.empty())
+        ImGui::TextColored(th.text_muted, "(no install paths yet)");
+
+    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::TextColored(th.text_muted, "ROM / disc");
+    if (row.has_rom)
+        ImGui::TextWrapped("%s", row.rom_path.c_str());
+    else if (row.has_romm) {
+        ImGui::TextColored(th.accent, "Available on RomM — use RomM Sync to download");
+        if (!row.romm_file_name.empty()) ImGui::TextWrapped("%s", row.romm_file_name.c_str());
+    } else {
+        ImGui::TextColored(th.warn, "No library match");
+        if (!row.suggested_rom.empty()) {
+            ImGui::TextColored(th.text_muted, "Looking for:");
+            ImGui::TextWrapped("%s", row.suggested_rom.c_str());
+        }
+    }
+
+    ImGui::EndDisabled();
+    ImGui::Dummy(ImVec2(0, 8));
+    if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
+void draw_detail_romm_sync_popup(HubModel& hub, const TitleRow& row, const Theme& th, bool busy) {
+    center_modal_next();
+    ImGui::SetNextWindowSize(ImVec2(440.f, 0.f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("RomM Sync###detail_romm_sync", nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+
+    ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 400.f);
+    ImGui::TextWrapped("%s", row.name.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::Separator();
+
+    if (!row.romm_ready) {
+        ImGui::TextColored(th.warn, "RomM is not configured.");
+        ImGui::TextColored(th.text_muted, "Open Menu → RomM Sync Settings to add a URL and API key.");
+        if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+        return;
+    }
+
+    ImGui::BeginDisabled(busy);
+    if (row.has_rom_identity) {
+        const char* rom_label =
+            row.has_rom ? "Re-download ROM from RomM" : "Download ROM from RomM";
+        if (ImGui::Button(rom_label, ImVec2(-1, 0))) {
+            hub.start_job(HubJob::FetchRommRom, row.id);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Matches catalog hashes against your RomM library, then saves into the "
+            "configured ROM library folder.");
+        ImGui::PopStyleColor();
+        ImGui::Dummy(ImVec2(0, 4));
+    }
+    if (row.needs_bios) {
+        const char* bios_label =
+            row.has_bios ? "Re-download BIOS from RomM" : "Download BIOS from RomM";
+        if (ImGui::Button(bios_label, ImVec2(-1, 0))) {
+            hub.start_job(HubJob::FetchRommBios, row.id);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Matches catalog BIOS identity against RomM firmware and saves into the "
+            "BIOS root.");
+        ImGui::PopStyleColor();
+        ImGui::Dummy(ImVec2(0, 4));
+    }
+    if (row.installed) {
+        if (ImGui::Button("Sync Game Saves", ImVec2(-1, 0))) {
+            hub.start_job(HubJob::SyncRommSaves, row.id);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Promotes install saves into the save library, then bidirectional sync with "
+            "RomM. Newer file wins; identical hashes are skipped.");
+        ImGui::PopStyleColor();
+        ImGui::Dummy(ImVec2(0, 4));
+
+        if (ImGui::Button("Sync Savestates", ImVec2(-1, 0))) {
+            hub.start_job(HubJob::SyncRommStates, row.id);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Bidirectional sync of savestates with RomM. Newer file wins. Recomp and "
+            "emulator savestates are often incompatible — sync does not convert formats.");
+        ImGui::PopStyleColor();
+    }
+    if (!row.has_rom_identity && !row.needs_bios && !row.installed) {
+        ImGui::TextColored(th.text_muted, "No RomM actions available for this title yet.");
+    }
+    ImGui::EndDisabled();
+
+    ImGui::Dummy(ImVec2(0, 8));
+    if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
+fs::path find_hub_logo_path() {
+    // Packaged icon location + source-tree assets/retcomm.png via walk.
+    std::error_code ec;
+    auto try_file = [&](const fs::path& p) -> fs::path {
+        if (p.empty()) return {};
+        if (fs::is_regular_file(p, ec)) return p;
+        return {};
+    };
+    if (const char* appdir = std::getenv("APPDIR")) {
+        const fs::path ad(appdir);
+        if (auto h = try_file(ad / "usr" / "share" / "icons" / "hicolor" / "512x512" / "apps" /
+                             "retcomm.png");
+            !h.empty())
+            return h;
+        if (auto h = try_file(ad / "usr" / "share" / "retcomm" / "retcomm.png"); !h.empty())
+            return h;
+    }
+    if (const char* base = SDL_GetBasePath()) {
+        fs::path walk(base);
+        for (int i = 0; i < 6 && !walk.empty(); ++i) {
+            if (auto h = try_file(walk / "assets" / "retcomm.png"); !h.empty()) return h;
+            if (auto h = try_file(walk / "retcomm.png"); !h.empty()) return h;
+            if (auto h = try_file(walk / "share" / "retcomm" / "retcomm.png"); !h.empty())
+                return h;
+            if (auto h = try_file(walk / "share" / "icons" / "hicolor" / "512x512" / "apps" /
+                                  "retcomm.png");
+                !h.empty())
+                return h;
+            walk = walk.parent_path();
+        }
+    }
+    return {};
+}
+
+void draw_welcome_panel(BoxartCache& boxart, const Theme& th) {
+    ImGui::BeginChild("detail", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    const ImVec2 avail = ImGui::GetContentRegionAvail();
+    const float logo_max = std::min(220.f, std::min(avail.x - 24.f, avail.y * 0.45f));
+
+    const fs::path logo = find_hub_logo_path();
+    const BoxartTexture* tex =
+        logo.empty() ? nullptr : boxart.get("hub:logo", logo);
+
+    float block_h = ImGui::GetTextLineHeight() * 2.5f;
+    float logo_w = 0.f, logo_h = 0.f;
+    if (tex && tex->gl_id && tex->width > 0 && tex->height > 0) {
+        const ImVec2 fit = contain_size(static_cast<float>(tex->width),
+                                        static_cast<float>(tex->height), logo_max, logo_max);
+        logo_w = fit.x;
+        logo_h = fit.y;
+        block_h += logo_h + 16.f;
+    }
+
+    const float start_y = ImGui::GetCursorPosY() + std::max(0.f, (avail.y - block_h) * 0.35f);
+    ImGui::SetCursorPosY(start_y);
+
+    if (tex && tex->gl_id && logo_w > 0.f) {
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.f, (avail.x - logo_w) * 0.5f));
+        ImGui::Image((ImTextureID)(intptr_t)tex->gl_id, ImVec2(logo_w, logo_h));
+        ImGui::Dummy(ImVec2(0, 12.f));
+    }
+
+    const char* welcome = "Welcome to RetComM";
+    const ImVec2 tw = ImGui::CalcTextSize(welcome);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.f, (avail.x - tw.x) * 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_Text, th.accent);
+    ImGui::TextUnformatted(welcome);
+    ImGui::PopStyleColor();
+
+    ImGui::Dummy(ImVec2(0, 6.f));
+    const char* hint = "Choose a platform, then a title.";
+    const ImVec2 hw = ImGui::CalcTextSize(hint);
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.f, (avail.x - hw.x) * 0.5f));
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextUnformatted(hint);
+    ImGui::PopStyleColor();
+    ImGui::EndChild();
+}
+
+void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
+    const bool job_busy = hub.job_running.load();
+    const bool install_op = job_busy && retcomm::hub::hub_job_is_install(hub.job);
+    // Any exclusive worker job blocks starting another install/scan/mutate.
+    const bool block_title_mutate = job_busy;
+
+    TitleRow row;
+    bool show_welcome = false;
+    {
+        std::lock_guard<std::mutex> lock(hub.mu);
+        show_welcome = hub.library_nav == retcomm::hub::LibraryNav::Platforms ||
+                       hub.rows.empty() || hub.selected < 0 ||
+                       hub.selected >= static_cast<int>(hub.rows.size());
+        if (!show_welcome) row = hub.rows[static_cast<size_t>(hub.selected)];
+    }
+    if (show_welcome) {
+        draw_welcome_panel(boxart, th);
+        return;
+    }
+
+    ImGui::BeginChild("detail", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    if (hub.detail_scroll_top) {
+        ImGui::SetScrollY(0.f);
+        hub.detail_scroll_top = false;
+    }
+
+    // Header = title name only.
+    ImGui::TextWrapped("%s", row.name.c_str());
+
+    ImGui::Dummy(ImVec2(0, 10));
+
+    // Primary actions under the title.
+    const float btn_w = (ImGui::GetContentRegionAvail().x - 8.f) * 0.5f;
+    const bool has_native_install = row.supports_local_build || row.can_prebuilt_install;
+    if (row.installed) {
+        // Play stays available during Build & Install / scans (own worker thread).
+        ImGui::BeginDisabled(hub.launch_running.load());
+        if (good_button("Play", th, ImVec2(btn_w, 0)))
+            hub.start_job(HubJob::Launch, row.id);
+        ImGui::EndDisabled();
+        ImGui::SameLine(0, 8);
+        ImGui::BeginDisabled(block_title_mutate);
+        if (ImGui::Button("Update", ImVec2(btn_w, 0))) hub.start_job(HubJob::Update, row.id);
+        ImGui::EndDisabled();
+    } else if (row.supports_local_build) {
+        if (!row.has_rom) {
+            ImGui::PushStyleColor(ImGuiCol_Text, th.warn);
+            ImGui::TextWrapped(
+                "Match a verified .cue / ROM in your library before Build & Install.");
+            ImGui::PopStyleColor();
+        }
+        ImGui::BeginDisabled(block_title_mutate);
+        if (accent_button(row.install_dir_present ? "Retry Build & Install" : "Build & Install", th,
+                          ImVec2(-1, 0)))
+            hub.start_job(HubJob::Install, row.id);
+        // Wine only when there is no native release path for this OS.
+        if (row.can_wine_install && !has_native_install) {
+            if (ImGui::Button("Install with WINE", ImVec2(-1, 0)))
+                hub.start_job(HubJob::InstallWine, row.id);
+        }
+        ImGui::EndDisabled();
+    } else {
+        ImGui::BeginDisabled(block_title_mutate);
+        if (accent_button(row.install_dir_present ? "Retry Install" : "Install", th, ImVec2(-1, 0)))
+            hub.start_job(HubJob::Install, row.id);
+        if (row.can_wine_install && !has_native_install) {
+            if (ImGui::Button("Install with WINE", ImVec2(-1, 0)))
+                hub.start_job(HubJob::InstallWine, row.id);
+        }
+        ImGui::EndDisabled();
+    }
+
+    // Saves / memcards sit under Play; ROM paths live in Manage Data.
+    if (row.installed) {
+        ImGui::Dummy(ImVec2(0, 8));
+        draw_detail_save_controls(hub, row, th);
+    }
+
+    // Folder / uninstall and RomM actions live in centered modals.
+    ImGui::Dummy(ImVec2(0, 12));
+    const bool show_romm = row.romm_ready;
+    const float gap = show_romm ? 8.f : 0.f;
+    const float manage_w =
+        show_romm ? (ImGui::GetContentRegionAvail().x - gap) * 0.5f : -1.f;
+    ImGui::BeginDisabled(install_op);
+    if (ImGui::Button("Manage Data", ImVec2(manage_w, 0)))
+        ImGui::OpenPopup("Manage Data###detail_manage_data");
+    ImGui::EndDisabled();
+    if (show_romm) {
+        ImGui::SameLine(0, gap);
+        ImGui::BeginDisabled(block_title_mutate);
+        if (accent_button("RomM Sync", th, ImVec2(manage_w, 0)))
+            ImGui::OpenPopup("RomM Sync###detail_romm_sync");
+        ImGui::EndDisabled();
+    }
+
+    draw_detail_manage_data_popup(hub, row, th, block_title_mutate);
+    if (show_romm) draw_detail_romm_sync_popup(hub, row, th, block_title_mutate);
+
+    // Seldom-touched: BIOS just above author. ROM / disc paths live in Manage Data.
+    if (row.needs_bios || row.supports_openbios) {
+        ImGui::Dummy(ImVec2(0, 16));
+        ImGui::TextColored(th.text_muted, "BIOS");
+        if (!row.bios_choice_ids.empty()) {
+            const char* preview =
+                (row.preferred_bios_index >= 0 &&
+                 row.preferred_bios_index < static_cast<int>(row.bios_choice_labels.size()))
+                    ? row.bios_choice_labels[static_cast<size_t>(row.preferred_bios_index)].c_str()
+                    : "(select)";
+            ImGui::SetNextItemWidth(-1);
+            if (ImGui::BeginCombo("##bios_choice", preview)) {
+                for (size_t i = 0; i < row.bios_choice_ids.size(); ++i) {
+                    const bool selected = static_cast<int>(i) == row.preferred_bios_index;
+                    const std::string item =
+                        row.bios_choice_labels[i] + "##" + row.bios_choice_ids[i];
+                    if (ImGui::Selectable(item.c_str(), selected)) {
+                        std::string err;
+                        if (!hub.set_title_preferred_bios(row.id, row.bios_choice_ids[i], &err))
+                            hub.append_log("BIOS preference failed: " + err);
+                    }
+                    if (selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            if (row.bios_choice == retcomm::kOpenBiosChoice) {
+                ImGui::TextColored(th.text_muted,
+                                   "OpenBIOS regenerates at Build & Install (no dump needed).");
+            }
+        } else if (row.has_bios) {
+            ImGui::TextColored(th.good, "BIOS matched");
+        } else {
+            ImGui::TextColored(th.warn, "Missing — run Scan BIOS");
+            if (row.supports_openbios)
+                ImGui::TextColored(th.text_muted, "Or use OpenBIOS after a catalog refresh.");
+        }
+    }
+
+    // Footer: author → GitHub → App status → About.
+    ImGui::Dummy(ImVec2(0, 12));
+    const char* author_label =
+        (row.kind == "decomp") ? "Decomp Author" : "Recomp Author";
+    ImGui::TextColored(th.text_muted, "%s", author_label);
+    if (!row.author.empty())
+        ImGui::Text("%s", row.author.c_str());
+    else
+        ImGui::TextColored(th.text_muted, "(unknown)");
+    if (!row.github_url.empty()) {
+        if (ImGui::Button("GitHub Source", ImVec2(-1, 0))) {
+            std::string err;
+            if (!retcomm::open_url_in_browser(row.github_url, &err))
+                hub.append_log("Open URL failed: " + err);
+        }
+    }
+    if (!row.author_notes.empty()) {
+        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::TextColored(th.text_muted, "Author's Notes");
+        ImGui::TextWrapped("%s", row.author_notes.c_str());
+    }
+
+    ImGui::Dummy(ImVec2(0, 10));
     ImGui::TextColored(th.text_muted, "App");
     if (row.installed) {
         ImGui::TextColored(th.good, "Installed %s%s",
@@ -444,13 +1230,12 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
             ImGui::TextColored(th.warn, "Update available: %s", row.latest_tag.c_str());
     } else if (row.install_dir_present) {
         ImGui::TextColored(th.warn, "Install folder present — launch binary not found");
-        if (!row.install_issue.empty())
-            ImGui::TextWrapped("%s", row.install_issue.c_str());
+        if (!row.install_issue.empty()) ImGui::TextWrapped("%s", row.install_issue.c_str());
         if (!row.expected_binary.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
             ImGui::TextWrapped(
-                "Looking for executable \"%s\". Open the folder to run first-time setup "
-                "or fix the binary, then use Install again (or Clean install folder).",
+                "Looking for executable \"%s\". Use Manage Data → Open Folder to fix "
+                "setup, then Install again.",
                 row.expected_binary.c_str());
             ImGui::PopStyleColor();
         }
@@ -466,319 +1251,11 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
         }
     }
 
-    ImGui::Dummy(ImVec2(0, 6));
-    const char* author_label =
-        (row.kind == "decomp") ? "Decomp Author" : "Recomp Author";
-    ImGui::TextColored(th.text_muted, "%s", author_label);
-    if (!row.author.empty())
-        ImGui::Text("%s", row.author.c_str());
-    else
-        ImGui::TextColored(th.text_muted, "(unknown)");
-
-    ImGui::Dummy(ImVec2(0, 6));
-    ImGui::TextColored(th.text_muted, "ROM / disc");
-    if (row.has_rom)
-        ImGui::TextWrapped("%s", row.rom_path.c_str());
-    else if (row.has_romm) {
-        ImGui::TextColored(th.accent, "Available on RomM — download to use locally");
-        if (!row.romm_file_name.empty()) ImGui::TextWrapped("%s", row.romm_file_name.c_str());
-    } else {
-        ImGui::TextColored(th.warn, "No library match — run Scan ROMs (or Scan RomM library)");
-        if (!row.suggested_rom.empty()) {
-            ImGui::TextColored(th.text_muted, "Looking for:");
-            ImGui::TextWrapped("%s", row.suggested_rom.c_str());
-        }
-    }
-
-    if (row.needs_bios || row.supports_openbios) {
-        ImGui::Dummy(ImVec2(0, 6));
-        ImGui::TextColored(th.text_muted, "BIOS");
-        if (!row.bios_choice_ids.empty()) {
-            const char* preview =
-                (row.preferred_bios_index >= 0 &&
-                 row.preferred_bios_index < static_cast<int>(row.bios_choice_labels.size()))
-                    ? row.bios_choice_labels[static_cast<size_t>(row.preferred_bios_index)].c_str()
-                    : "(select)";
-            if (ImGui::BeginCombo("##bios_choice", preview)) {
-                for (size_t i = 0; i < row.bios_choice_ids.size(); ++i) {
-                    const bool selected = static_cast<int>(i) == row.preferred_bios_index;
-                    // Unique ID: duplicate basenames (e.g. two SCPH1001.BIN) collide otherwise.
-                    const std::string item =
-                        row.bios_choice_labels[i] + "##" + row.bios_choice_ids[i];
-                    if (ImGui::Selectable(item.c_str(), selected)) {
-                        std::string err;
-                        if (!hub.set_title_preferred_bios(row.id, row.bios_choice_ids[i], &err))
-                            hub.append_log("BIOS preference failed: " + err);
-                    }
-                    if (selected) ImGui::SetItemDefaultFocus();
-                }
-                ImGui::EndCombo();
-            }
-            if (row.bios_choice == retcomm::kOpenBiosChoice) {
-                ImGui::TextColored(th.text_muted,
-                                   "OpenBIOS regenerates at Build & Install (no dump needed).");
-            } else if (!row.bios_path.empty()) {
-                ImGui::TextWrapped("%s", row.bios_path.c_str());
-            }
-        } else if (row.has_bios) {
-            ImGui::TextWrapped("%s", row.bios_path.c_str());
-        } else {
-            ImGui::TextColored(th.warn, "Missing — run Scan BIOS");
-            if (row.supports_openbios)
-                ImGui::TextColored(th.text_muted, "Or use OpenBIOS after a catalog refresh.");
-        }
-    }
-
-    ImGui::Dummy(ImVec2(0, 12));
-    ImGui::BeginDisabled(busy);
-
-    const float btn_w = (ImGui::GetContentRegionAvail().x - 8.f) * 0.5f;
-    if (row.installed) {
-        if (accent_button("Play", th, ImVec2(btn_w, 0)))
-            hub.start_job(HubJob::Launch, row.id);
-        ImGui::SameLine(0, 8);
-        if (ImGui::Button("Update", ImVec2(btn_w, 0))) hub.start_job(HubJob::Update, row.id);
-        if (row.supports_local_build) {
-            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-            ImGui::TextWrapped(
-                "Update fetches the latest release and rebuilds; codegen is reused when "
-                "your disc / emitters still match. Use Generate & Rebuild to force disc→C.");
-            ImGui::PopStyleColor();
-            ImGui::BeginDisabled(!row.has_rom);
-            if (ImGui::Button("Generate & Rebuild", ImVec2(-1, 0)))
-                hub.start_job(HubJob::GenerateRebuild, row.id);
-            ImGui::EndDisabled();
-            if (!row.has_rom) {
-                ImGui::PushStyleColor(ImGuiCol_Text, th.warn);
-                ImGui::TextWrapped("Match a verified .cue before Generate & Rebuild.");
-                ImGui::PopStyleColor();
-            } else if (row.install_method == "zip") {
-                ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-                ImGui::TextWrapped(
-                    "Installed from a prebuilt zip — Generate & Rebuild switches this "
-                    "title to a RetComM local build (saves/settings are kept).");
-                ImGui::PopStyleColor();
-            }
-        }
-
-        ImGui::Dummy(ImVec2(0, 6));
-        if (row.save_labels.empty()) {
-            ImGui::TextColored(th.text_muted, "Save file");
-            ImGui::TextColored(th.text_muted,
-                               "None yet — Create Save, Play (auto-creates), or Sync from RomM");
-            if (ImGui::Button("Create Save", ImVec2(-1, 0))) {
-                std::string err;
-                if (!hub.create_title_save(row.id, &err))
-                    hub.append_log("Create Save failed: " + err);
-            }
-        } else if (row.dual_memcard) {
-            auto draw_memcard_combo = [&](const char* label, const char* combo_id, int index,
-                                          bool is_card2) {
-                ImGui::TextColored(th.text_muted, "%s", label);
-                const char* preview = "(Blank card)";
-                if (index >= 0 && index < static_cast<int>(row.save_labels.size()))
-                    preview = row.save_labels[static_cast<size_t>(index)].c_str();
-                ImGui::SetNextItemWidth(-1);
-                if (ImGui::BeginCombo(combo_id, preview)) {
-                    if (is_card2) {
-                        const bool blank_sel = index < 0;
-                        if (ImGui::Selectable("(Blank card)", blank_sel)) {
-                            std::string err;
-                            if (!hub.set_title_preferred_save_card2(
-                                    row.id, retcomm::kBlankMemcardId, &err))
-                                hub.append_log("Could not save preference: " + err);
-                        }
-                        if (blank_sel) ImGui::SetItemDefaultFocus();
-                    }
-                    for (size_t i = 0; i < row.save_labels.size(); ++i) {
-                        const bool selected = static_cast<int>(i) == index;
-                        if (ImGui::Selectable(row.save_labels[i].c_str(), selected)) {
-                            std::string err;
-                            const bool ok =
-                                is_card2
-                                    ? hub.set_title_preferred_save_card2(row.id, row.save_ids[i],
-                                                                         &err)
-                                    : hub.set_title_preferred_save(row.id, row.save_ids[i], &err);
-                            if (!ok) hub.append_log("Could not save preference: " + err);
-                        }
-                        if (selected) ImGui::SetItemDefaultFocus();
-                    }
-                    ImGui::EndCombo();
-                }
-            };
-            draw_memcard_combo("Memcard 1", "##memcard1", row.preferred_save_index, false);
-            ImGui::Dummy(ImVec2(0, 4));
-            draw_memcard_combo("Memcard 2", "##memcard2", row.preferred_save_card2_index, true);
-            if (ImGui::Button("Create Save", ImVec2(-1, 0))) {
-                std::string err;
-                if (!hub.create_title_save(row.id, &err))
-                    hub.append_log("Create Save failed: " + err);
-            }
-            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-            ImGui::TextWrapped(
-                "Saves live in the save library (or install saves/). Play binds "
-                "settings.toml [memcard] card1 / card2.");
-            ImGui::PopStyleColor();
-        } else {
-            ImGui::TextColored(th.text_muted, "Save file");
-            const char* preview =
-                (row.preferred_save_index >= 0 &&
-                 row.preferred_save_index < static_cast<int>(row.save_labels.size()))
-                    ? row.save_labels[static_cast<size_t>(row.preferred_save_index)].c_str()
-                    : row.save_labels.front().c_str();
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::BeginCombo("##save_file", preview)) {
-                for (size_t i = 0; i < row.save_labels.size(); ++i) {
-                    const bool selected = static_cast<int>(i) == row.preferred_save_index;
-                    if (ImGui::Selectable(row.save_labels[i].c_str(), selected)) {
-                        std::string err;
-                        if (!hub.set_title_preferred_save(row.id, row.save_ids[i], &err))
-                            hub.append_log("Could not save preference: " + err);
-                    }
-                    if (selected) ImGui::SetItemDefaultFocus();
-                }
-                ImGui::EndCombo();
-            }
-            if (ImGui::Button("Create Save", ImVec2(-1, 0))) {
-                std::string err;
-                if (!hub.create_title_save(row.id, &err))
-                    hub.append_log("Create Save failed: " + err);
-            }
-            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-            ImGui::TextWrapped(
-                "Canonical save in the save library when configured; Play passes --save-path.");
-            ImGui::PopStyleColor();
-        }
-
-        if (ImGui::Button("Open Folder", ImVec2(-1, 0))) {
-            std::string err;
-            if (!retcomm::open_path_in_file_manager(row.install_root, &err))
-                hub.append_log("Open Folder failed: " + err);
-        }
-        if (!row.github_url.empty() && ImGui::Button("GitHub Source", ImVec2(-1, 0))) {
-            std::string err;
-            if (!retcomm::open_url_in_browser(row.github_url, &err))
-                hub.append_log("Open URL failed: " + err);
-        }
-        if (ImGui::Button("Uninstall (keep saves)", ImVec2(-1, 0)))
-            hub.start_job(HubJob::Uninstall, row.id);
-        if (ImGui::Button("Uninstall + delete saves", ImVec2(-1, 0)))
-            hub.start_job(HubJob::UninstallPurge, row.id);
-    } else {
-        if ((row.install_dir_present || row.has_preserved_state) &&
-            ImGui::Button("Open Folder", ImVec2(-1, 0))) {
-            std::string err;
-            if (!retcomm::open_path_in_file_manager(row.install_root, &err))
-                hub.append_log("Open Folder failed: " + err);
-        }
-        if (row.supports_local_build) {
-            if (!row.has_rom) {
-                ImGui::PushStyleColor(ImGuiCol_Text, th.warn);
-                ImGui::TextWrapped(
-                    "Match a verified .cue / ROM in your library before Build & Install.");
-                ImGui::PopStyleColor();
-            }
-            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-            ImGui::TextWrapped(
-                "Build & Install runs generate + cmake in RetComM (not the in-game wizard).");
-            ImGui::PopStyleColor();
-            if (accent_button(row.install_dir_present ? "Retry Build & Install" : "Build & Install",
-                              th, ImVec2(-1, 0)))
-                hub.start_job(HubJob::Install, row.id);
-            if (row.can_prebuilt_install &&
-                ImGui::Button("Install prebuilt", ImVec2(-1, 0)))
-                hub.start_job(HubJob::InstallPrebuilt, row.id);
-        } else {
-            if (accent_button(row.install_dir_present ? "Retry Install" : "Install", th,
-                              ImVec2(-1, 0)))
-                hub.start_job(HubJob::Install, row.id);
-        }
-        if (row.can_wine_install) {
-            if (ImGui::Button("Install with WINE", ImVec2(-1, 0)))
-                hub.start_job(HubJob::InstallWine, row.id);
-            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-            ImGui::TextWrapped("Uses the Windows release via wine/wine64 when a native "
-                               "Linux/macOS build is missing or preferred.");
-            ImGui::PopStyleColor();
-        }
-        if (!row.github_url.empty() && ImGui::Button("GitHub Source", ImVec2(-1, 0))) {
-            std::string err;
-            if (!retcomm::open_url_in_browser(row.github_url, &err))
-                hub.append_log("Open URL failed: " + err);
-        }
-        if (row.install_dir_present) {
-            if (ImGui::Button("Clean install folder (keep saves)", ImVec2(-1, 0)))
-                hub.start_job(HubJob::Uninstall, row.id);
-            if (ImGui::Button("Clean install folder + delete saves", ImVec2(-1, 0)))
-                hub.start_job(HubJob::UninstallPurge, row.id);
-        } else if (row.has_preserved_state) {
-            if (ImGui::Button("Delete preserved data", ImVec2(-1, 0)))
-                hub.start_job(HubJob::UninstallPurge, row.id);
-            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-            ImGui::TextWrapped(
-                "Removes the entire apps folder for this title, including preserved "
-                "saves and config.");
-            ImGui::PopStyleColor();
-        }
-    }
-
-    if (row.romm_ready && (row.has_rom_identity || row.needs_bios || row.installed)) {
+    if (!row.description.empty()) {
         ImGui::Dummy(ImVec2(0, 10));
-        ImGui::TextColored(th.text_muted, "RomM");
-        if (row.has_rom_identity) {
-            const char* rom_label =
-                row.has_rom ? "Re-download ROM from RomM" : "Download ROM from RomM";
-            if (ImGui::Button(rom_label, ImVec2(-1, 0)))
-                hub.start_job(HubJob::FetchRommRom, row.id);
-            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-            ImGui::TextWrapped(
-                "Matches catalog hashes against your RomM library, then saves into the "
-                "configured ROM library folder.");
-            ImGui::PopStyleColor();
-        }
-        if (row.needs_bios) {
-            const char* bios_label =
-                row.has_bios ? "Re-download BIOS from RomM" : "Download BIOS from RomM";
-            if (ImGui::Button(bios_label, ImVec2(-1, 0)))
-                hub.start_job(HubJob::FetchRommBios, row.id);
-            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-            ImGui::TextWrapped(
-                "Matches catalog BIOS identity against RomM firmware and saves into the "
-                "BIOS root.");
-            ImGui::PopStyleColor();
-        }
-        if (row.installed) {
-            if (ImGui::Button("Sync Game Saves", ImVec2(-1, 0)))
-                hub.start_job(HubJob::SyncRommSaves, row.id);
-            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-            ImGui::TextWrapped(
-                "Promotes install saves into the save library, then bidirectional sync with "
-                "RomM. Newer file wins; identical hashes are skipped.");
-            ImGui::PopStyleColor();
-
-            if (ImGui::Button("Sync Savestates", ImVec2(-1, 0)))
-                hub.start_job(HubJob::SyncRommStates, row.id);
-            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-            ImGui::TextWrapped(
-                "Bidirectional sync of savestates (states/ / .state*) with RomM. Newer file "
-                "wins. Note: savestates from a recomp build and from a traditional emulator "
-                "are often incompatible with one another — syncing does not convert formats.");
-            ImGui::PopStyleColor();
-        }
+        ImGui::TextColored(th.text_muted, "About");
+        ImGui::TextWrapped("%s", row.description.c_str());
     }
-
-    ImGui::EndDisabled();
-
-    if (!row.author_notes.empty()) {
-        ImGui::Dummy(ImVec2(0, 10));
-        ImGui::TextColored(th.text_muted, "Author's Notes");
-        ImGui::TextWrapped("%s", row.author_notes.c_str());
-    }
-
-    ImGui::Dummy(ImVec2(0, 10));
-    ImGui::TextColored(th.text_muted, "Paths");
-    if (!row.install_root.empty()) ImGui::TextWrapped("install: %s", row.install_root.c_str());
-    if (!row.binary_path.empty()) ImGui::TextWrapped("binary:  %s", row.binary_path.c_str());
 
     ImGui::EndChild();
 }
@@ -1158,89 +1635,21 @@ void draw_romm_settings_panel(HubModel& hub, const Theme& th) {
     ImGui::EndChild();
 }
 
-void draw_sidebar_actions(HubModel& hub, const Theme& th) {
-    const bool busy = hub.job_running.load();
-    if (hub.show_settings || hub.show_romm_settings) {
-        if (ImGui::Button("Back to Library", ImVec2(-1, 0))) {
-            hub.show_settings = false;
-            hub.show_romm_settings = false;
-            hub.settings.dirty = false;
-            hub.romm_settings.dirty = false;
-        }
-        ImGui::Dummy(ImVec2(0, 8));
-        ImGui::TextColored(th.text_muted, "Editing config.json");
-        ImGui::Dummy(ImVec2(0, 8));
-        std::string status;
-        {
-            std::lock_guard<std::mutex> lock(hub.mu);
-            status = hub.status;
-        }
-        ImGui::PushStyleColor(ImGuiCol_Text, busy ? th.warn : th.text_muted);
-        ImGui::TextWrapped("%s", status.empty() ? "Ready" : status.c_str());
-        ImGui::PopStyleColor();
-        return;
-    }
 
-    ImGui::BeginDisabled(busy);
-    if (ImGui::Button("Library Settings", ImVec2(-1, 0))) hub.open_settings();
-    if (ImGui::Button("RomM Sync Settings", ImVec2(-1, 0))) hub.open_romm_settings();
-    ImGui::Dummy(ImVec2(0, 4));
-    if (ImGui::Button("Check Updates", ImVec2(-1, 0))) hub.start_job(HubJob::CheckUpdates);
-    if (ImGui::Button("Refresh Catalog", ImVec2(-1, 0)))
-        hub.start_job(HubJob::RefreshCatalog);
-    if (ImGui::Button("Refresh Library", ImVec2(-1, 0))) {
-        hub.refresh_rows(false);
-        hub.set_status("Library refreshed");
+ImVec4 log_level_color(retcomm::hub::LogLevel level, const Theme& th) {
+    switch (level) {
+    case retcomm::hub::LogLevel::Good:
+        return th.good;
+    case retcomm::hub::LogLevel::Warn:
+        return th.warn;
+    case retcomm::hub::LogLevel::Error:
+        return ImVec4(1.f, 0.40f, 0.42f, 1.f);
+    case retcomm::hub::LogLevel::Accent:
+        return th.focus;
+    case retcomm::hub::LogLevel::Info:
+    default:
+        return th.text_muted;
     }
-    if (ImGui::Button("Clean Unlisted Installs…", ImVec2(-1, 0))) {
-        const size_t n = hub.refresh_orphan_installs();
-        if (n == 0) {
-            hub.set_status("No installs outside the catalog");
-            hub.append_log("Orphan scan: none");
-        } else {
-            hub.orphan_prompt_pending.store(true);
-        }
-    }
-    ImGui::Dummy(ImVec2(0, 10));
-    ImGui::Separator();
-    ImGui::Dummy(ImVec2(0, 4));
-    if (ImGui::Button("Update RetComM", ImVec2(-1, 0))) hub.start_job(HubJob::SelfUpdate);
-    {
-        bool tc_upd = false;
-        std::string tc_line;
-        {
-            std::lock_guard<std::mutex> lock(hub.mu);
-            tc_upd = hub.toolchain_update_available;
-            tc_line = hub.toolchain_status;
-            if (tc_line.empty() && !hub.toolchain_current_version.empty())
-                tc_line = "Toolchain " + hub.toolchain_current_version;
-        }
-        if (tc_upd) {
-            if (accent_button("Update Toolchain", th, ImVec2(-1, 0)))
-                hub.start_job(HubJob::UpdateToolchain);
-        } else if (ImGui::Button("Update Toolchain", ImVec2(-1, 0))) {
-            hub.start_job(HubJob::UpdateToolchain);
-        }
-        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-        {
-            std::string ver = hub.launcher_version;
-            if (ver.empty()) ver = retcomm::retcomm_installed_tag(hub.paths);
-            ImGui::TextWrapped("Launcher %s", ver.c_str());
-            if (!tc_line.empty()) ImGui::TextWrapped("%s", tc_line.c_str());
-        }
-        ImGui::PopStyleColor();
-    }
-    ImGui::EndDisabled();
-
-    ImGui::Dummy(ImVec2(0, 8));
-    std::string status;
-    {
-        std::lock_guard<std::mutex> lock(hub.mu);
-        status = hub.status;
-    }
-    ImGui::PushStyleColor(ImGuiCol_Text, busy ? th.warn : th.text_muted);
-    ImGui::TextWrapped("%s", status.empty() ? "Ready" : status.c_str());
-    ImGui::PopStyleColor();
 }
 
 void draw_log(HubModel& hub, const Theme& th, float height) {
@@ -1249,46 +1658,44 @@ void draw_log(HubModel& hub, const Theme& th, float height) {
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
     ImGui::TextUnformatted("ACTIVITY");
     ImGui::PopStyleColor();
-    std::string log;
+
+    std::vector<retcomm::hub::LogLine> lines;
+    std::string plain;
     {
         std::lock_guard<std::mutex> lock(hub.mu);
-        log = hub.log;
+        lines = hub.log_lines;
+        plain = hub.log;
     }
-    if (log.empty()) log = "(no activity yet)";
+    if (plain.empty()) plain = "(no activity yet)";
+
     ImGui::SameLine();
     {
         const float copy_w = ImGui::CalcTextSize("Copy").x + ImGui::GetStyle().FramePadding.x * 2.f;
         const float right = ImGui::GetWindowContentRegionMax().x;
         ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), right - copy_w));
-        if (ImGui::SmallButton("Copy")) ImGui::SetClipboardText(log.c_str());
+        if (ImGui::SmallButton("Copy")) ImGui::SetClipboardText(plain.c_str());
     }
     ImGui::Separator();
 
-    // Scroll the outer child (not InputTextMultiline's internal window). Size the
-    // multiline to its content height so selection/copy still works.
+    // Fill remaining panel height; colored lines scroll inside.
     ImGui::BeginChild("activity_scroll", ImVec2(0, 0), ImGuiChildFlags_None);
-    static size_t prev_len = 0;
-    const bool grew = log.size() != prev_len;
-    prev_len = log.size();
-    // Measured before content grows so we only stick when the user was already
-    // at the bottom (doesn't fight mouse-wheel scrolling up).
+    static size_t prev_count = 0;
+    const bool grew = lines.size() != prev_count;
+    prev_count = lines.size();
     const bool at_bottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 8.f;
 
-    std::vector<char> buf(log.begin(), log.end());
-    buf.push_back('\0');
-    const float wrap_w = ImGui::GetContentRegionAvail().x;
-    const float wrap = wrap_w > 1.f ? wrap_w : -1.f;
-    const ImVec2 text_sz = ImGui::CalcTextSize(log.c_str(), nullptr, false, wrap);
-    const float box_h =
-        std::max(text_sz.y + ImGui::GetStyle().FramePadding.y * 2.f + 4.f,
-                 ImGui::GetTextLineHeight() * 2.f);
-
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0, 0, 0, 0));
-    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::InputTextMultiline("##activity_log", buf.data(), buf.size(),
-                              ImVec2(wrap_w > 0.f ? wrap_w : 0.f, box_h),
-                              ImGuiInputTextFlags_ReadOnly);
-    ImGui::PopStyleColor(2);
+    if (lines.empty()) {
+        ImGui::TextColored(th.text_muted, "(no activity yet)");
+    } else {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + ImGui::GetContentRegionAvail().x);
+        for (size_t i = 0; i < lines.size(); ++i) {
+            const auto& e = lines[i];
+            ImGui::PushStyleColor(ImGuiCol_Text, log_level_color(e.level, th));
+            ImGui::TextUnformatted(e.text.c_str());
+            ImGui::PopStyleColor();
+        }
+        ImGui::PopTextWrapPos();
+    }
 
     if (grew && at_bottom) ImGui::SetScrollHereY(1.f);
     ImGui::EndChild();
@@ -1296,12 +1703,15 @@ void draw_log(HubModel& hub, const Theme& th, float height) {
 }
 
 // Drag handle between the library/detail body and the activity log.
-void draw_log_splitter(float& log_h, float avail_y, const Theme& th) {
+// log_h_pref is the user-chosen height; displayed height may shrink with the window
+// but restores up to log_h_pref when space returns (never auto-grows past it).
+void draw_log_splitter(float& log_h, float& log_h_pref, float avail_y, const Theme& th) {
     constexpr float kSplitH = 6.f;
-    constexpr float kMinLog = 72.f;
+    constexpr float kMinLog = 64.f;
     constexpr float kMinBody = 160.f;
-    const float max_log = std::max(kMinLog, avail_y - kMinBody - kSplitH);
-    log_h = std::clamp(log_h, kMinLog, max_log);
+    const float chrome = kSplitH + ImGui::GetStyle().ItemSpacing.y * 2.f;
+    const float max_log = std::max(kMinLog, avail_y - kMinBody - chrome);
+    log_h = std::clamp(log_h_pref, kMinLog, max_log);
 
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
     ImGui::InvisibleButton("##body_log_split", ImVec2(-1.f, kSplitH));
@@ -1310,7 +1720,9 @@ void draw_log_splitter(float& log_h, float avail_y, const Theme& th) {
     const bool hover = ImGui::IsItemHovered() || active;
     if (hover) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
     if (active) {
-        log_h = std::clamp(log_h - ImGui::GetIO().MouseDelta.y, kMinLog, max_log);
+        log_h_pref = std::clamp(log_h_pref - ImGui::GetIO().MouseDelta.y, kMinLog,
+                                std::max(kMinLog, avail_y - kMinBody - chrome));
+        log_h = std::clamp(log_h_pref, kMinLog, max_log);
     }
     const ImU32 col =
         ImGui::ColorConvertFloat4ToU32(hover ? th.accent : th.border);
@@ -1395,7 +1807,7 @@ int main(int argc, char** argv) {
     } catch (const std::exception& e) {
         hub.append_log(std::string("catalog error: ") + e.what());
     }
-    hub.launcher_version = retcomm::retcomm_installed_tag(hub.paths);
+    hub.launcher_version = retcomm::retcomm_app_version();
     hub.refresh_rows(false);
     if (hub.cfg.library_root.empty()) {
         hub.open_setup();
@@ -1437,27 +1849,27 @@ int main(int argc, char** argv) {
         ImGui::SetNextWindowSize(vp->WorkSize);
         ImGui::Begin("##hub", nullptr,
                      ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
+                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus |
+                         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
-        draw_marquee(th, ImGui::GetContentRegionAvail().x);
+        draw_marquee(hub, th, ImGui::GetContentRegionAvail().x);
 
-        static float log_h = 150.f;
+        // Body + splitter + activity must fit the remaining region exactly — ImGui adds
+        // ItemSpacing between each, so subtract that or the outer window scrolls.
+        static float log_h_pref = 140.f; // manual height; window grow restores up to this
         const float avail_y = ImGui::GetContentRegionAvail().y;
         constexpr float kSplitH = 6.f;
-        constexpr float kMinLog = 72.f;
+        constexpr float kMinLog = 64.f;
         constexpr float kMinBody = 160.f;
-        const float max_log = std::max(kMinLog, avail_y - kMinBody - kSplitH);
-        log_h = std::clamp(log_h, kMinLog, max_log);
-        const float body_h = avail_y - log_h - kSplitH;
+        const float gap_y = ImGui::GetStyle().ItemSpacing.y;
+        const float chrome = kSplitH + gap_y * 2.f;
+        const float max_log = std::max(kMinLog, avail_y - kMinBody - chrome);
+        // Shrink with the window when needed; never auto-grow past the user's preference.
+        float log_h = std::clamp(log_h_pref, kMinLog, max_log);
+        const float body_h = std::max(kMinBody, avail_y - log_h - chrome);
 
         ImGui::BeginChild("body", ImVec2(0, body_h), ImGuiChildFlags_None);
 
-        const float left_w = 280.f;
-        ImGui::BeginChild("left", ImVec2(left_w, 0), ImGuiChildFlags_None);
-        draw_sidebar_actions(hub, th);
-        ImGui::EndChild();
-
-        ImGui::SameLine();
         if (hub.show_settings) {
             ImGui::BeginChild("settings_host", ImVec2(0, 0), ImGuiChildFlags_None);
             draw_settings_panel(hub, th, window);
@@ -1467,19 +1879,30 @@ int main(int argc, char** argv) {
             draw_romm_settings_panel(hub, th);
             ImGui::EndChild();
         } else {
-            const float mid_w = ImGui::GetContentRegionAvail().x * 0.48f;
+            // Extra width goes to the library; detail is flexible but capped at the
+            // default (~1280) panel width so maximize doesn't stretch the right column.
+            constexpr float kDetailMaxW = 480.f;
+            constexpr float kDetailMinW = 280.f;
+            constexpr float kLibraryMinW = 320.f;
+            const float total_w = ImGui::GetContentRegionAvail().x;
+            const float gap_x = ImGui::GetStyle().ItemSpacing.x;
+            float right_w = std::min(kDetailMaxW, total_w * 0.42f);
+            right_w = std::clamp(right_w, kDetailMinW,
+                                 std::max(kDetailMinW, total_w - kLibraryMinW - gap_x));
+            const float mid_w = std::max(kLibraryMinW, total_w - right_w - gap_x);
+
             ImGui::BeginChild("mid", ImVec2(mid_w, 0), ImGuiChildFlags_None);
-            draw_library(hub, th);
+            draw_library(hub, boxart, th);
             ImGui::EndChild();
 
             ImGui::SameLine();
-            ImGui::BeginChild("right", ImVec2(0, 0), ImGuiChildFlags_None);
+            ImGui::BeginChild("right", ImVec2(right_w, 0), ImGuiChildFlags_None);
             draw_detail(hub, boxart, th);
             ImGui::EndChild();
         }
 
         ImGui::EndChild(); // body
-        draw_log_splitter(log_h, avail_y, th);
+        draw_log_splitter(log_h, log_h_pref, avail_y, th);
         draw_log(hub, th, log_h);
         draw_setup_wizard(hub, th, window);
 

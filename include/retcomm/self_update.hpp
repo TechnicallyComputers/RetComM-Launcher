@@ -10,14 +10,35 @@ namespace retcomm {
 namespace fs = std::filesystem;
 
 // Compile-time version string (CMake RETCOMM_VERSION), e.g. "0.1.0".
+// This is the source of truth for the running binary.
 std::string retcomm_app_version();
 
 // GitHub owner/repo used for launcher self-update.
 std::string retcomm_github_slug();
 
-// Tag recorded from the last successful self-update (launcher.json), else
-// retcomm_app_version().
+// Display / compare version for the running process (= retcomm_app_version()).
+// launcher.json is metadata only and is not used for the UI version string.
 std::string retcomm_installed_tag(const Paths& paths);
+
+// First-class install channels that support Menu → Update RetComM.
+enum class RetcommInstallChannel {
+    Unsupported = 0, // dev build, loose binary, unknown layout
+    LinuxAppImage,
+    MacosApp,
+    WindowsInstaller,
+    WindowsPortable, // still updatable; Windows primary channel is Installer
+};
+
+struct RetcommInstallInfo {
+    RetcommInstallChannel channel = RetcommInstallChannel::Unsupported;
+    bool self_update_supported = false;
+    std::string channel_id; // appimage | macos-app | windows-installer | windows-portable | dev
+    std::string hint;       // why update is disabled / how to install
+    fs::path path;          // AppImage file, .app bundle, or install directory
+};
+
+// Detect how this process was launched (AppImage / macOS .app / Windows installer|portable).
+RetcommInstallInfo retcomm_install_info();
 
 struct SelfUpdateOptions {
     bool force = false;           // re-apply even when tags match
@@ -26,8 +47,8 @@ struct SelfUpdateOptions {
 
 struct SelfUpdateResult {
     bool ok = false;
-    bool skipped = false;            // already on latest
-    bool restart_scheduled = false;  // apply script launched; caller should exit
+    bool skipped = false;           // already on latest
+    bool restart_scheduled = false; // apply script launched; caller should exit
     std::string current_tag;
     std::string latest_tag;
     std::string asset_name;
@@ -38,10 +59,8 @@ struct SelfUpdateResult {
 // newer release, download the host-OS asset for this install channel, and
 // schedule an in-place replace after this process exits.
 //
-// Assets: Linux AppImage, macOS DMG, Windows setup.exe / portable.exe.
-// Windows channels (channel.json / RETCOMM_INSTALL_CHANNEL):
-//   installer|zip  → *-windows-*-setup.exe (silent Inno into current dir)
-//   portable       → *-windows-portable.exe (replaces the stub)
+// Supported: Linux AppImage, macOS .app (via DMG), Windows setup.exe / portable.exe.
+// Unsupported layouts (dev binaries, loose copies) fail with a clear hint.
 SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions& opts = {});
 
 } // namespace retcomm

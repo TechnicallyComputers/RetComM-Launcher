@@ -19,9 +19,22 @@ using namespace retcomm;
 
 namespace {
 
-std::string trim_log(std::string s, size_t max_chars = 12000) {
+std::string trim_log(std::string s, size_t max_chars = 200000) {
     if (s.size() <= max_chars) return s;
     return s.substr(s.size() - max_chars);
+}
+
+void wire_build_activity(HubModel* hub, BuildOptions& bopts) {
+    bopts.on_progress = [hub](const std::string& msg, float) { hub->set_status(msg); };
+    bopts.on_output = [hub](const std::string& line) {
+        if (line.empty()) return;
+        hub->append_log(line);
+        // Ninja/cmake percent lines: refresh status without a second activity entry.
+        if (line.size() >= 3 && line[0] == '[') {
+            std::lock_guard<std::mutex> lock(hub->mu);
+            hub->status = line;
+        }
+    };
 }
 
 void copy_buf(char* dest, size_t dest_n, const std::string& src) {
@@ -123,17 +136,104 @@ bool should_log_progress(size_t current, size_t total, size_t every) {
 
 } // namespace
 
+LogLevel classify_log_line(const std::string& line) {
+    const std::string l = to_lower_ascii(line);
+    if (l.find("fail") != std::string::npos || l.find("error") != std::string::npos ||
+        l.find("exception") != std::string::npos || l.find(" refused") != std::string::npos)
+        return LogLevel::Error;
+    if (l.find("warn") != std::string::npos || l.find("missing") != std::string::npos ||
+        l.find("boxart miss") != std::string::npos || l.find("no match") != std::string::npos ||
+        l.find("unavailable") != std::string::npos || l.find("not installed") != std::string::npos)
+        return LogLevel::Warn;
+    if (l.find("up to date") != std::string::npos || l.find("complete") != std::string::npos ||
+        l.find("launched") != std::string::npos ||
+        (l.find("installed") != std::string::npos && l.find("not installed") == std::string::npos) ||
+        l.find("updated") != std::string::npos || l.find("ready:") != std::string::npos ||
+        l.find("wrote ") != std::string::npos || l.find("success") != std::string::npos ||
+        l.find("setup complete") != std::string::npos)
+        return LogLevel::Good;
+    if (l.find("toolchain") != std::string::npos || l.find("catalog") != std::string::npos ||
+        l.find("update available") != std::string::npos)
+        return LogLevel::Accent;
+    return LogLevel::Info;
+}
+
+// High-frequency scan progress ("… 12/340") — keep out of the activity log.
+bool status_is_progress_noise(const std::string& s) {
+    if (s.find("…") == std::string::npos && s.find("...") == std::string::npos) return false;
+    // "label… 12/34" or "label... 12/34"
+    for (size_t i = 0; i + 2 < s.size(); ++i) {
+        if (std::isdigit(static_cast<unsigned char>(s[i]))) {
+            size_t j = i;
+            while (j < s.size() && std::isdigit(static_cast<unsigned char>(s[j]))) ++j;
+            if (j < s.size() && s[j] == '/') {
+                size_t k = j + 1;
+                if (k < s.size() && std::isdigit(static_cast<unsigned char>(s[k]))) return true;
+            }
+        }
+    }
+    return false;
+}
+
 void HubModel::append_log(const std::string& line) {
+    append_log(line, classify_log_line(line));
+}
+
+void HubModel::append_log(const std::string& line, LogLevel level) {
+    if (line.empty()) return;
+    std::string text = line;
+    while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+    if (text.empty()) return;
+
     std::lock_guard<std::mutex> lock(mu);
-    if (!log.empty() && log.back() != '\n') log.push_back('\n');
-    log += line;
-    if (!line.empty() && line.back() != '\n') log.push_back('\n');
+    // Split multi-line blobs into per-line colored entries.
+    size_t start = 0;
+    while (start < text.size()) {
+        size_t end = text.find('\n', start);
+        if (end == std::string::npos) end = text.size();
+        std::string one = text.substr(start, end - start);
+        while (!one.empty() && one.back() == '\r') one.pop_back();
+        if (!one.empty()) {
+            if (!log_lines.empty() && log_lines.back().text == one) {
+                // Prefer a stronger level if the same line is re-posted (status + log).
+                const LogLevel next =
+                    (level != LogLevel::Info) ? level : classify_log_line(one);
+                if (static_cast<int>(next) > static_cast<int>(log_lines.back().level))
+                    log_lines.back().level = next;
+            } else {
+                LogLine entry;
+                entry.level = (level != LogLevel::Info) ? level : classify_log_line(one);
+                entry.text = std::move(one);
+                log_lines.push_back(std::move(entry));
+            }
+        }
+        start = end + 1;
+    }
+    constexpr size_t kMaxLines = 2500;
+    if (log_lines.size() > kMaxLines)
+        log_lines.erase(log_lines.begin(),
+                        log_lines.begin() + static_cast<std::ptrdiff_t>(log_lines.size() - kMaxLines));
+
+    log.clear();
+    for (const auto& e : log_lines) {
+        if (!log.empty()) log.push_back('\n');
+        log += e.text;
+    }
     log = trim_log(std::move(log));
 }
 
 void HubModel::set_status(const std::string& s) {
-    std::lock_guard<std::mutex> lock(mu);
-    status = s;
+    std::string prev;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        if (s == status) return;
+        prev = status;
+        status = s;
+    }
+    // Mirror status into activity (replaces the old marquee status text), skipping
+    // high-frequency scan ticks that are already throttled in append_log callers.
+    if (!s.empty() && s != "Ready" && !status_is_progress_noise(s)) append_log(s);
+    (void)prev;
 }
 
 size_t HubModel::refresh_orphan_installs() {
@@ -174,6 +274,7 @@ void HubModel::refresh_rows(bool check_updates) {
         row.id = t.id;
         row.name = t.name;
         row.platform = t.platform;
+        row.description = t.description;
         row.kind = t.kind;
         row.needs_bios = t.requires_bios();
 
@@ -453,8 +554,64 @@ void HubModel::fetch_boxart_for_catalog(bool force) {
 }
 
 bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxart) {
+    // Play can overlap Build & Install / scans — dedicated thread.
+    if (j == HubJob::Launch) {
+        if (launch_running.exchange(true)) {
+            append_log("Launch already in progress");
+            return false;
+        }
+        if (launch_worker.joinable()) launch_worker.join();
+        launch_worker = std::thread([this, title_id] {
+            try {
+                ensure_dirs(paths);
+                cfg = load_app_config(paths.config_path);
+                set_status("Launching " + title_id + "…");
+                const Title* t = catalog.find(title_id);
+                if (!t) {
+                    append_log("unknown title: " + title_id);
+                } else {
+                    LaunchOptions opts;
+                    opts.mode = LaunchMode::Default;
+                    opts.detach = true;
+                    opts.rom_path = library.preferred_rom(title_id);
+                    {
+                        auto ensured = ensure_canonical_save(paths, cfg, *t, opts.rom_path, true);
+                        if (!ensured.message.empty()) append_log(ensured.message);
+                        app_state = load_app_state(paths.state_path);
+                        apply_bios_choice_to_launch(*t, bios, app_state, opts);
+                        if (ensured.ok) opts.save_path = ensured.save.host_path;
+                        else {
+                            const std::string save_id = preferred_save_for(app_state, title_id);
+                            if (!save_id.empty()) {
+                                opts.save_path = resolve_managed_save(paths, cfg, *t, save_id);
+                                if (opts.save_path.empty()) opts.save_path = save_id;
+                            }
+                        }
+                        if (title_uses_memcards(*t)) {
+                            const std::string card2_id = preferred_save_card2_for(app_state, title_id);
+                            if (card2_id == kBlankMemcardId) {
+                                opts.save_path_card2_blank = true;
+                            } else if (!card2_id.empty()) {
+                                opts.save_path_card2 =
+                                    resolve_managed_save(paths, cfg, *t, card2_id);
+                            }
+                        }
+                    }
+                    auto r = launch_title(paths, *t, opts);
+                    append_log(r.message);
+                    set_status(r.ok ? ("Launched " + title_id) : ("Launch failed: " + title_id));
+                }
+            } catch (const std::exception& e) {
+                append_log(std::string("error: ") + e.what());
+                set_status("Launch error");
+            }
+            launch_running = false;
+        });
+        return true;
+    }
+
     if (job_running.exchange(true)) return false;
-    join_worker();
+    if (worker.joinable()) worker.join();
     job = j;
     job_title_id = title_id;
     job_force_boxart = force_boxart;
@@ -492,7 +649,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 bopts.rom_path = library.preferred_rom(title_id);
                 app_state = load_app_state(paths.state_path);
                 apply_bios_choice_to_build(*t, bios, app_state, bopts);
-                bopts.on_progress = [this](const std::string& msg, float) { set_status(msg); };
+                wire_build_activity(this, bopts);
                 auto r = install_title_auto(paths, *t, opts, bopts);
                 append_log(r.message);
                 set_status(r.ok ? ((prebuilt ? "Installed " : "Built ") + title_id)
@@ -510,7 +667,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 bopts.rom_path = library.preferred_rom(title_id);
                 app_state = load_app_state(paths.state_path);
                 apply_bios_choice_to_build(*t, bios, app_state, bopts);
-                bopts.on_progress = [this](const std::string& msg, float) { set_status(msg); };
+                wire_build_activity(this, bopts);
                 auto r = update_title_auto(paths, *t, {}, bopts);
                 append_log(r.message);
                 set_status(r.ok ? (r.skipped ? ("Up to date: " + title_id)
@@ -541,7 +698,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 }
                 app_state = load_app_state(paths.state_path);
                 apply_bios_choice_to_build(*t, bios, app_state, bopts);
-                bopts.on_progress = [this](const std::string& msg, float) { set_status(msg); };
+                wire_build_activity(this, bopts);
                 auto r = build_title(paths, *t, bopts);
                 append_log(r.message);
                 set_status(r.ok ? ("Generated & rebuilt " + title_id)
@@ -563,46 +720,9 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 set_status(r.ok ? ("Uninstalled " + title_id) : ("Uninstall failed: " + title_id));
                 break;
             }
-            case HubJob::Launch: {
-                set_status("Launching " + title_id + "…");
-                const auto* t = find_title();
-                if (!t) {
-                    append_log("unknown title: " + title_id);
-                    break;
-                }
-                LaunchOptions opts;
-                opts.mode = LaunchMode::Default;
-                opts.detach = true;
-                opts.rom_path = library.preferred_rom(title_id);
-                {
-                    // Promote install→library and mint a canonical save when needed.
-                    auto ensured = ensure_canonical_save(paths, cfg, *t, opts.rom_path, true);
-                    if (!ensured.message.empty()) append_log(ensured.message);
-                    app_state = load_app_state(paths.state_path);
-                    apply_bios_choice_to_launch(*t, bios, app_state, opts);
-                    if (ensured.ok) opts.save_path = ensured.save.host_path;
-                    else {
-                        const std::string save_id = preferred_save_for(app_state, title_id);
-                        if (!save_id.empty()) {
-                            opts.save_path = resolve_managed_save(paths, cfg, *t, save_id);
-                            if (opts.save_path.empty()) opts.save_path = save_id;
-                        }
-                    }
-                    if (title_uses_memcards(*t)) {
-                        const std::string card2_id = preferred_save_card2_for(app_state, title_id);
-                        if (card2_id == kBlankMemcardId) {
-                            opts.save_path_card2_blank = true;
-                        } else if (!card2_id.empty()) {
-                            opts.save_path_card2 =
-                                resolve_managed_save(paths, cfg, *t, card2_id);
-                        }
-                    }
-                }
-                auto r = launch_title(paths, *t, opts);
-                append_log(r.message);
-                set_status(r.ok ? ("Launched " + title_id) : ("Launch failed: " + title_id));
+            case HubJob::Launch:
+                // Handled on launch_worker via start_job.
                 break;
-            }
             case HubJob::ScanRoms:
             case HubJob::FullScanRoms: {
                 const bool full = (j == HubJob::FullScanRoms);
@@ -911,15 +1031,17 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
             }
             case HubJob::SelfUpdate: {
                 set_status("Checking RetComM Launcher updates…");
-                append_log("Self-update: current=" + retcomm_installed_tag(paths) +
-                           " repo=" + retcomm_github_slug());
+                const auto install = retcomm_install_info();
+                append_log("Self-update: current=" + retcomm_app_version() +
+                           " channel=" + install.channel_id + " repo=" + retcomm_github_slug());
+                if (!install.path.empty())
+                    append_log("Self-update: path=" + install.path.string());
                 auto ur = self_update_retcomm(paths, {});
                 append_log(ur.message);
                 {
                     std::lock_guard<std::mutex> lock(mu);
-                    launcher_version = ur.latest_tag.empty() ? retcomm_installed_tag(paths)
-                                                             : ur.latest_tag;
-                    if (ur.skipped) launcher_version = ur.current_tag;
+                    // Keep displaying the running binary version until restart applies the new one.
+                    launcher_version = retcomm_app_version();
                 }
                 if (ur.ok && ur.restart_scheduled) {
                     set_status("Updating RetComM — restarting…");
@@ -1021,6 +1143,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
 
 void HubModel::join_worker() {
     if (worker.joinable()) worker.join();
+    if (launch_worker.joinable()) launch_worker.join();
 }
 
 void HubModel::open_settings() {

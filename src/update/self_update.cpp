@@ -146,19 +146,6 @@ bool dir_is_writable(const fs::path& dir) {
     return true;
 }
 
-fs::path find_named_file(const fs::path& root, const std::string& filename) {
-    if (filename.empty()) return {};
-    std::error_code ec;
-    const fs::path direct = root / filename;
-    if (fs::is_regular_file(direct, ec)) return direct;
-    for (auto it = fs::recursive_directory_iterator(root, ec);
-         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
-        if (!it->is_regular_file(ec)) continue;
-        if (it->path().filename() == filename) return it->path();
-    }
-    return {};
-}
-
 void make_executable(const fs::path& p) {
 #if !defined(_WIN32)
     std::error_code ec;
@@ -242,16 +229,6 @@ bool fetch_latest_release(const std::string& slug, GhRelease& out, std::string* 
     }
 }
 
-enum class InstallChannel {
-    Zip,       // linux/macos zip, or Windows folder/installer layout
-    Portable,  // Windows single-file portable stub
-};
-
-struct ChannelInfo {
-    InstallChannel channel = InstallChannel::Zip;
-    fs::path portable_exe; // set when channel == Portable
-};
-
 json read_json_file(const fs::path& p) {
     std::ifstream in(p);
     if (!in) return {};
@@ -264,41 +241,36 @@ json read_json_file(const fs::path& p) {
     }
 }
 
-ChannelInfo detect_install_channel() {
-    ChannelInfo info;
-#if defined(_WIN32)
-    if (const char* env = std::getenv("RETCOMM_INSTALL_CHANNEL")) {
-        const std::string c = to_lower(env);
-        if (c == "portable") info.channel = InstallChannel::Portable;
-        else if (c == "installer" || c == "zip") info.channel = InstallChannel::Zip;
+const char* channel_id_for(RetcommInstallChannel c) {
+    switch (c) {
+    case RetcommInstallChannel::LinuxAppImage:
+        return "appimage";
+    case RetcommInstallChannel::MacosApp:
+        return "macos-app";
+    case RetcommInstallChannel::WindowsInstaller:
+        return "windows-installer";
+    case RetcommInstallChannel::WindowsPortable:
+        return "windows-portable";
+    case RetcommInstallChannel::Unsupported:
+    default:
+        return "dev";
     }
-    if (const char* pe = std::getenv("RETCOMM_PORTABLE_EXE")) {
-        if (*pe) {
-            info.portable_exe = fs::path(pe);
-            info.channel = InstallChannel::Portable;
-        }
-    }
-    const fs::path exe = current_executable_path();
-    if (!exe.empty()) {
-        const json ch = read_json_file(exe.parent_path() / "channel.json");
-        if (ch.is_object()) {
-            const std::string c = to_lower(ch.value("channel", ""));
-            if (c == "portable") {
-                info.channel = InstallChannel::Portable;
-                const std::string pe = ch.value("portable_exe", "");
-                if (!pe.empty() && info.portable_exe.empty()) info.portable_exe = pe;
-            } else if (c == "installer" || c == "zip") {
-                if (info.channel != InstallChannel::Portable) info.channel = InstallChannel::Zip;
-            }
-        }
-    }
-#else
-    (void)info;
-#endif
-    return info;
 }
 
-const GhAsset* pick_launcher_asset(const GhRelease& rel, InstallChannel channel) {
+std::string unsupported_hint() {
+#if defined(_WIN32)
+    return "Self-update needs the Windows installer (or portable) build. "
+           "Install from the GitHub setup.exe, then use Update RetComM.";
+#elif defined(__APPLE__)
+    return "Self-update needs RetComM Launcher.app (from the DMG). "
+           "Install to Applications, launch that app, then use Update RetComM.";
+#else
+    return "Self-update needs the Linux AppImage. "
+           "Launch RetComM-Launcher-*-linux-*.AppImage, then use Update RetComM.";
+#endif
+}
+
+const GhAsset* pick_launcher_asset(const GhRelease& rel, RetcommInstallChannel channel) {
     const std::string os = host_os_key();
     std::string preferred;
     if (os == "linux") preferred = "*linux*";
@@ -313,29 +285,30 @@ const GhAsset* pick_launcher_asset(const GhRelease& rel, InstallChannel channel)
         if (!preferred.empty() && match_glob(preferred, a.name)) score += 50;
         else continue;
 
-#if defined(_WIN32)
-        if (channel == InstallChannel::Portable) {
-            if (n.find("portable") != std::string::npos && ends_with_ci(n, ".exe")) score += 40;
-            else if (n.find("setup") != std::string::npos) score -= 40;
-            else if (ends_with_ci(n, ".zip")) score += 5; // legacy releases
-            else score -= 20;
-        } else {
-            // Installer channel: silent Inno setup.exe (legacy zip still accepted).
-            if (n.find("setup") != std::string::npos && ends_with_ci(n, ".exe")) score += 40;
-            else if (ends_with_ci(n, ".zip") && n.find("portable") == std::string::npos)
-                score += 15;
-            if (n.find("portable") != std::string::npos) score -= 30;
-        }
-#else
-        (void)channel;
-        if (os == "linux") {
+        switch (channel) {
+        case RetcommInstallChannel::LinuxAppImage:
             if (ends_with_ci(n, ".appimage")) score += 40;
-            else if (ends_with_ci(n, ".zip")) score += 10; // legacy
-        } else if (os == "macos") {
+            else score -= 100;
+            break;
+        case RetcommInstallChannel::MacosApp:
             if (ends_with_ci(n, ".dmg")) score += 40;
-            else if (ends_with_ci(n, ".zip")) score += 10; // legacy
+            else score -= 100;
+            break;
+        case RetcommInstallChannel::WindowsInstaller:
+            if (n.find("setup") != std::string::npos && ends_with_ci(n, ".exe")) score += 40;
+            else score -= 100;
+            if (n.find("portable") != std::string::npos) score -= 50;
+            break;
+        case RetcommInstallChannel::WindowsPortable:
+            if (n.find("portable") != std::string::npos && ends_with_ci(n, ".exe")) score += 40;
+            else score -= 100;
+            break;
+        case RetcommInstallChannel::Unsupported:
+        default:
+            score -= 100;
+            break;
         }
-#endif
+
         if (n.find("retcomm") != std::string::npos) score += 5;
 #if defined(__aarch64__) || defined(_M_ARM64)
         if (n.find("arm64") != std::string::npos || n.find("aarch64") != std::string::npos)
@@ -354,9 +327,9 @@ const GhAsset* pick_launcher_asset(const GhRelease& rel, InstallChannel channel)
             best = &a;
         }
     }
-    if ((!best || best_score < 50) && rel.assets.size() == 1) return &rel.assets.front();
-    if (best && best_score >= 50) return best;
-    return best_score > 0 ? best : nullptr;
+    // Require a real channel match (base OS score 50 + asset type 40).
+    if (best && best_score >= 90) return best;
+    return nullptr;
 }
 
 bool save_launcher_state(const Paths& paths, const std::string& tag, const std::string& asset,
@@ -375,23 +348,6 @@ bool save_launcher_state(const Paths& paths, const std::string& tag, const std::
     return static_cast<bool>(out);
 }
 
-bool copy_tree_files(const fs::path& src_dir, const fs::path& dest_dir, std::string* error) {
-    std::error_code ec;
-    fs::create_directories(dest_dir, ec);
-    for (auto it = fs::directory_iterator(src_dir, ec); !ec && it != fs::directory_iterator();
-         it.increment(ec)) {
-        if (!it->is_regular_file(ec)) continue;
-        const fs::path dest = dest_dir / it->path().filename();
-        fs::copy_file(it->path(), dest, fs::copy_options::overwrite_existing, ec);
-        if (ec) {
-            if (error) *error = "copy failed: " + it->path().string() + ": " + ec.message();
-            return false;
-        }
-        make_executable(dest);
-    }
-    return true;
-}
-
 #if defined(_WIN32)
 bool schedule_bat(const fs::path& script, std::string* error) {
     const std::string cmd = "cmd /C start \"\" /MIN \"" + script.string() + "\"";
@@ -400,31 +356,6 @@ bool schedule_bat(const fs::path& script, std::string* error) {
         return false;
     }
     return true;
-}
-
-bool schedule_apply_dir_and_restart(const fs::path& staging_bin_dir, const fs::path& dest_dir,
-                                    const std::string& hub_name, std::string* error) {
-    const DWORD pid = GetCurrentProcessId();
-    const fs::path script = staging_bin_dir.parent_path() / "apply_update.bat";
-    {
-        std::ofstream out(script);
-        if (!out) {
-            if (error) *error = "cannot write apply script";
-            return false;
-        }
-        out << "@echo off\r\n"
-            << "set PID=" << pid << "\r\n"
-            << ":wait\r\n"
-            << "tasklist /FI \"PID eq %PID%\" 2>NUL | find \"%PID%\" >NUL\r\n"
-            << "if not errorlevel 1 (\r\n"
-            << "  timeout /t 1 /nobreak >NUL\r\n"
-            << "  goto wait\r\n"
-            << ")\r\n"
-            << "xcopy /Y /Q \"" << staging_bin_dir.string() << "\\*\" \"" << dest_dir.string()
-            << "\\\" >NUL\r\n"
-            << "start \"\" \"" << (dest_dir / hub_name).string() << "\"\r\n";
-    }
-    return schedule_bat(script, error);
 }
 
 bool schedule_replace_portable_and_restart(const fs::path& new_portable, const fs::path& dest_portable,
@@ -488,33 +419,6 @@ bool schedule_shell(const fs::path& script, std::string* error) {
         return false;
     }
     return true;
-}
-
-bool schedule_apply_dir_and_restart(const fs::path& staging_bin_dir, const fs::path& dest_dir,
-                                    const std::string& hub_name, std::string* error) {
-    const pid_t pid = ::getpid();
-    const fs::path script = staging_bin_dir.parent_path() / "apply_update.sh";
-    {
-        std::ofstream out(script);
-        if (!out) {
-            if (error) *error = "cannot write apply script";
-            return false;
-        }
-        out << "#!/usr/bin/env bash\n"
-            << "set -euo pipefail\n"
-            << "pid=" << pid << "\n"
-            << "staging=" << staging_bin_dir.string() << "\n"
-            << "dest=" << dest_dir.string() << "\n"
-            << "hub=\"" << hub_name << "\"\n"
-            << "while kill -0 \"$pid\" 2>/dev/null; do sleep 0.2; done\n"
-            << "sleep 0.3\n"
-            << "mkdir -p \"$dest\"\n"
-            << "cp -f \"$staging\"/* \"$dest\"/ 2>/dev/null || true\n"
-            << "install -m 755 \"$staging/retcomm\" \"$dest/retcomm\" 2>/dev/null || true\n"
-            << "install -m 755 \"$staging/$hub\" \"$dest/$hub\"\n"
-            << "exec \"$dest/$hub\"\n";
-    }
-    return schedule_shell(script, error);
 }
 
 bool schedule_replace_appimage_and_restart(const fs::path& new_appimage, const fs::path& dest_appimage,
@@ -595,26 +499,109 @@ std::string retcomm_app_version() { return RETCOMM_VERSION; }
 
 std::string retcomm_github_slug() { return RETCOMM_GITHUB_SLUG; }
 
-std::string retcomm_installed_tag(const Paths& paths) {
-    std::ifstream in(launcher_state_path(paths));
-    if (in) {
-        try {
-            json j;
-            in >> j;
-            const std::string tag = j.value("tag", "");
-            if (!tag.empty()) return tag;
-        } catch (...) {
+std::string retcomm_installed_tag(const Paths& /*paths*/) {
+    // Binary compile version is authoritative; launcher.json is apply metadata only.
+    return retcomm_app_version();
+}
+
+RetcommInstallInfo retcomm_install_info() {
+    RetcommInstallInfo info;
+    info.channel = RetcommInstallChannel::Unsupported;
+    info.channel_id = "dev";
+    info.hint = unsupported_hint();
+    info.self_update_supported = false;
+
+#if defined(_WIN32)
+    fs::path portable_exe;
+    std::string channel_env;
+    if (const char* env = std::getenv("RETCOMM_INSTALL_CHANNEL")) channel_env = to_lower(env);
+    if (const char* pe = std::getenv("RETCOMM_PORTABLE_EXE")) {
+        if (*pe) portable_exe = fs::path(pe);
+    }
+    const fs::path exe = current_executable_path();
+    std::string channel_file;
+    if (!exe.empty()) {
+        const json ch = read_json_file(exe.parent_path() / "channel.json");
+        if (ch.is_object()) {
+            channel_file = to_lower(ch.value("channel", ""));
+            const std::string pe = ch.value("portable_exe", "");
+            if (!pe.empty() && portable_exe.empty()) portable_exe = pe;
         }
     }
-    return retcomm_app_version();
+    const bool want_portable =
+        channel_env == "portable" || channel_file == "portable" || !portable_exe.empty();
+    const bool want_installer =
+        channel_env == "installer" || channel_file == "installer" || channel_file == "zip";
+
+    if (want_portable) {
+        std::error_code ec;
+        info.channel = RetcommInstallChannel::WindowsPortable;
+        info.channel_id = channel_id_for(info.channel);
+        info.path = portable_exe.empty() ? exe : portable_exe;
+        if (!portable_exe.empty() && fs::is_regular_file(portable_exe, ec)) {
+            info.self_update_supported = true;
+            info.hint.clear();
+        } else {
+            info.hint = "Portable channel detected but portable_exe is missing. "
+                        "Relaunch from the windows-portable.exe.";
+        }
+        return info;
+    }
+    if (want_installer && !exe.empty()) {
+        info.channel = RetcommInstallChannel::WindowsInstaller;
+        info.channel_id = channel_id_for(info.channel);
+        info.path = exe.parent_path();
+        if (dir_is_writable(info.path)) {
+            info.self_update_supported = true;
+            info.hint.clear();
+        } else {
+            info.hint = "Installer directory is not writable: " + info.path.string();
+        }
+        return info;
+    }
+    return info;
+#elif defined(__APPLE__)
+    const fs::path app = macos_app_bundle_path();
+    if (!app.empty()) {
+        info.channel = RetcommInstallChannel::MacosApp;
+        info.channel_id = channel_id_for(info.channel);
+        info.path = app;
+        if (dir_is_writable(app.parent_path())) {
+            info.self_update_supported = true;
+            info.hint.clear();
+        } else {
+            info.hint = "Cannot write app bundle parent: " + app.parent_path().string();
+        }
+        return info;
+    }
+    return info;
+#else
+    const fs::path appimage = running_appimage_path();
+    if (!appimage.empty()) {
+        info.channel = RetcommInstallChannel::LinuxAppImage;
+        info.channel_id = channel_id_for(info.channel);
+        info.path = appimage;
+        if (dir_is_writable(appimage.parent_path())) {
+            info.self_update_supported = true;
+            info.hint.clear();
+        } else {
+            info.hint = "AppImage directory is not writable: " + appimage.parent_path().string();
+        }
+        return info;
+    }
+    return info;
+#endif
 }
 
 SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions& opts) {
     SelfUpdateResult result;
-    result.current_tag = retcomm_installed_tag(paths);
-    const ChannelInfo channel = detect_install_channel();
-    const std::string channel_name =
-        channel.channel == InstallChannel::Portable ? "portable" : "installer";
+    result.current_tag = retcomm_app_version();
+
+    const RetcommInstallInfo install = retcomm_install_info();
+    if (!install.self_update_supported) {
+        return fail(result, install.hint.empty() ? unsupported_hint() : install.hint);
+    }
+    const std::string channel_name = install.channel_id;
 
     const std::string slug = retcomm_github_slug();
     std::string err;
@@ -622,7 +609,7 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
     if (!fetch_latest_release(slug, rel, &err, opts.allow_prerelease)) {
         return fail(result, "GitHub release check failed for " + slug + ": " + err +
                                 "\nPublish a Release with host installers "
-                                "(AppImage / DMG / Windows setup+portable) to enable Update RetComM.");
+                                "(AppImage / DMG / Windows setup.exe).");
     }
     result.latest_tag = rel.tag;
 
@@ -634,12 +621,11 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
         return result;
     }
 
-    const GhAsset* asset = pick_launcher_asset(rel, channel.channel);
+    const GhAsset* asset = pick_launcher_asset(rel, install.channel);
     if (!asset) {
-        return fail(result, "Release " + rel.tag + " has no downloadable asset matching this OS (" +
-                                host_os_key() + ", channel=" + channel_name +
-                                "). Expected AppImage, macOS DMG, windows-*-setup.exe, or "
-                                "windows-portable.exe.");
+        return fail(result, "Release " + rel.tag + " has no asset for channel " + channel_name +
+                                " (" + host_os_key() + "). Expected AppImage, macOS DMG, or "
+                                "windows-*-setup.exe / windows-portable.exe.");
     }
     result.asset_name = asset->name;
     const std::string asset_lower = to_lower(asset->name);
@@ -647,11 +633,9 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
     ensure_dirs(paths);
     const fs::path work = paths.data_dir / "self-update";
     const fs::path download = work / "download" / asset->name;
-    const fs::path staging = work / "staging";
     std::error_code ec;
     fs::remove_all(work, ec);
     fs::create_directories(download.parent_path(), ec);
-    fs::create_directories(staging, ec);
 
     auto headers = github_http_headers();
     headers.erase(std::remove_if(headers.begin(), headers.end(),
@@ -664,18 +648,12 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
     }
 
 #if defined(_WIN32)
-    const std::string hub_name = "retcomm-hub.exe";
-#else
-    const std::string hub_name = "retcomm-hub";
-#endif
-
-#if defined(_WIN32)
-    if (channel.channel == InstallChannel::Portable) {
-        fs::path dest_portable = channel.portable_exe;
+    if (install.channel == RetcommInstallChannel::WindowsPortable) {
+        fs::path dest_portable = install.path;
         if (dest_portable.empty() || !fs::is_regular_file(dest_portable, ec)) {
             return fail(result,
-                        "portable channel detected but RETCOMM_PORTABLE_EXE / channel.json "
-                        "portable_exe is missing. Relaunch from the windows-portable.exe.");
+                        "portable channel detected but portable_exe is missing. "
+                        "Relaunch from the windows-portable.exe.");
         }
         if (!dir_is_writable(dest_portable.parent_path())) {
             return fail(result, "portable exe directory is not writable: " +
@@ -693,19 +671,19 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
         result.ok = true;
         result.restart_scheduled = true;
         result.message = "Updating RetComM Launcher " + result.current_tag + " → " + rel.tag +
-                         "\n  channel: portable\n  asset: " + asset->name +
+                         "\n  channel: " + channel_name + "\n  asset: " + asset->name +
                          "\n  install: " + dest_portable.string() +
                          "\nRestarting after this window closes…";
         return result;
     }
 
-    if (asset_lower.find("setup") != std::string::npos && ends_with_ci(asset_lower, ".exe")) {
-        fs::path dest_dir;
-        const fs::path exe = current_executable_path();
-        if (!exe.empty()) dest_dir = exe.parent_path();
+    if (install.channel == RetcommInstallChannel::WindowsInstaller) {
+        if (asset_lower.find("setup") == std::string::npos || !ends_with_ci(asset_lower, ".exe")) {
+            return fail(result, "expected a windows-*-setup.exe asset, got: " + asset->name);
+        }
+        fs::path dest_dir = install.path;
         if (dest_dir.empty() || !dir_is_writable(dest_dir)) {
-            return fail(result, "installer update needs a writable install directory "
-                                "(current exe location).");
+            return fail(result, "installer update needs a writable install directory.");
         }
         const fs::path staged_setup = work / "bin" / asset->name;
         fs::create_directories(staged_setup.parent_path(), ec);
@@ -719,19 +697,21 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
         result.ok = true;
         result.restart_scheduled = true;
         result.message = "Updating RetComM Launcher " + result.current_tag + " → " + rel.tag +
-                         "\n  channel: installer\n  asset: " + asset->name +
+                         "\n  channel: " + channel_name + "\n  asset: " + asset->name +
                          "\n  install: " + dest_dir.string() +
                          "\nRestarting after this window closes…";
         return result;
     }
 #endif
 
-#if !defined(_WIN32)
-    if (ends_with_ci(asset_lower, ".appimage")) {
-        const fs::path dest = running_appimage_path();
+#if defined(__linux__)
+    if (install.channel == RetcommInstallChannel::LinuxAppImage) {
+        if (!ends_with_ci(asset_lower, ".appimage")) {
+            return fail(result, "expected a Linux AppImage asset, got: " + asset->name);
+        }
+        const fs::path dest = install.path.empty() ? running_appimage_path() : install.path;
         if (dest.empty()) {
-            return fail(result, "downloaded an AppImage but this process is not running from one "
-                                "($APPIMAGE unset). Relaunch the AppImage, then try Update RetComM.");
+            return fail(result, unsupported_hint());
         }
         if (!dir_is_writable(dest.parent_path())) {
             return fail(result, "AppImage directory is not writable: " + dest.parent_path().string());
@@ -744,15 +724,22 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
         result.ok = true;
         result.restart_scheduled = true;
         result.message = "Updating RetComM Launcher " + result.current_tag + " → " + rel.tag +
-                         "\n  channel: appimage\n  asset: " + asset->name +
+                         "\n  channel: " + channel_name + "\n  asset: " + asset->name +
                          "\n  install: " + dest.string() +
                          "\nRestarting after this window closes…";
         return result;
     }
+#endif
 
-    if (ends_with_ci(asset_lower, ".dmg")) {
-        fs::path dest_app = macos_app_bundle_path();
-        if (dest_app.empty()) dest_app = "/Applications/RetComM Launcher.app";
+#if defined(__APPLE__)
+    if (install.channel == RetcommInstallChannel::MacosApp) {
+        if (!ends_with_ci(asset_lower, ".dmg")) {
+            return fail(result, "expected a macOS DMG asset, got: " + asset->name);
+        }
+        const fs::path dest_app = install.path.empty() ? macos_app_bundle_path() : install.path;
+        if (dest_app.empty()) {
+            return fail(result, unsupported_hint());
+        }
         if (!dir_is_writable(dest_app.parent_path())) {
             return fail(result, "cannot write app bundle parent: " + dest_app.parent_path().string());
         }
@@ -763,63 +750,15 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
         result.ok = true;
         result.restart_scheduled = true;
         result.message = "Updating RetComM Launcher " + result.current_tag + " → " + rel.tag +
-                         "\n  channel: dmg\n  asset: " + asset->name +
+                         "\n  channel: " + channel_name + "\n  asset: " + asset->name +
                          "\n  install: " + dest_app.string() +
                          "\nRestarting after this window closes…";
         return result;
     }
 #endif
 
-    // Legacy zip / folder payload (older releases).
-#if defined(_WIN32)
-    const std::string cli_name = "retcomm.exe";
-#else
-    const std::string cli_name = "retcomm";
-#endif
-    if (!extract_archive_to(download, staging, &err)) {
-        return fail(result, "extract failed: " + err);
-    }
-
-    fs::path cli = find_named_file(staging, cli_name);
-    fs::path hub = find_named_file(staging, hub_name);
-    if (hub.empty()) {
-        return fail(result, "release archive missing " + hub_name +
-                                " — expected AppImage/DMG/setup/portable (or a legacy zip).");
-    }
-    if (!cli.empty()) make_executable(cli);
-    make_executable(hub);
-
-    const fs::path bin_stage = work / "bin";
-    fs::create_directories(bin_stage, ec);
-    if (!copy_tree_files(hub.parent_path(), bin_stage, &err)) return fail(result, err);
-
-    fs::path dest_dir;
-    const fs::path exe = current_executable_path();
-    if (!exe.empty()) {
-        dest_dir = exe.parent_path();
-        if (!dir_is_writable(dest_dir)) dest_dir.clear();
-    }
-    if (dest_dir.empty()) {
-        dest_dir = paths.data_dir / "bin";
-        if (!dir_is_writable(dest_dir)) {
-            return fail(result, "no writable install location (tried exe dir and " +
-                                    dest_dir.string() + ")");
-        }
-    }
-
-    save_launcher_state(paths, rel.tag, asset->name, channel_name);
-
-    if (!schedule_apply_dir_and_restart(bin_stage, dest_dir, hub_name, &err)) {
-        return fail(result, err);
-    }
-
-    result.ok = true;
-    result.restart_scheduled = true;
-    result.message = "Updating RetComM Launcher " + result.current_tag + " → " + rel.tag +
-                     "\n  channel: " + channel_name + "\n  asset: " + asset->name +
-                     "\n  install: " + dest_dir.string() +
-                     "\nRestarting after this window closes…";
-    return result;
+    return fail(result, "Unexpected install channel for asset " + asset->name + " (" +
+                            channel_name + "). " + unsupported_hint());
 }
 
 } // namespace retcomm

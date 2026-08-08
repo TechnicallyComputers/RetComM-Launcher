@@ -60,7 +60,9 @@ cmake --build build -j && cmake --install build
 ./packaging/linux/build-appimage.sh "$PWD/out" 0.1.1 x86_64
 ```
 
-Self-update replaces the running AppImage in place (`APPIMAGE` env).
+Self-update replaces the running AppImage in place (`APPIMAGE` env). Dev
+binaries / loose copies under `~/.local/share/retcomm/bin` are not updatable —
+Menu → Update RetComM stays disabled with a hint to launch the AppImage.
 
 When launching a title, RetComM strips AppImage `LD_LIBRARY_PATH` / `APPDIR`
 from the child environment so native recomp binaries load their own (or system)
@@ -81,7 +83,8 @@ Produces under `dist/`:
 
 Open the DMG and drag **RetComM Launcher** onto **Applications**. That puts it on
 Launchpad, Spotlight, and the Applications folder. Self-update downloads the
-matching arch DMG and refreshes the installed `.app`.
+matching arch DMG and refreshes the running `.app` only (dev `.app`-less builds
+cannot self-update).
 
 ## Windows
 
@@ -112,5 +115,7 @@ RetComM-Launcher-*-windows-portable.exe cli list  # CLI
 
 Self-update channels (detected via `channel.json` / env from the portable stub):
 
-- **installer** → downloads `*-windows-*-setup.exe`, runs silent Inno into the current install dir
+- **installer** (primary) → downloads `*-windows-*-setup.exe`, silent Inno into the current install dir
 - **portable** → downloads `*-windows-portable.exe`, replaces the stub, re-extracts on next launch
+
+Loose/dev copies without `channel.json` cannot self-update.

@@ -18,6 +18,20 @@
 
 namespace retcomm::hub {
 
+// Activity log line severity (drives hub UI colors).
+enum class LogLevel : int {
+    Info = 0, // muted
+    Accent,   // notable (catalog / toolchain notices)
+    Good,     // success
+    Warn,     // recoverable / missing
+    Error,    // failures
+};
+
+struct LogLine {
+    LogLevel level = LogLevel::Info;
+    std::string text;
+};
+
 enum class HubJob : int {
     None = 0,
     Install,
@@ -48,10 +62,43 @@ enum class HubJob : int {
     CleanupOrphansPurge,
 };
 
+// Title install/build/update family — mutually exclusive with library scans.
+inline bool hub_job_is_install(HubJob j) {
+    switch (j) {
+    case HubJob::Install:
+    case HubJob::InstallPrebuilt:
+    case HubJob::InstallWine:
+    case HubJob::Update:
+    case HubJob::GenerateRebuild:
+    case HubJob::Uninstall:
+    case HubJob::UninstallPurge:
+    case HubJob::FetchRommRom:
+    case HubJob::FetchRommBios:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// ROM / BIOS / RomM library index scans — mutually exclusive with install jobs.
+inline bool hub_job_is_scan(HubJob j) {
+    switch (j) {
+    case HubJob::ScanRoms:
+    case HubJob::FullScanRoms:
+    case HubJob::ScanBios:
+    case HubJob::FullScanBios:
+    case HubJob::ScanRommRoms:
+        return true;
+    default:
+        return false;
+    }
+}
+
 struct TitleRow {
     std::string id;
     std::string name;
     std::string platform;
+    std::string description; // catalog marketing blurb (detail panel)
     std::string kind;
     bool installed = false;
     // apps/<dir> has leftover install/build artifacts but no launch binary (partial install).
@@ -227,6 +274,8 @@ struct HubModel {
 
     std::vector<TitleRow> rows;
     int selected = 0;
+    // Set when a library boxart is clicked (even if already selected) → detail scrolls to top.
+    bool detail_scroll_top = false;
     LibraryNav library_nav = LibraryNav::Platforms;
     // When library_nav == Titles: empty = all platforms, else catalog platform slug.
     std::string library_platform;
@@ -238,15 +287,19 @@ struct HubModel {
     NetplayLobbyState netplay;
 
     std::mutex mu;
-    std::string status;
-    std::string log;
+    std::string status; // last job/status line (also mirrored into log_lines)
+    std::vector<LogLine> log_lines;
+    std::string log; // plain joined text for clipboard / legacy callers
     std::atomic<bool> job_running{false};
+    // Launch runs on its own thread so Play stays usable during Build & Install.
+    std::atomic<bool> launch_running{false};
     std::atomic<bool> request_exit{false}; // set after self-update schedules restart
     HubJob job = HubJob::None;
     std::string job_title_id;
     bool job_force_boxart = false; // FetchBoxart: re-download even when cached
     std::thread worker;
-    std::string launcher_version; // display: installed/current tag
+    std::thread launch_worker;
+    std::string launcher_version; // display: running binary version (RETCOMM_VERSION)
 
     // Shared cmake-clang-v1 toolchain update prompt (launch / Check Updates).
     std::atomic<bool> toolchain_prompt_pending{false};
@@ -268,6 +321,7 @@ struct HubModel {
 
     void refresh_rows(bool check_updates);
     void append_log(const std::string& line);
+    void append_log(const std::string& line, LogLevel level);
     void set_status(const std::string& s);
     // Scan apps/ for installs not in the current catalog; store under pending_orphans.
     // Returns count found. Safe on UI or worker thread.

@@ -14,6 +14,8 @@ namespace fs = std::filesystem;
 
 // Progress updates for Hub / CLI (phase label + optional 0..1 fraction).
 using BuildProgressFn = std::function<void(const std::string& message, float fraction)>;
+// Raw subprocess stdout/stderr lines (generate / cmake configure / cmake build).
+using BuildOutputFn = std::function<void(const std::string& line)>;
 
 struct BuildOptions {
     bool force = false; // re-fetch source / rebuild even if pins match
@@ -29,6 +31,9 @@ struct BuildOptions {
     fs::path sdk_dir;
     fs::path source_dir;
     BuildProgressFn on_progress;
+    // When set, CLI lines are streamed live and failure messages omit the full dump
+    // (already delivered via this callback).
+    BuildOutputFn on_output;
 };
 
 struct PackEnsureResult {

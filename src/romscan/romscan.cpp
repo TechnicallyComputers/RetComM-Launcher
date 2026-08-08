@@ -51,6 +51,7 @@ std::unordered_map<std::string, PlatformNeed> needs_by_platform(const Catalog& c
             std::string le = e;
             for (char& c : le) c = char(std::tolower(static_cast<unsigned char>(c)));
             if (!le.empty() && le[0] != '.') le.insert(le.begin(), '.');
+            if (le == ".iso") continue; // never hash optical ISO images
             n.extensions.insert(le);
         }
         if (!t.rom_identity.crc32.empty()) n.need_crc = true;
@@ -197,6 +198,8 @@ void walk_platform_root(const fs::path& root, const std::string& platform,
         if (!it->is_regular_file(ec)) continue;
         const auto& path = it->path();
         const std::string ext = lower_ext(path);
+        // Never index or hash optical .iso images (use .cue+.bin for disc titles).
+        if (ext == ".iso") continue;
         if (need.extensions.find(ext) == need.extensions.end()) continue;
         candidates.push_back(path);
         emit(opts, {"walk", platform, path, candidates.size(), 0});

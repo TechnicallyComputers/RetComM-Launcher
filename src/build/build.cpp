@@ -1150,7 +1150,8 @@ std::string path_with_prefix(const fs::path& path_prefix) {
 }
 
 int run_with_path(const std::vector<std::string>& args, const fs::path& cwd,
-                  const fs::path& path_prefix, std::string* err_out) {
+                  const fs::path& path_prefix, std::string* err_out,
+                  const std::function<void(const std::string&)>& on_line = {}) {
     std::ostringstream cmd;
 #if !defined(_WIN32)
     if (!path_prefix.empty()) {
@@ -1170,7 +1171,15 @@ int run_with_path(const std::vector<std::string>& args, const fs::path& cwd,
 #else
     const std::string full = cmd.str();
 #endif
-    return run_capture_lines(full, cwd, nullptr, err_out);
+    return run_capture_lines(full, cwd, on_line, err_out);
+}
+
+// Prefer a short summary when the caller already streamed CLI via on_output.
+std::string fail_with_log(const std::string& head, const std::string& log,
+                          const BuildOutputFn& on_output) {
+    if (on_output) return head;
+    if (log.empty()) return head;
+    return head + "\n" + log;
 }
 
 bool copy_tree_if_exists(const fs::path& src, const fs::path& dest, std::string* error) {
@@ -1912,10 +1921,13 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
         const std::string gen_full = gen_cmd.str();
 #endif
 
+        if (opts.on_output) opts.on_output("$ " + gen_full);
         std::string gen_log;
         const int gen_rc = run_capture_lines(
             gen_full, src.root,
             [&](const std::string& line) {
+                // Stream human CLI; JSON progress ticks already go through on_progress.
+                if (opts.on_output && (line.empty() || line[0] != '{')) opts.on_output(line);
                 if (line.empty() || line[0] != '{') return;
                 try {
                     const json j = json::parse(line);
@@ -1936,7 +1948,8 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
             },
             &gen_log);
         if (gen_rc != 0) {
-            result.message = "generate failed (exit " + std::to_string(gen_rc) + ")\n" + gen_log;
+            result.message = fail_with_log(
+                "generate failed (exit " + std::to_string(gen_rc) + ")", gen_log, opts.on_output);
             return result;
         }
         if (!generated_ready(title, engine, src.root)) {
@@ -1981,10 +1994,22 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
             conf.push_back("Ninja");
         }
     }
-    int crc_rc = run_with_path(conf, src.root, path_prefix, &cmake_log);
+    const auto stream_cli = [&](const std::string& line) {
+        if (opts.on_output) opts.on_output(line);
+    };
+    if (opts.on_output) {
+        std::ostringstream cmd_preview;
+        for (size_t i = 0; i < conf.size(); ++i) {
+            if (i) cmd_preview << ' ';
+            cmd_preview << conf[i];
+        }
+        opts.on_output("$ " + cmd_preview.str());
+    }
+    int crc_rc = run_with_path(conf, src.root, path_prefix, &cmake_log, stream_cli);
     if (crc_rc != 0) {
-        result.message = "cmake configure failed (exit " + std::to_string(crc_rc) + ")\n" +
-                         cmake_log;
+        result.message = fail_with_log(
+            "cmake configure failed (exit " + std::to_string(crc_rc) + ")", cmake_log,
+            opts.on_output);
         return result;
     }
 
@@ -1997,10 +2022,20 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
         build_args.push_back(title.build.cmake.config);
     }
     build_args.push_back("-j");
-    const int build_rc = run_with_path(build_args, src.root, path_prefix, &cmake_log);
+    if (opts.on_output) {
+        std::ostringstream cmd_preview;
+        for (size_t i = 0; i < build_args.size(); ++i) {
+            if (i) cmd_preview << ' ';
+            cmd_preview << build_args[i];
+        }
+        opts.on_output("$ " + cmd_preview.str());
+    }
+    const int build_rc =
+        run_with_path(build_args, src.root, path_prefix, &cmake_log, stream_cli);
     if (build_rc != 0) {
-        result.message =
-            "cmake build failed (exit " + std::to_string(build_rc) + ")\n" + cmake_log;
+        result.message = fail_with_log(
+            "cmake build failed (exit " + std::to_string(build_rc) + ")", cmake_log,
+            opts.on_output);
         return result;
     }
 

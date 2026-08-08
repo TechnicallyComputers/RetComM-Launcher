@@ -17,9 +17,17 @@ struct Theme {
     ImVec4 accent;
     ImVec4 accent_dim;
     ImVec4 accent_text;
+    // Primary action fills (muted vs bright status/accent tokens above).
+    ImVec4 accent_button;
+    ImVec4 accent_button_hovered;
+    ImVec4 accent_button_active;
     ImVec4 text;
     ImVec4 text_muted;
     ImVec4 good;
+    ImVec4 good_button;
+    ImVec4 good_button_hovered;
+    ImVec4 good_button_active;
+    ImVec4 good_button_text;
     ImVec4 warn;
     ImVec4 focus;
     float spacing_sm = 8.f;
@@ -39,12 +47,19 @@ inline Theme crt_theme() {
     t.control = ImVec4(0.106f, 0.137f, 0.208f, 1.f);         // #1B2335
     t.control_hovered = ImVec4(0.145f, 0.188f, 0.278f, 1.f); // #253047
     t.border = ImVec4(0.169f, 0.208f, 0.314f, 1.f);           // #2B3550
-    t.accent = ImVec4(0.604f, 0.361f, 1.000f, 1.f);           // #9A5CFF
+    t.accent = ImVec4(0.604f, 0.361f, 1.000f, 1.f);           // #9A5CFF (status / neon)
     t.accent_dim = ImVec4(0.431f, 0.247f, 0.812f, 1.f);       // #6E3FCF
     t.accent_text = ImVec4(1.f, 1.f, 1.f, 1.f);
+    t.accent_button = ImVec4(0.322f, 0.220f, 0.545f, 1.f);   // #52378B muted violet fill
+    t.accent_button_hovered = ImVec4(0.392f, 0.275f, 0.635f, 1.f); // #6446A2
+    t.accent_button_active = ImVec4(0.267f, 0.180f, 0.455f, 1.f);  // #442E74
     t.text = ImVec4(0.925f, 0.933f, 0.965f, 1.f);             // #ECEEF6
     t.text_muted = ImVec4(0.529f, 0.565f, 0.659f, 1.f);       // #8790A8
-    t.good = ImVec4(0.275f, 0.890f, 0.608f, 1.f);             // #46E39B
+    t.good = ImVec4(0.275f, 0.890f, 0.608f, 1.f);             // #46E39B (Installed text)
+    t.good_button = ImVec4(0.165f, 0.561f, 0.416f, 1.f);      // #2A8F6A muted green fill
+    t.good_button_hovered = ImVec4(0.196f, 0.624f, 0.471f, 1.f); // #329F78
+    t.good_button_active = ImVec4(0.141f, 0.478f, 0.353f, 1.f);  // #247A5A
+    t.good_button_text = ImVec4(0.910f, 0.980f, 0.945f, 1.f);    // #E8FAF1
     t.warn = ImVec4(0.961f, 0.698f, 0.235f, 1.f);             // #F5B23C
     t.focus = ImVec4(0.220f, 0.882f, 0.902f, 1.f);            // #38E1E6
     return t;
