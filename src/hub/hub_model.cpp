@@ -1229,7 +1229,7 @@ void HubModel::open_settings() {
 }
 
 void HubModel::open_setup() {
-    // Reuse the same draft buffers as Library settings.
+    // Reuse the same draft buffers as Library / RomM settings.
     cfg = load_app_config(paths.config_path);
     copy_buf(settings.library_root, sizeof(settings.library_root), cfg.library_root.string());
     copy_buf(settings.bios_root, sizeof(settings.bios_root), cfg.bios_root.string());
@@ -1239,6 +1239,10 @@ void HubModel::open_setup() {
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
     settings.platform_folders.clear();
     settings.dirty = false;
+    copy_buf(romm_settings.base_url, sizeof(romm_settings.base_url), cfg.romm.base_url);
+    copy_buf(romm_settings.api_token, sizeof(romm_settings.api_token), cfg.romm.api_token);
+    romm_settings.sync_boxart = cfg.romm.sync_boxart;
+    romm_settings.dirty = false;
     show_settings = false;
     show_romm_settings = false;
     show_setup = true;
@@ -1344,7 +1348,7 @@ void HubModel::open_romm_settings() {
     show_romm_settings = true;
 }
 
-bool HubModel::save_romm_settings(std::string* error) {
+bool HubModel::save_romm_settings(std::string* error, bool refresh_boxart) {
     AppConfig next = cfg;
     next.romm.base_url = romm_settings.base_url;
     next.romm.api_token = romm_settings.api_token;
@@ -1373,10 +1377,10 @@ bool HubModel::save_romm_settings(std::string* error) {
     set_status(cfg.romm.enabled() ? "Saved RomM sync settings" : "Saved RomM sync settings (URL empty)");
     append_log("Wrote RomM settings to " + paths.config_path.string() +
                (cfg.romm.sync_boxart ? " (boxart=RomM)" : " (boxart=Libretro)"));
-    // Apply active source immediately; fetch fills that source's cache.
     refresh_rows(false);
     // Re-pull covers so RomM menu art replaces any prior url_cover (IGDB) cache.
-    start_job(HubJob::FetchBoxart, {}, true);
+    // Setup wizard skips this so ScanRoms can run as the first post-setup job.
+    if (refresh_boxart) start_job(HubJob::FetchBoxart, {}, true);
     return true;
 }
 

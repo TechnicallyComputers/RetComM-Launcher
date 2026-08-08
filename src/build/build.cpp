@@ -1091,13 +1091,222 @@ void prune_build_tree_after_success(const fs::path& src_root, const fs::path& bu
     prune_embedded_toolchain(src_root);
 }
 
-fs::path resolve_python() {
+// Pins must match retcomm-toolchains/pins.env (PYTHON_VERSION / PYTHON_PBS_TAG).
+constexpr const char* kPythonVersion = "3.12.13";
+constexpr const char* kPythonPbsTag = "20260807";
+constexpr const char* kPythonStandalonePackId = "python-standalone";
+
+bool path_looks_like_windows_store_python(const fs::path& p) {
+    const std::string s = p.string();
+    // Microsoft Store alias stubs live under WindowsApps and break non-interactive use.
+    return s.find("WindowsApps") != std::string::npos ||
+           s.find("windowsapps") != std::string::npos;
+}
+
+bool python_binary_usable(const fs::path& p) {
+    std::error_code ec;
+    if (p.empty() || !fs::is_regular_file(p, ec)) return false;
 #if defined(_WIN32)
-    return "python";
+    if (path_looks_like_windows_store_python(p)) return false;
+#endif
+    return true;
+}
+
+// Locate CPython under a PBS / toolchain python/ root.
+fs::path python_exe_in_root(const fs::path& py_root) {
+    std::error_code ec;
+    if (py_root.empty() || !fs::is_directory(py_root, ec)) return {};
+#if defined(_WIN32)
+    for (const char* rel : {"python.exe", "python3.exe"}) {
+        const fs::path cand = py_root / rel;
+        if (python_binary_usable(cand)) return cand;
+    }
+#endif
+    for (const char* rel : {"bin/python3", "bin/python"}) {
+        const fs::path cand = py_root / rel;
+        if (python_binary_usable(cand)) return cand;
+    }
+#if defined(__APPLE__)
+    // macOS universal pack: arch-specific trees + dispatcher under bin/.
+#if defined(__aarch64__)
+    for (const char* rel : {"aarch64-apple-darwin/bin/python3", "aarch64-apple-darwin/bin/python"}) {
+        const fs::path cand = py_root / rel;
+        if (python_binary_usable(cand)) return cand;
+    }
 #else
-    if (const char* p = std::getenv("RETCOMM_PYTHON")) return p;
+    for (const char* rel : {"x86_64-apple-darwin/bin/python3", "x86_64-apple-darwin/bin/python"}) {
+        const fs::path cand = py_root / rel;
+        if (python_binary_usable(cand)) return cand;
+    }
+#endif
+#endif
+    return {};
+}
+
+std::string pbs_target_triple() {
+#if defined(_WIN32)
+#if defined(_M_ARM64) || defined(__aarch64__)
+    return "aarch64-pc-windows-msvc";
+#else
+    return "x86_64-pc-windows-msvc";
+#endif
+#elif defined(__APPLE__)
+#if defined(__aarch64__)
+    return "aarch64-apple-darwin";
+#else
+    return "x86_64-apple-darwin";
+#endif
+#else
+#if defined(__aarch64__)
+    return "aarch64-unknown-linux-gnu";
+#else
+    return "x86_64-unknown-linux-gnu";
+#endif
+#endif
+}
+
+fs::path find_bundled_python(const Paths& paths, const fs::path& toolchain_root) {
+    std::error_code ec;
+    if (!toolchain_root.empty()) {
+        if (auto p = python_exe_in_root(toolchain_root / "python"); !p.empty()) return p;
+    }
+    // Shared cache: toolchains/python-standalone/<tag>/…
+    const fs::path base = paths.toolchains_dir / kPythonStandalonePackId;
+    if (!fs::is_directory(base, ec)) return {};
+    std::vector<fs::path> tags;
+    for (auto it = fs::directory_iterator(base, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        if (it->path().filename() == "latest") continue;
+        tags.push_back(it->path());
+    }
+    std::sort(tags.begin(), tags.end());
+    for (auto it = tags.rbegin(); it != tags.rend(); ++it) {
+        const fs::path root = unwrap_single_subdir(*it);
+        if (auto p = python_exe_in_root(root); !p.empty()) return p;
+        if (auto p = python_exe_in_root(root / "python"); !p.empty()) return p;
+    }
+    const fs::path latest = base / "latest";
+    if (fs::exists(latest, ec)) {
+        const fs::path root = unwrap_single_subdir(latest);
+        if (auto p = python_exe_in_root(root); !p.empty()) return p;
+        if (auto p = python_exe_in_root(root / "python"); !p.empty()) return p;
+    }
+    return {};
+}
+
+fs::path resolve_python(const Paths& paths, const fs::path& toolchain_root) {
+    if (const char* env = std::getenv("RETCOMM_PYTHON")) {
+        const fs::path p = env;
+        if (python_binary_usable(p)) return p;
+        // Allow RETCOMM_PYTHON=python3 style names when they are not Store stubs.
+        if (!p.empty() && !p.has_parent_path()) {
+#if defined(_WIN32)
+            if (path_looks_like_windows_store_python(p)) {
+                // fall through
+            } else {
+                return p;
+            }
+#else
+            return p;
+#endif
+        }
+    }
+    if (auto bundled = find_bundled_python(paths, toolchain_root); !bundled.empty())
+        return bundled;
+#if defined(_WIN32)
+    // Do not fall back to bare "python" — often the Windows Store alias stub.
+    return {};
+#else
     return "python3";
 #endif
+}
+
+// Download python-build-standalone into toolchains/python-standalone/<tag>/ when
+// neither the toolchain pack nor the shared cache has a usable interpreter.
+PackEnsureResult ensure_bundled_python(const Paths& paths, const fs::path& toolchain_root,
+                                       BuildProgressFn on_progress) {
+    PackEnsureResult r;
+    if (auto existing = find_bundled_python(paths, toolchain_root); !existing.empty()) {
+        r.ok = true;
+        r.root = existing.parent_path();
+        if (r.root.filename() == "bin") r.root = r.root.parent_path();
+        r.tag = kPythonPbsTag;
+        r.message = "using bundled Python " + existing.string();
+        return r;
+    }
+
+    const std::string triple = pbs_target_triple();
+    const std::string asset = std::string("cpython-") + kPythonVersion + "+" + kPythonPbsTag +
+                              "-" + triple + "-install_only_stripped.tar.gz";
+    const std::string url =
+        std::string("https://github.com/astral-sh/python-build-standalone/releases/download/") +
+        kPythonPbsTag + "/" + asset;
+
+    progress(on_progress, "Downloading embeddable Python " + std::string(kPythonVersion) + "…",
+             0.02f);
+
+    const fs::path dest = paths.toolchains_dir / kPythonStandalonePackId / kPythonPbsTag;
+    const fs::path downloads = paths.data_dir / "downloads";
+    const fs::path archive = downloads / asset;
+    const fs::path staging =
+        downloads / ("extract-" + std::string(kPythonStandalonePackId) + "-" + kPythonPbsTag);
+
+    std::error_code ec;
+    fs::create_directories(downloads, ec);
+    fs::remove_all(staging, ec);
+    fs::create_directories(staging, ec);
+
+    std::string err;
+    if (!http_download_with_progress(url, archive, &err, {}, on_progress, asset)) {
+        r.message = "Python download failed: " + err;
+        return r;
+    }
+    if (!extract_archive_to(archive, staging, &err)) {
+        r.message = "Python extract failed: " + err;
+        return r;
+    }
+
+    fs::path py_src = staging / "python";
+    if (!fs::is_directory(py_src, ec)) {
+        const fs::path inner = unwrap_single_subdir(staging);
+        if (fs::is_directory(inner / "python", ec))
+            py_src = inner / "python";
+        else if (!python_exe_in_root(inner).empty())
+            py_src = inner;
+        else {
+            r.message = "Python archive layout unexpected (no python/)";
+            fs::remove_all(staging, ec);
+            return r;
+        }
+    }
+
+    fs::remove_all(dest, ec);
+    fs::create_directories(dest, ec);
+    fs::copy(py_src, dest / "python",
+             fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+    fs::remove_all(staging, ec);
+    if (ec) {
+        r.message = "Python install failed: " + ec.message();
+        return r;
+    }
+
+    const fs::path exe = find_bundled_python(paths, {});
+    if (exe.empty()) {
+        r.message = "Python installed but interpreter not found under " + dest.string();
+        return r;
+    }
+
+    const fs::path latest = paths.toolchains_dir / kPythonStandalonePackId / "latest";
+    fs::remove_all(latest, ec);
+    fs::create_directory_symlink(dest, latest, ec); // best-effort
+
+    r.ok = true;
+    r.root = dest;
+    r.tag = kPythonPbsTag;
+    r.message = "installed embeddable Python " + exe.string();
+    progress(on_progress, "Embeddable Python ready", 0.03f);
+    return r;
 }
 
 int run_capture_lines(const std::string& cmd, const fs::path& cwd,
@@ -1843,9 +2052,24 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
         // Keep stable cache in sync for the next update.
         save_codegen_cache(paths, title, engine, src.root, codegen_want, nullptr);
     } else {
+        {
+            const auto py_ens = ensure_bundled_python(paths, tc.root, opts.on_progress);
+            if (!py_ens.ok) {
+                result.message = py_ens.message;
+                return result;
+            }
+        }
+        const fs::path python_exe = resolve_python(paths, tc.root);
+        if (python_exe.empty()) {
+            result.message =
+                "No usable Python interpreter (toolchain python/ missing and "
+                "embeddable download failed). Set RETCOMM_PYTHON to a real "
+                "python.exe / python3, or update cmake-clang-v1 to 1.0.6+.";
+            return result;
+        }
         progress(opts.on_progress, "Generating C sources…", 0.05f);
         std::vector<std::string> gen_args = {
-            resolve_python().string(),
+            python_exe.string(),
             cli.string(),
             "generate",
         };

@@ -488,6 +488,15 @@ bool extract_archive(const fs::path& archive, const fs::path& dest, std::string*
                                 " -C " + shell_quote(dest);
         if (run_cmd(cmd, &err) == 0) return true;
     }
+    // GNU/BSD tar — needed for .tar.gz when bsdtar is absent (lean AppImages).
+    const bool looks_tar = ends_with_ci(name, ".tar") || ends_with_ci(name, ".tar.gz") ||
+                           ends_with_ci(name, ".tgz") || ends_with_ci(name, ".tar.xz") ||
+                           ends_with_ci(name, ".tar.bz2") || ends_with_ci(name, ".tar.zst");
+    if (looks_tar && tool_on_path_unix("tar")) {
+        const std::string cmd = "tar --no-same-owner -xf " + shell_quote(archive) + " -C " +
+                                shell_quote(dest);
+        if (run_cmd(cmd, &err) == 0) return true;
+    }
     if (ends_with_ci(name, ".zip") && tool_on_path_unix("unzip")) {
         const std::string cmd =
             "unzip -qo " + shell_quote(archive) + " -d " + shell_quote(dest);

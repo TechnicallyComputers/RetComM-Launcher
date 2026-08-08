@@ -110,7 +110,8 @@ sizes/filenames from catalog `bios_identity` (including
 
 Config `saves_root` (optional, prompted in first-time setup / Library Settings)
 is the **canonical** native-save library (ES-DE / other frontend layout:
-`saves_root/<platform folder>/`).
+`saves_root/<platform folder>/`). First-time setup also accepts optional RomM
+`base_url` + Client API token (same fields as RomM Sync Settings).
 
 Flow:
 

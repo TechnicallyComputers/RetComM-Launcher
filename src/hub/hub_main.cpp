@@ -1479,9 +1479,9 @@ void draw_setup_wizard(HubModel& hub, const Theme& th, SDL_Window* window) {
 
     ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 520.f);
     ImGui::TextWrapped(
-        "Set your ROM library, BIOS, and game-saves folders. RetComM scans these paths to "
-        "match supported titles and keep saves outside each install. You can change them "
-        "later under Library Settings.");
+        "Set your ROM library, BIOS, and game-saves folders. Optionally connect RomM for "
+        "library sync later. You can change all of this under Library Settings and RomM Sync "
+        "Settings.");
     ImGui::PopTextWrapPos();
     ImGui::Dummy(ImVec2(0, 12));
 
@@ -1513,6 +1513,26 @@ void draw_setup_wizard(HubModel& hub, const Theme& th, SDL_Window* window) {
         "use per-platform folders under this root.");
     ImGui::PopStyleColor();
 
+    ImGui::Dummy(ImVec2(0, 14));
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::TextColored(th.text_muted, "RomM (optional)");
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextWrapped(
+        "Leave blank for local-only. Use a Client API Token from RomM → Administration → "
+        "Client API Tokens (Bearer rmm_…).");
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, 6));
+    ImGui::TextColored(th.text_muted, "RomM Instance URL");
+    if (ImGui::InputText("##setup_romm_base_url", hub.romm_settings.base_url,
+                         sizeof(hub.romm_settings.base_url)))
+        hub.romm_settings.dirty = true;
+    ImGui::Dummy(ImVec2(0, 6));
+    ImGui::TextColored(th.text_muted, "RomM Client API Key");
+    if (ImGui::InputText("##setup_romm_api_token", hub.romm_settings.api_token,
+                         sizeof(hub.romm_settings.api_token), ImGuiInputTextFlags_Password))
+        hub.romm_settings.dirty = true;
+
     const bool library_ok = hub.settings.library_root[0] != '\0';
     ImGui::Dummy(ImVec2(0, 16));
     ImGui::BeginDisabled(!library_ok);
@@ -1521,6 +1541,9 @@ void draw_setup_wizard(HubModel& hub, const Theme& th, SDL_Window* window) {
         if (!hub.save_settings(&err)) {
             hub.append_log("setup save failed: " + err);
             hub.set_status("Setup save failed");
+        } else if (!hub.save_romm_settings(&err, /*refresh_boxart=*/false)) {
+            hub.append_log("setup RomM save failed: " + err);
+            hub.set_status("Setup RomM save failed");
         } else {
             hub.show_setup = false;
             hub.set_status("Setup complete");

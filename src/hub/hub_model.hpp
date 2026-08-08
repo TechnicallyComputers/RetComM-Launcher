@@ -281,7 +281,7 @@ struct HubModel {
     std::string library_platform;
     bool show_settings = false;
     bool show_romm_settings = false;
-    bool show_setup = false; // first-time library/BIOS wizard
+    bool show_setup = false; // first-time library/BIOS/RomM wizard
     SettingsDraft settings;
     RommSettingsDraft romm_settings;
     NetplayLobbyState netplay;
@@ -346,7 +346,8 @@ struct HubModel {
     void add_platform_folder_row();
 
     void open_romm_settings();
-    bool save_romm_settings(std::string* error = nullptr);
+    // When refresh_boxart is false, persist only (setup wizard starts ScanRoms next).
+    bool save_romm_settings(std::string* error = nullptr, bool refresh_boxart = true);
 
     // Persist preferred managed save for a title (empty clears).
     // Cart: battery file. Disc: memcard 1.
