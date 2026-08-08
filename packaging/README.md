@@ -21,16 +21,19 @@ Writes `assets/retcomm.png` at **512×512** (linuxdeploy’s max allowed size;
 `assets/retcomm.svg`.
 
 Hub UI fonts live in `assets/fonts/` (Lato Latin, same face as recomp-ui) and
-install to `share/retcomm/fonts`. Packaging **requires** them:
+install to `share/retcomm/fonts`. Platform controller icons live in
+`assets/platforms/` (`psx.png`, …) → `share/retcomm/platforms`. Packaging
+**requires** both:
 
-| Artifact | Font location |
-|---|---|
-| Linux AppImage | `usr/share/retcomm/fonts` + `usr/bin/fonts` |
-| macOS `.app` / DMG | `Contents/Resources/fonts` |
-| Windows setup / portable | `fonts/` next to the exes |
+| Artifact | Font location | Platform icons |
+|---|---|---|
+| Linux AppImage | `usr/share/retcomm/fonts` + `usr/bin/fonts` | `usr/share/retcomm/platforms` + `usr/bin/platforms` |
+| macOS `.app` / DMG | `Contents/Resources/fonts` | `Contents/Resources/platforms` |
+| Windows setup / portable | `fonts/` next to the exes | `platforms/` next to the exes |
 
 CI fails the release job if `LatoLatin-Regular.ttf` is missing from the install
-prefix or the final package.
+prefix or the final package. Windows/macOS/Linux packagers also require
+`platforms/psx.png`.
 
 ## Linux
 

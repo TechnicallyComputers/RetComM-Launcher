@@ -181,6 +181,21 @@ if (-not (Test-Path (Join-Path $FontsDst "LatoLatin-Regular.ttf"))) {
     throw "Failed to stage hub fonts into $FontsDst"
 }
 
+# Hub platform controller icons next to the exes (platforms/psx.png, …).
+$PlatSrc = Join-Path $Prefix "share\retcomm\platforms"
+if (-not (Test-Path (Join-Path $PlatSrc "psx.png"))) {
+    $PlatSrc = Join-Path $Root "assets\platforms"
+}
+if (-not (Test-Path (Join-Path $PlatSrc "psx.png"))) {
+    throw "Hub platform icons missing (expected psx.png under share/retcomm/platforms or assets/platforms)"
+}
+$PlatDst = Join-Path $Stage "platforms"
+New-Item -ItemType Directory -Force -Path $PlatDst | Out-Null
+Copy-Item (Join-Path $PlatSrc "*.png") $PlatDst -Force
+if (-not (Test-Path (Join-Path $PlatDst "psx.png"))) {
+    throw "Failed to stage hub platform icons into $PlatDst"
+}
+
 # --- Portable single-exe (stub + appended zip trailer; zip is temporary only) ---
 if (-not $PortableStub) {
     $candidates = @(

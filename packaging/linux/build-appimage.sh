@@ -38,6 +38,21 @@ fi
 mkdir -p "${APPDIR}/usr/bin/fonts"
 cp -a "${FONTS_DST}/." "${APPDIR}/usr/bin/fonts/"
 
+# Platform controller icons (library cards). Prefer CMake install; fall back to assets/.
+PLAT_DST="${APPDIR}/usr/share/retcomm/platforms"
+if [[ ! -f "${PLAT_DST}/psx.png" ]]; then
+  if [[ -f "${ROOT}/assets/platforms/psx.png" ]]; then
+    mkdir -p "${PLAT_DST}"
+    cp -a "${ROOT}/assets/platforms/." "${PLAT_DST}/"
+  fi
+fi
+if [[ ! -f "${PLAT_DST}/psx.png" ]]; then
+  echo "error: hub platform icons missing (expected ${PLAT_DST}/psx.png or assets/platforms/)" >&2
+  exit 1
+fi
+mkdir -p "${APPDIR}/usr/bin/platforms"
+cp -a "${PLAT_DST}/." "${APPDIR}/usr/bin/platforms/"
+
 # Desktop + icon at AppDir root (linuxdeploy / appimagetool convention).
 install -m 644 "${ROOT}/packaging/linux/retcomm.desktop" "${APPDIR}/retcomm.desktop"
 if [[ -f "${ROOT}/assets/retcomm.png" ]]; then

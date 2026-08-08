@@ -34,6 +34,19 @@ if [[ ! -f "${APP}/Contents/Resources/fonts/LatoLatin-Regular.ttf" ]]; then
   exit 1
 fi
 
+# Hub platform controller icons (library cards).
+if [[ -d "${PREFIX}/share/retcomm/platforms" ]]; then
+  mkdir -p "${APP}/Contents/Resources/platforms"
+  cp -a "${PREFIX}/share/retcomm/platforms/." "${APP}/Contents/Resources/platforms/"
+elif [[ -f "${ROOT}/assets/platforms/psx.png" ]]; then
+  mkdir -p "${APP}/Contents/Resources/platforms"
+  cp -a "${ROOT}/assets/platforms/." "${APP}/Contents/Resources/platforms/"
+fi
+if [[ ! -f "${APP}/Contents/Resources/platforms/psx.png" ]]; then
+  echo "error: hub platform icons missing in app bundle (psx.png)" >&2
+  exit 1
+fi
+
 sed "s|@VERSION@|${VERSION}|g" "${ROOT}/packaging/macos/Info.plist.in" \
   > "${APP}/Contents/Info.plist"
 
