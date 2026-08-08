@@ -1870,11 +1870,19 @@ int main(int argc, char** argv) {
     }
     hub.launcher_version = retcomm::retcomm_app_version();
     hub.refresh_rows(false);
-    // Install-scoped marker (not library_root): new installs always prompt;
-    // existing config.json still pre-fills the wizard via open_setup().
+    // Prompt when neither a setup marker nor required config exists.
+    // Updates wipe exe-dir markers; if library_root is already set, skip the
+    // wizard and refresh the durable data-dir marker.
     if (!retcomm::hub_setup_completed(hub.paths, hub.exe_dir)) {
-        hub.open_setup();
-        hub.set_status("First-time setup — choose your ROM library folder");
+        if (!hub.cfg.library_root.empty()) {
+            std::string marker_err;
+            if (!retcomm::mark_hub_setup_completed(hub.paths, hub.exe_dir, &marker_err))
+                hub.append_log("setup marker migrate failed: " + marker_err);
+            hub.set_status("Ready");
+        } else {
+            hub.open_setup(); // pre-fills any partial config.json
+            hub.set_status("First-time setup — choose your ROM library folder");
+        }
     } else {
         hub.set_status("Ready");
     }

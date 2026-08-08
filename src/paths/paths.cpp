@@ -265,15 +265,17 @@ bool hub_setup_completed(const Paths& paths, const fs::path& exe_dir) {
 }
 
 bool mark_hub_setup_completed(const Paths& paths, const fs::path& exe_dir, std::string* error) {
+    // Always persist under data_dir so self-update / reinstall of the app folder
+    // does not clear completion. Also best-effort next to the binary.
+    std::string data_err;
+    const bool data_ok = try_write_marker(hub_setup_marker_data(paths), &data_err);
     const fs::path exe_marker = hub_setup_marker_exe(exe_dir);
-    if (!exe_marker.empty() && try_write_marker(exe_marker, nullptr)) return true;
-
-    std::string err;
-    if (try_write_marker(hub_setup_marker_data(paths), &err)) return true;
+    if (!exe_marker.empty()) try_write_marker(exe_marker, nullptr);
+    if (data_ok) return true;
+    // Last resort: exe-dir only (unusual — data_dir should be writable).
+    if (!exe_marker.empty() && path_is_regular_file(exe_marker)) return true;
     if (error) {
-        *error = err.empty() ? "failed to write hub setup marker" : err;
-        if (!exe_marker.empty())
-            *error += " (also failed at " + exe_marker.string() + ")";
+        *error = data_err.empty() ? "failed to write hub setup marker" : data_err;
     }
     return false;
 }
