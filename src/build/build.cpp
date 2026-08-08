@@ -1309,6 +1309,30 @@ PackEnsureResult ensure_bundled_python(const Paths& paths, const fs::path& toolc
     return r;
 }
 
+#if defined(_WIN32)
+std::wstring narrow_to_wide(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), static_cast<int>(s.size()),
+                                nullptr, 0);
+    if (n > 0) {
+        std::wstring out(static_cast<size_t>(n), L'\0');
+        MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.data(), static_cast<int>(s.size()),
+                            out.data(), n);
+        return out;
+    }
+    n = MultiByteToWideChar(CP_ACP, 0, s.data(), static_cast<int>(s.size()), nullptr, 0);
+    if (n <= 0) return std::wstring(s.begin(), s.end());
+    std::wstring out(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_ACP, 0, s.data(), static_cast<int>(s.size()), out.data(), n);
+    return out;
+}
+
+std::string path_to_utf8(const fs::path& p) {
+    const auto u8 = p.u8string();
+    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+}
+#endif
+
 int run_capture_lines(const std::string& cmd, const fs::path& cwd,
                       const std::function<void(const std::string&)>& on_line,
                       std::string* combined_err) {
@@ -1316,12 +1340,81 @@ int run_capture_lines(const std::string& cmd, const fs::path& cwd,
     // git-remote-https is not poisoned by the mount's libcurl.
     AppImageEnvGuard env_guard;
 #if defined(_WIN32)
-    std::string full = "cmd /C \"cd /D " + cwd.string() + " && " + cmd + "\"";
-    FILE* pipe = _popen(full.c_str(), "r");
+    // Hidden console: CreateProcess + CREATE_NO_WINDOW (unlike _popen).
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    HANDLE rd = nullptr;
+    HANDLE wr = nullptr;
+    if (!CreatePipe(&rd, &wr, &sa, 0)) {
+        if (combined_err) *combined_err = "CreatePipe failed for: " + cmd;
+        return 127;
+    }
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+
+    const std::string full = "cmd.exe /C \"cd /D " + path_to_utf8(cwd) + " && " + cmd + "\"";
+    std::wstring wcmd = narrow_to_wide(full);
+    std::vector<wchar_t> mutable_cmd(wcmd.begin(), wcmd.end());
+    mutable_cmd.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    si.hStdOutput = wr;
+    si.hStdError = wr;
+    si.hStdInput = nullptr;
+
+    PROCESS_INFORMATION pi{};
+    const BOOL ok =
+        CreateProcessW(nullptr, mutable_cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+                       nullptr, nullptr, &si, &pi);
+    CloseHandle(wr);
+    wr = nullptr;
+    if (!ok) {
+        CloseHandle(rd);
+        if (combined_err)
+            *combined_err = "CreateProcess failed (" + std::to_string(GetLastError()) + "): " + cmd;
+        return 127;
+    }
+    CloseHandle(pi.hThread);
+
+    std::string line;
+    char buf[512];
+    DWORD nread = 0;
+    while (ReadFile(rd, buf, sizeof(buf), &nread, nullptr) && nread > 0) {
+        for (DWORD i = 0; i < nread; ++i) {
+            const char c = buf[i];
+            if (c == '\n') {
+                while (!line.empty() && line.back() == '\r') line.pop_back();
+                if (on_line) on_line(line);
+                if (combined_err) {
+                    *combined_err += line;
+                    *combined_err += '\n';
+                }
+                line.clear();
+            } else {
+                line.push_back(c);
+            }
+        }
+    }
+    if (!line.empty()) {
+        while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+        if (on_line) on_line(line);
+        if (combined_err) {
+            *combined_err += line;
+            *combined_err += '\n';
+        }
+    }
+    CloseHandle(rd);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    return static_cast<int>(code);
 #else
     std::string full = "cd " + shell_quote(cwd.string()) + " && " + cmd + " 2>&1";
     FILE* pipe = popen(full.c_str(), "r");
-#endif
     if (!pipe) {
         if (combined_err) *combined_err = "failed to spawn: " + cmd;
         return 127;
@@ -1337,13 +1430,9 @@ int run_capture_lines(const std::string& cmd, const fs::path& cwd,
             *combined_err += '\n';
         }
     }
-#if defined(_WIN32)
-    const int rc = _pclose(pipe);
-#else
     const int st = pclose(pipe);
-    const int rc = WIFEXITED(st) ? WEXITSTATUS(st) : 1;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 1;
 #endif
-    return rc;
 }
 
 std::string path_with_prefix(const fs::path& path_prefix) {

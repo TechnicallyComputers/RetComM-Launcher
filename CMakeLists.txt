@@ -160,12 +160,26 @@ if(RETCOMM_HAVE_SDL3 AND RETCOMM_IMGUI_READY)
     )
     target_link_libraries(retcomm_imgui PUBLIC ${RETCOMM_HUB_SDL_TARGET} OpenGL::GL)
 
-    add_executable(retcomm-hub
-        src/hub/hub_main.cpp
-        src/hub/hub_model.cpp
-        src/hub/hub_boxart.cpp
-        ${RETCOMM_WIN_RC}
-    )
+    # WIN32 → /SUBSYSTEM:WINDOWS so the hub has no console window on Windows.
+    # CLI stays console (retcomm.exe). Portable stub is already WIN32.
+    if(WIN32)
+        add_executable(retcomm-hub WIN32
+            src/hub/hub_main.cpp
+            src/hub/hub_model.cpp
+            src/hub/hub_boxart.cpp
+            ${RETCOMM_WIN_RC}
+        )
+        # Hub uses int main(); MSVC Windows subsystem defaults to WinMain.
+        if(MSVC)
+            target_link_options(retcomm-hub PRIVATE "/ENTRY:mainCRTStartup")
+        endif()
+    else()
+        add_executable(retcomm-hub
+            src/hub/hub_main.cpp
+            src/hub/hub_model.cpp
+            src/hub/hub_boxart.cpp
+        )
+    endif()
     target_include_directories(retcomm-hub PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party/stb

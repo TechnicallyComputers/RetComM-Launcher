@@ -31,6 +31,9 @@ install to `share/retcomm/fonts`. Platform controller icons live in
 | macOS `.app` / DMG | `Contents/Resources/fonts` | `Contents/Resources/platforms` |
 | Windows setup / portable | `fonts/` next to the exes | `platforms/` next to the exes |
 
+On Windows, `retcomm-hub` links `/SUBSYSTEM:WINDOWS` (no console window);
+`retcomm.exe` remains a console CLI.
+
 CI fails the release job if `LatoLatin-Regular.ttf` is missing from the install
 prefix or the final package. Windows/macOS/Linux packagers also require
 `platforms/psx.png`.

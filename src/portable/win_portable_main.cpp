@@ -197,9 +197,12 @@ bool launch(const fs::path& binary, const std::wstring& args, const fs::path& po
     std::vector<wchar_t> cmdline(cmd.begin(), cmd.end());
     cmdline.push_back(L'\0');
 
+    // Hub is GUI (/SUBSYSTEM:WINDOWS); still hide any console for older builds.
+    // CLI attaches to the parent console and waits.
+    const DWORD flags = attach_console ? 0 : (CREATE_NO_WINDOW | DETACHED_PROCESS);
     const BOOL ok =
-        CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, TRUE, 0, nullptr,
-                       binary.parent_path().wstring().c_str(), &si, &pi);
+        CreateProcessW(nullptr, cmdline.data(), nullptr, nullptr, attach_console ? TRUE : FALSE,
+                       flags, nullptr, binary.parent_path().wstring().c_str(), &si, &pi);
     if (!ok) {
         *err = L"Failed to launch " + binary.filename().wstring();
         return false;
