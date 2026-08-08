@@ -629,17 +629,31 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
 
             auto rescan_library_after_romm = [&](const Title& t,
                                                  const RommFetchResult& fr) -> bool {
-                set_status("RomM: scanning library for new ROM…");
                 library = load_library_index(paths.library_index_path);
-                ScanOptions opts;
-                opts.index = &library;
-                auto scan = scan_rom_library(catalog, cfg, opts);
-                merge_scan_into_index(library, catalog, scan, cfg.library_root);
-                save_library_index(paths.library_index_path, library);
-                const fs::path bound = library.preferred_rom(t.id);
-                append_log("ROM scan after download: " + std::to_string(scan.matches.size()) +
-                           " matches" +
-                           (bound.empty() ? "" : (" (bound " + bound.string() + ")")));
+
+                // Prefer a direct hash+bind of the just-downloaded set (multi-track
+                // .cue+.bin). Full library walk is a fallback when that fails.
+                set_status("RomM: verifying downloaded ROM…");
+                auto direct = bind_downloaded_rom_to_index(library, t, fr.saved_path,
+                                                           cfg.library_root);
+                append_log(direct.message);
+                if (direct.ok) {
+                    save_library_index(paths.library_index_path, library);
+                } else {
+                    set_status("RomM: scanning library for new ROM…");
+                    ScanOptions opts;
+                    opts.index = &library;
+                    opts.platforms = {t.platform};
+                    auto scan = scan_rom_library(catalog, cfg, opts);
+                    merge_scan_into_index(library, catalog, scan, cfg.library_root);
+                    save_library_index(paths.library_index_path, library);
+                    const fs::path bound = library.preferred_rom(t.id);
+                    append_log("ROM scan after download: " +
+                               std::to_string(scan.matches.size()) + " match(es)" +
+                               (bound.empty() ? (" — still unbound for " + t.id)
+                                              : (" (bound " + bound.string() + ")")));
+                }
+
                 {
                     romm_roms = load_romm_rom_index(paths.romm_rom_index_path);
                     RommRomIndexEntry e;
@@ -650,7 +664,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     romm_roms.by_title[t.id] = std::move(e);
                     save_romm_rom_index(paths.romm_rom_index_path, romm_roms, nullptr);
                 }
-                return !bound.empty();
+                return !library.preferred_rom(t.id).empty();
             };
 
             auto fetch_romm_and_bind = [&](const Title& t) -> bool {

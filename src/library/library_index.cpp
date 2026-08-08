@@ -1,4 +1,5 @@
 #include "retcomm/library_index.hpp"
+#include "retcomm/hash.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -6,6 +7,7 @@
 #include <cctype>
 #include <chrono>
 #include <fstream>
+#include <sstream>
 #include <unordered_set>
 
 namespace retcomm {
@@ -76,14 +78,136 @@ bool is_disc_dump_ext(const std::string& ext) {
     return ext == ".bin" || ext == ".img";
 }
 
-// Prefer same-stem sibling .cue; else any sheet whose FILE "..." BINARY
-// basename matches the dump filename.
+std::string ascii_lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+bool iequals_ascii(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i])))
+            return false;
+    }
+    return true;
+}
+
+// Redump: "Game (USA) (Track 01).bin" → "Game (USA).cue"
+std::string strip_track_suffix(std::string stem) {
+    // Match " (Track N)" / " (Track NN)" / " (Track NNN)" at end (case-insensitive).
+    if (stem.size() < 10) return stem;
+    const std::string lower = ascii_lower(stem);
+    const std::string key = " (track ";
+    const auto pos = lower.rfind(key);
+    if (pos == std::string::npos) return stem;
+    size_t i = pos + key.size();
+    if (i >= lower.size() || !std::isdigit(static_cast<unsigned char>(lower[i]))) return stem;
+    while (i < lower.size() && std::isdigit(static_cast<unsigned char>(lower[i]))) ++i;
+    if (i >= lower.size() || lower[i] != ')') return stem;
+    if (i + 1 != lower.size()) return stem;
+    return stem.substr(0, pos);
+}
+
+bool list_has_ci(const std::vector<std::string>& hay, const std::string& needle) {
+    for (const auto& h : hay) {
+        if (iequals_ascii(h, needle)) return true;
+    }
+    return false;
+}
+
+bool digest_matches_identity(const RomIdentity& id, const std::string& crc32,
+                             const std::string& md5, const std::string& sha1,
+                             const std::string& sha256, std::string* matched_by) {
+    if (!id.crc32.empty() && !crc32.empty() && list_has_ci(id.crc32, crc32)) {
+        if (matched_by) *matched_by = "crc32";
+        return true;
+    }
+    if (!id.md5.empty() && !md5.empty() && list_has_ci(id.md5, md5)) {
+        if (matched_by) *matched_by = "md5";
+        return true;
+    }
+    if (!id.sha1.empty() && !sha1.empty() && list_has_ci(id.sha1, sha1)) {
+        if (matched_by) *matched_by = "sha1";
+        return true;
+    }
+    if (!id.sha256.empty() && !sha256.empty() && list_has_ci(id.sha256, sha256)) {
+        if (matched_by) *matched_by = "sha256";
+        return true;
+    }
+    return false;
+}
+
+bool size_in_identity(const RomIdentity& id, std::uint64_t size) {
+    if (id.sizes.empty()) return true;
+    for (auto sz : id.sizes) {
+        if (sz == size) return true;
+    }
+    return false;
+}
+
+void upsert_library_file(LibraryIndex& index, LibraryFile f) {
+    const std::string path = f.path;
+    if (LibraryFile* existing = index.find_path_mut(path)) {
+        *existing = std::move(f);
+        return;
+    }
+    index.by_path[path] = index.files.size();
+    index.files.push_back(std::move(f));
+}
+
+void upsert_title_bind(LibraryIndex& index, const std::string& title_id,
+                       const fs::path& preferred, const std::vector<fs::path>& extra_paths) {
+    LibraryTitleBind* bind = nullptr;
+    for (auto& t : index.titles) {
+        if (t.title_id == title_id) {
+            bind = &t;
+            break;
+        }
+    }
+    if (!bind) {
+        index.titles.push_back(LibraryTitleBind{});
+        bind = &index.titles.back();
+        bind->title_id = title_id;
+    }
+
+    auto add = [&](const fs::path& p) {
+        if (p.empty()) return;
+        const std::string s = norm_path(p);
+        if (std::find(bind->paths.begin(), bind->paths.end(), s) == bind->paths.end())
+            bind->paths.push_back(s);
+    };
+    add(preferred);
+    for (const auto& p : extra_paths) add(p);
+
+    std::sort(bind->paths.begin(), bind->paths.end(), [](const std::string& a, const std::string& b) {
+        const int ra = rom_path_rank(lower_ext_str(a));
+        const int rb = rom_path_rank(lower_ext_str(b));
+        if (ra != rb) return ra < rb;
+        return a < b;
+    });
+    if (!preferred.empty())
+        bind->preferred_path = norm_path(preferred);
+    else if (!bind->paths.empty())
+        bind->preferred_path = bind->paths.front();
+}
+
+// Prefer same-stem sibling .cue; Redump set-name .cue (strip " (Track NN)");
+// else any sheet whose FILE "..." basename matches the dump (case-insensitive).
 fs::path companion_cue_path(const fs::path& dump_path) {
     std::error_code ec;
-    const fs::path sibling = dump_path.parent_path() / (dump_path.stem().string() + ".cue");
+    const fs::path dir = dump_path.parent_path();
+    const std::string stem = dump_path.stem().string();
+
+    const fs::path sibling = dir / (stem + ".cue");
     if (fs::is_regular_file(sibling, ec)) return sibling;
 
-    const fs::path dir = dump_path.parent_path();
+    const std::string set_stem = strip_track_suffix(stem);
+    if (set_stem != stem) {
+        const fs::path set_cue = dir / (set_stem + ".cue");
+        if (fs::is_regular_file(set_cue, ec)) return set_cue;
+    }
+
     if (dir.empty() || !fs::is_directory(dir, ec)) return {};
 
     const std::string dump_name = dump_path.filename().string();
@@ -117,7 +241,7 @@ fs::path companion_cue_path(const fs::path& dump_path) {
             if (ref.empty()) continue;
 
             // Optional BINARY (or other) keyword — basename match is enough.
-            if (fs::path(ref).filename().string() == dump_name) return it->path();
+            if (iequals_ascii(fs::path(ref).filename().string(), dump_name)) return it->path();
         }
     }
     return {};
@@ -529,6 +653,206 @@ void merge_scan_into_index(LibraryIndex& index, const Catalog& catalog,
               [](const LibraryTitleBind& a, const LibraryTitleBind& b) {
                   return a.title_id < b.title_id;
               });
+}
+
+BindDownloadResult bind_downloaded_rom_to_index(LibraryIndex& index, const Title& title,
+                                                const fs::path& saved_path,
+                                                const fs::path& library_root) {
+    BindDownloadResult r;
+    if (!title.has_rom_identity()) {
+        r.message = "catalog title has no rom_identity";
+        return r;
+    }
+    std::error_code ec;
+    if (saved_path.empty() || (!fs::is_regular_file(saved_path, ec) && !fs::is_directory(saved_path, ec))) {
+        r.message = "download path missing: " + saved_path.string();
+        return r;
+    }
+
+    if (!library_root.empty()) index.library_root = library_root.string();
+
+    const fs::path dir =
+        fs::is_directory(saved_path, ec) ? saved_path : saved_path.parent_path();
+    fs::path cue;
+    if (lower_ext_str(saved_path) == ".cue" && fs::is_regular_file(saved_path, ec))
+        cue = saved_path;
+    else if (fs::is_regular_file(saved_path, ec) && is_disc_dump_ext(lower_ext_str(saved_path)))
+        cue = companion_cue_path(saved_path);
+
+    if (cue.empty() && fs::is_directory(dir, ec)) {
+        // Prefer set-named cue next to Redump tracks; else first .cue in the folder.
+        for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            if (!it->is_regular_file(ec)) continue;
+            if (lower_ext_str(it->path()) != ".cue") continue;
+            cue = it->path();
+            break;
+        }
+    }
+
+    std::unordered_set<std::string> allowed_ext;
+    for (auto e : title.rom_extensions) {
+        for (char& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (!e.empty() && e[0] != '.') e.insert(e.begin(), '.');
+        if (e == ".iso" || e == ".chd" || e == ".cue") continue;
+        allowed_ext.insert(e);
+    }
+    // Disc dumps are always candidates when identity uses track images.
+    allowed_ext.insert(".bin");
+    allowed_ext.insert(".img");
+
+    std::vector<fs::path> candidates;
+    auto consider = [&](const fs::path& p) {
+        if (p.empty() || !fs::is_regular_file(p, ec)) return;
+        const std::string ext = lower_ext_str(p);
+        if (!allowed_ext.count(ext)) return;
+        candidates.push_back(p);
+    };
+
+    if (fs::is_regular_file(saved_path, ec)) consider(saved_path);
+    if (fs::is_directory(dir, ec)) {
+        for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+            if (!it->is_regular_file(ec)) continue;
+            consider(it->path());
+        }
+    }
+
+    // Prefer identity sizes (Track 01 for multi-track PSX), then smaller files.
+    std::sort(candidates.begin(), candidates.end(), [&](const fs::path& a, const fs::path& b) {
+        const auto sa = fs::file_size(a, ec);
+        const auto sb = fs::file_size(b, ec);
+        const bool a_sz = size_in_identity(title.rom_identity, sa);
+        const bool b_sz = size_in_identity(title.rom_identity, sb);
+        if (a_sz != b_sz) return a_sz;
+        if (sa != sb) return sa < sb;
+        return a.string() < b.string();
+    });
+    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+
+    if (candidates.empty()) {
+        r.message = "no dump candidates next to " + saved_path.string();
+        return r;
+    }
+
+    fs::path matched_dump;
+    std::string matched_by;
+    std::string crc32, md5, sha1, sha256;
+    std::uint64_t matched_size = 0;
+    std::int64_t matched_mtime = 0;
+
+    for (const auto& path : candidates) {
+        const auto size = fs::file_size(path, ec);
+        if (ec) continue;
+        if (!title.rom_identity.sizes.empty() && !size_in_identity(title.rom_identity, size))
+            continue;
+
+        const std::uint64_t skip =
+            (title.platform == "snes" && size >= 512 && (size % 1024ull) == 512ull) ? 512ull : 0ull;
+
+        std::string c, m, s1, s256;
+        if (!title.rom_identity.crc32.empty()) c = file_crc32_hex(path, skip);
+        if (!title.rom_identity.md5.empty()) m = file_md5_hex(path, skip);
+        if (!title.rom_identity.sha1.empty()) s1 = file_sha1_hex(path, skip);
+        if (!title.rom_identity.sha256.empty()) s256 = file_sha256_hex(path, skip);
+
+        std::string by;
+        if (!digest_matches_identity(title.rom_identity, c, m, s1, s256, &by)) continue;
+
+        // Resolve cue for this dump when we still lack one.
+        if (cue.empty() && is_disc_dump_ext(lower_ext_str(path))) cue = companion_cue_path(path);
+
+        if (!rom_identity_toc_ok(title.rom_identity, path)) {
+            const int n = cue.empty() ? 0 : count_cue_tracks(cue.empty() ? companion_cue_path(path) : cue);
+            std::ostringstream oss;
+            oss << "digest matched via " << by << " (" << path.filename().string()
+                << ") but TOC check failed";
+            if (title.rom_identity.require_cue || !title.rom_identity.track_counts.empty()) {
+                oss << " — cue tracks=" << n << " want=";
+                if (title.rom_identity.track_counts.empty())
+                    oss << "any (require_cue)";
+                else {
+                    for (size_t i = 0; i < title.rom_identity.track_counts.size(); ++i) {
+                        if (i) oss << '|';
+                        oss << title.rom_identity.track_counts[i];
+                    }
+                }
+            }
+            r.message = oss.str();
+            // Keep looking; another candidate might pass TOC (unlikely).
+            continue;
+        }
+
+        matched_dump = path;
+        matched_by = by;
+        crc32 = std::move(c);
+        md5 = std::move(m);
+        sha1 = std::move(s1);
+        sha256 = std::move(s256);
+        matched_size = size;
+        matched_mtime = file_mtime_sec(path);
+        break;
+    }
+
+    if (matched_dump.empty()) {
+        if (r.message.empty())
+            r.message = "no file matched rom_identity digests under " + dir.string();
+        return r;
+    }
+
+    if (cue.empty() && is_disc_dump_ext(lower_ext_str(matched_dump)))
+        cue = companion_cue_path(matched_dump);
+
+    // Upsert hashed dump.
+    {
+        LibraryFile f;
+        f.path = norm_path(matched_dump);
+        f.platform = title.platform;
+        f.ext = lower_ext_str(matched_dump);
+        f.size = matched_size;
+        f.mtime_sec = matched_mtime;
+        f.crc32 = crc32;
+        f.md5 = md5;
+        f.sha1 = sha1;
+        f.sha256 = sha256;
+        f.title_id = title.id;
+        f.matched_by = matched_by;
+        upsert_library_file(index, std::move(f));
+    }
+
+    // Upsert companion cue (unhashed; bind by association).
+    if (!cue.empty() && fs::is_regular_file(cue, ec)) {
+        LibraryFile cf;
+        cf.path = norm_path(cue);
+        cf.platform = title.platform;
+        cf.ext = ".cue";
+        cf.size = fs::file_size(cue, ec);
+        if (ec) cf.size = 0;
+        cf.mtime_sec = file_mtime_sec(cue);
+        cf.title_id = title.id;
+        cf.matched_by = "companion-cue";
+        upsert_library_file(index, std::move(cf));
+    }
+
+    const fs::path preferred = !cue.empty() ? cue : matched_dump;
+    upsert_title_bind(index, title.id, preferred, {matched_dump, cue});
+
+    // preferred_rom refuses naked disc dumps — require cue when policy says so.
+    const fs::path bound = index.preferred_rom(title.id);
+    if (bound.empty()) {
+        r.message = "indexed " + matched_dump.filename().string() + " via " + matched_by +
+                    " but preferred_rom is empty (companion .cue missing?)";
+        return r;
+    }
+
+    r.ok = true;
+    r.preferred_path = bound;
+    r.matched_by = matched_by;
+    r.matched_dump = matched_dump;
+    std::ostringstream oss;
+    oss << "Bound " << title.id << " via " << matched_by << " → " << bound.string();
+    if (is_disc_dump_ext(lower_ext_str(matched_dump)))
+        oss << " (dump " << matched_dump.filename().string() << ")";
+    r.message = oss.str();
+    return r;
 }
 
 } // namespace retcomm

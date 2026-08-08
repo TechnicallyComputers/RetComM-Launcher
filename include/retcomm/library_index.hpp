@@ -64,6 +64,20 @@ bool save_library_index(const fs::path& path, const LibraryIndex& index);
 void merge_scan_into_index(LibraryIndex& index, const Catalog& catalog,
                            const ScanResult& scan, const fs::path& library_root);
 
+// After RomM (or manual) download: hash dumps next to saved_path, enforce TOC,
+// and upsert the title bind into the library index (does not write disk).
+struct BindDownloadResult {
+    bool ok = false;
+    std::string message;
+    fs::path preferred_path; // .cue when present
+    std::string matched_by;
+    fs::path matched_dump;
+};
+
+BindDownloadResult bind_downloaded_rom_to_index(LibraryIndex& index, const Title& title,
+                                                const fs::path& saved_path,
+                                                const fs::path& library_root = {});
+
 // Extension preference for launch staging (lower = better).
 int rom_path_rank(const std::string& ext);
 
