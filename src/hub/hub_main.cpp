@@ -17,6 +17,9 @@
 #include <SDL3/SDL_dialog.h>
 #include <SDL3/SDL_opengl.h>
 
+#include <set>
+#include <unordered_set>
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -188,6 +191,105 @@ void begin_folder_pick(HubModel& hub, SDL_Window* window, FolderPickTarget targe
     const char* start = nullptr;
     if (current_path && current_path[0] != '\0') start = current_path;
     SDL_ShowOpenFolderDialog(on_folder_dialog, &hub, window, start, false);
+}
+
+void SDLCALL on_file_dialog(void* userdata, const char* const* filelist, int /*filter*/) {
+    auto* hub = static_cast<HubModel*>(userdata);
+    if (!hub) return;
+    std::lock_guard<std::mutex> lock(hub->file_pick_mu);
+    hub->file_pick_busy = false;
+    hub->file_pick_paths.clear();
+    if (!filelist || !filelist[0]) {
+        hub->file_pick_kind = retcomm::hub::FilePickKind::None;
+        hub->file_pick_platform.clear();
+        return;
+    }
+    for (const char* const* p = filelist; *p; ++p) hub->file_pick_paths.emplace_back(*p);
+}
+
+std::string strip_dot_ext(std::string e) {
+    if (!e.empty() && e.front() == '.') e.erase(e.begin());
+    for (char& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return e;
+}
+
+std::string join_ext_pattern(const std::set<std::string>& exts) {
+    std::string pat;
+    for (const auto& e : exts) {
+        if (e.empty() || e == "*") continue;
+        if (!pat.empty()) pat.push_back(';');
+        pat += e;
+    }
+    return pat;
+}
+
+std::set<std::string> rom_exts_for_platform(const retcomm::Catalog& catalog,
+                                            const std::string& platform) {
+    // PSX: library expects cue sheets + bin tracks only.
+    if (platform == "psx" || platform == "ps1" || platform == "ps") return {"cue", "bin"};
+    std::set<std::string> exts;
+    for (const auto& t : catalog.titles) {
+        if (t.platform != platform) continue;
+        for (const auto& e : t.rom_extensions) {
+            const std::string s = strip_dot_ext(e);
+            if (!s.empty()) exts.insert(s);
+        }
+    }
+    if (!exts.empty()) return exts;
+    // Fallbacks aligned with retcomm-catalog platform-defaults.json
+    if (platform == "snes") return {"sfc", "smc", "fig", "swc"};
+    if (platform == "gba") return {"gba"};
+    if (platform == "n64") return {"z64", "n64", "v64"};
+    if (platform == "genesis" || platform == "md" || platform == "megadrive")
+        return {"bin", "md", "gen", "smd"};
+    return {"bin", "rom", "iso", "cue"};
+}
+
+std::set<std::string> save_exts_for_platform(const retcomm::Catalog& catalog,
+                                             const std::string& platform) {
+    if (platform == "psx" || platform == "ps1" || platform == "ps") return {"mcd"};
+    std::set<std::string> exts;
+    auto add_glob = [&](const std::string& g) {
+        const auto dot = g.find_last_of('.');
+        if (dot == std::string::npos) return;
+        const std::string s = strip_dot_ext(g.substr(dot));
+        if (!s.empty()) exts.insert(s);
+    };
+    for (const auto& t : catalog.titles) {
+        if (t.platform != platform) continue;
+        for (const auto& g : t.saves_memcard_glob) add_glob(g);
+        for (const auto& g : t.saves_sram_glob) add_glob(g);
+    }
+    if (!exts.empty()) return exts;
+    if (platform == "gba") return {"sav"};
+    return {"srm", "sav", "mcd", "mcr"};
+}
+
+std::set<std::string> bios_exts_for_platform(const std::string& platform) {
+    if (platform == "psx" || platform == "ps1" || platform == "ps") return {"bin"};
+    return {"bin", "rom", "bios", "img"};
+}
+
+void begin_file_pick(HubModel& hub, SDL_Window* window, retcomm::hub::FilePickKind kind,
+                     const std::string& platform, const std::string& filter_name,
+                     const std::set<std::string>& exts, bool allow_many) {
+    const std::string pattern = join_ext_pattern(exts);
+    if (pattern.empty()) return;
+    {
+        std::lock_guard<std::mutex> lock(hub.file_pick_mu);
+        if (hub.file_pick_busy) return;
+        hub.file_pick_busy = true;
+        hub.file_pick_kind = kind;
+        hub.file_pick_platform = platform;
+        hub.file_pick_paths.clear();
+        hub.file_pick_filter_name = filter_name;
+        hub.file_pick_filter_pattern = pattern;
+    }
+    // Pointers must remain valid until the callback runs.
+    static SDL_DialogFileFilter filters[1];
+    filters[0].name = hub.file_pick_filter_name.c_str();
+    filters[0].pattern = hub.file_pick_filter_pattern.c_str();
+    SDL_ShowOpenFileDialog(on_file_dialog, &hub, window, filters, 1, nullptr, allow_many);
 }
 
 // Path field + native Browse button. Returns true if the text field changed.
@@ -973,7 +1075,7 @@ void draw_detail_romm_sync_popup(HubModel& hub, const TitleRow& row, const Theme
     ImGui::EndPopup();
 }
 
-void draw_menu_popup(HubModel& hub, const Theme& th) {
+void draw_menu_popup(HubModel& hub, const Theme& th, SDL_Window* window) {
     if (hub.pending_open_menu) {
         ImGui::OpenPopup("Menu###hub_menu_panel");
         hub.pending_open_menu = false;
@@ -992,17 +1094,71 @@ void draw_menu_popup(HubModel& hub, const Theme& th) {
     ImGui::TextUnformatted("MENU");
     ImGui::PopStyleColor();
 
-    bool tc_upd = false;
-    std::string tc_line;
+    ImGui::Dummy(ImVec2(0, 4));
+    ImGui::TextColored(th.text_muted, "Import");
     {
-        std::lock_guard<std::mutex> lock(hub.mu);
-        tc_upd = hub.toolchain_update_available;
-        tc_line = hub.toolchain_status;
-        if (tc_line.empty() && !hub.toolchain_current_version.empty())
-            tc_line = "Toolchain " + hub.toolchain_current_version;
+        std::vector<std::string> plats;
+        std::unordered_set<std::string> seen;
+        for (const auto& t : hub.catalog.titles) {
+            if (t.platform.empty() || !seen.insert(t.platform).second) continue;
+            plats.push_back(t.platform);
+        }
+        std::sort(plats.begin(), plats.end(), [](const std::string& a, const std::string& b) {
+            return std::string(platform_display_name(a)) < std::string(platform_display_name(b));
+        });
+        if (!hub.menu_import_platform.empty() &&
+            std::find(plats.begin(), plats.end(), hub.menu_import_platform) == plats.end())
+            hub.menu_import_platform.clear();
+
+        const char* preview = hub.menu_import_platform.empty()
+                                  ? "Select a Platform"
+                                  : platform_display_name(hub.menu_import_platform);
+        bool file_busy = false;
+        {
+            std::lock_guard<std::mutex> lock(hub.file_pick_mu);
+            file_busy = hub.file_pick_busy;
+        }
+        ImGui::BeginDisabled(file_busy || hub.job_running.load());
+        if (ImGui::BeginCombo("##import_platform", preview)) {
+            for (const auto& p : plats) {
+                const bool sel = hub.menu_import_platform == p;
+                if (ImGui::Selectable(platform_display_name(p), sel))
+                    hub.menu_import_platform = p;
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        const bool plat_ok = !hub.menu_import_platform.empty();
+        ImGui::BeginDisabled(!plat_ok);
+        if (ImGui::Button("Import ROM", ImVec2(-1, 0))) {
+            const auto exts = rom_exts_for_platform(hub.catalog, hub.menu_import_platform);
+            begin_file_pick(hub, window, retcomm::hub::FilePickKind::ImportRom,
+                            hub.menu_import_platform, "ROM files", exts, /*allow_many=*/true);
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::Button("Import Save File", ImVec2(-1, 0))) {
+            const auto exts = save_exts_for_platform(hub.catalog, hub.menu_import_platform);
+            begin_file_pick(hub, window, retcomm::hub::FilePickKind::ImportSave,
+                            hub.menu_import_platform, "Save files", exts, /*allow_many=*/false);
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::Button("Import BIOS", ImVec2(-1, 0))) {
+            const auto exts = bios_exts_for_platform(hub.menu_import_platform);
+            begin_file_pick(hub, window, retcomm::hub::FilePickKind::ImportBios,
+                            hub.menu_import_platform, "BIOS files", exts, /*allow_many=*/false);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Copies into your library / saves / BIOS folders for the selected platform, "
+            "then scans when needed. Multi-track discs: select the .cue and .bin tracks together.");
+        ImGui::PopStyleColor();
     }
 
-    ImGui::Dummy(ImVec2(0, 4));
+    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::Separator();
     ImGui::TextColored(th.text_muted, "Settings");
     // Settings stay reachable during Build & Install / scans.
     if (ImGui::Button("Library Settings", ImVec2(-1, 0))) {
@@ -1012,18 +1168,6 @@ void draw_menu_popup(HubModel& hub, const Theme& th) {
     if (ImGui::Button("RomM Sync Settings", ImVec2(-1, 0))) {
         hub.open_romm_settings();
         ImGui::CloseCurrentPopup();
-    }
-
-    ImGui::Dummy(ImVec2(0, 8));
-    {
-        const std::string ver = retcomm::retcomm_app_version();
-        const retcomm::RetcommInstallInfo install = retcomm::retcomm_install_info();
-        ImGui::TextColored(th.text_muted, "Launcher %s", ver.c_str());
-        if (install.self_update_supported && !install.channel_id.empty())
-            ImGui::TextColored(th.text_muted, "Channel %s", install.channel_id.c_str());
-        if (!tc_line.empty()) {
-            ImGui::TextColored(tc_upd ? th.warn : th.text_muted, "%s", tc_line.c_str());
-        }
     }
 
     ImGui::Dummy(ImVec2(0, 10));
@@ -1051,9 +1195,13 @@ void draw_updates_popup(HubModel& hub, const Theme& th) {
 
     const bool busy = hub.job_running.load();
     bool tc_upd = false;
+    std::string tc_line;
     {
         std::lock_guard<std::mutex> lock(hub.mu);
         tc_upd = hub.toolchain_update_available;
+        tc_line = hub.toolchain_status;
+        if (tc_line.empty() && !hub.toolchain_current_version.empty())
+            tc_line = "Toolchain " + hub.toolchain_current_version;
     }
 
     ImGui::Dummy(ImVec2(0, 6));
@@ -1086,6 +1234,17 @@ void draw_updates_popup(HubModel& hub, const Theme& th) {
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndDisabled();
+
+    ImGui::Dummy(ImVec2(0, 10));
+    {
+        const std::string ver = retcomm::retcomm_app_version();
+        const retcomm::RetcommInstallInfo install = retcomm::retcomm_install_info();
+        ImGui::TextColored(th.text_muted, "Launcher %s", ver.c_str());
+        if (install.self_update_supported && !install.channel_id.empty())
+            ImGui::TextColored(th.text_muted, "Channel %s", install.channel_id.c_str());
+        if (!tc_line.empty())
+            ImGui::TextColored(tc_upd ? th.warn : th.text_muted, "%s", tc_line.c_str());
+    }
 
     ImGui::Dummy(ImVec2(0, 10));
     if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
@@ -2209,6 +2368,7 @@ int main(int argc, char** argv) {
         if (hub.request_exit.load()) running = false;
 
         hub.apply_pending_folder_pick();
+        hub.apply_pending_file_pick();
 
         if (hub.pending_startup_update_check && !hub.job_running.load()) {
             hub.pending_startup_update_check = false;
@@ -2291,7 +2451,7 @@ int main(int argc, char** argv) {
         draw_log(hub, th, log_h);
         draw_setup_wizard(hub, th, window);
         draw_setup_scan_prompt(hub, th);
-        draw_menu_popup(hub, th);
+        draw_menu_popup(hub, th, window);
         draw_scans_popup(hub, th);
         draw_updates_popup(hub, th);
 
@@ -2450,7 +2610,44 @@ int main(int argc, char** argv) {
             ImGui::EndPopup();
         }
 
-        if (hub.toolchain_prompt_pending.exchange(false))
+        // Launcher prompt first when both launcher + toolchain updates are pending.
+        // Avoid opening toolchain on the same frame (IsPopupOpen can lag OpenPopup).
+        const bool open_launcher_update = hub.launcher_update_prompt_pending.exchange(false);
+        if (open_launcher_update) ImGui::OpenPopup("RetComM update###launcher_update");
+        if (ImGui::BeginPopupModal("RetComM update###launcher_update", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            std::string cur, latest;
+            {
+                std::lock_guard<std::mutex> lock(hub.mu);
+                cur = hub.launcher_current_version;
+                latest = hub.launcher_latest_tag;
+            }
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 380.f);
+            ImGui::TextWrapped(
+                "A newer RetComM Launcher release is available.\n\n"
+                "Installed: %s\nLatest: %s\n\n"
+                "Update now? The app will download the package and restart.",
+                cur.empty() ? "?" : cur.c_str(),
+                latest.empty() ? "?" : latest.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::Dummy(ImVec2(0, 10));
+            const bool busy = hub.job_running.load();
+            ImGui::BeginDisabled(busy);
+            if (accent_button("Update RetComM", th, ImVec2(160, 0))) {
+                hub.start_job(HubJob::SelfUpdate);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Later", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+            ImGui::EndDisabled();
+            close_modal_on_outside_click();
+            ImGui::EndPopup();
+        }
+
+        if (!open_launcher_update &&
+            !ImGui::IsPopupOpen("RetComM update###launcher_update") &&
+            !hub.launcher_update_prompt_pending.load() &&
+            hub.toolchain_prompt_pending.exchange(false))
             ImGui::OpenPopup("Toolchain update###toolchain_update");
         if (ImGui::BeginPopupModal("Toolchain update###toolchain_update", nullptr,
                                    ImGuiWindowFlags_AlwaysAutoResize)) {

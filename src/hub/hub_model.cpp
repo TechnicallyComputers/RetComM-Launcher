@@ -1111,6 +1111,15 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
             }
             case HubJob::CheckUpdates: {
                 set_status("Checking updates…");
+                // Launcher first so its prompt appears before toolchain when both update.
+                {
+                    auto lc = check_retcomm_update(paths);
+                    append_log(lc.message);
+                    std::lock_guard<std::mutex> lock(mu);
+                    launcher_current_version = lc.current_tag;
+                    launcher_latest_tag = lc.latest_tag;
+                    if (lc.ok && lc.update_available) launcher_update_prompt_pending.store(true);
+                }
                 refresh_rows(true);
                 int game_updates = 0;
                 {
@@ -1609,6 +1618,124 @@ void HubModel::apply_pending_folder_pick() {
         copy_buf(settings.saves_root, sizeof(settings.saves_root), path);
         settings.dirty = true;
         set_status("Saves folder selected");
+    }
+}
+
+void HubModel::apply_pending_file_pick() {
+    FilePickKind kind = FilePickKind::None;
+    std::string platform;
+    std::vector<std::string> picked;
+    {
+        std::lock_guard<std::mutex> lock(file_pick_mu);
+        if (file_pick_paths.empty() || file_pick_kind == FilePickKind::None) return;
+        kind = file_pick_kind;
+        platform = file_pick_platform;
+        picked = std::move(file_pick_paths);
+        file_pick_paths.clear();
+        file_pick_kind = FilePickKind::None;
+        file_pick_platform.clear();
+        file_pick_busy = false;
+    }
+    if (platform.empty() || picked.empty()) return;
+
+    cfg = load_app_config(paths.config_path);
+    std::error_code ec;
+    auto copy_into = [&](const fs::path& dest_dir) -> bool {
+        fs::create_directories(dest_dir, ec);
+        if (ec) {
+            append_log("Import: cannot create " + dest_dir.string() + ": " + ec.message());
+            return false;
+        }
+        int ok = 0;
+        for (const auto& p : picked) {
+            const fs::path src(p);
+            if (!fs::is_regular_file(src, ec)) {
+                append_log("Import: not a file: " + p);
+                continue;
+            }
+            const fs::path dest = dest_dir / src.filename();
+            fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
+            if (ec) {
+                append_log("Import failed (" + src.filename().string() + "): " + ec.message());
+                continue;
+            }
+            append_log("Imported " + dest.string());
+            ++ok;
+        }
+        return ok > 0;
+    };
+
+    if (kind == FilePickKind::ImportRom) {
+        if (cfg.library_root.empty()) {
+            set_status("Import ROM failed — set library_root in Library Settings");
+            return;
+        }
+        fs::path dest_dir =
+            ensure_platform_dir(cfg.library_root, cfg.folders_for_platform(platform));
+        if (dest_dir.empty()) {
+            set_status("Import ROM failed — cannot create platform folder");
+            return;
+        }
+        if (picked.size() >= 2) {
+            std::string set_name;
+            for (const auto& p : picked) {
+                const fs::path src(p);
+                std::string ext = src.extension().string();
+                for (char& c : ext)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (ext == ".cue") {
+                    set_name = src.stem().string();
+                    break;
+                }
+            }
+            if (set_name.empty()) set_name = fs::path(picked.front()).stem().string();
+            if (!set_name.empty()) dest_dir /= set_name;
+        }
+        if (!copy_into(dest_dir)) {
+            set_status("Import ROM failed");
+            return;
+        }
+        scans_platform_filter = platform;
+        pending_scan_missing_rom_id.clear();
+        set_status("Imported ROM — scanning " + platform + "…");
+        start_job(HubJob::ScanRoms);
+        return;
+    }
+
+    if (kind == FilePickKind::ImportSave) {
+        fs::path dest_dir = cfg.saves_dir_for_platform(platform, true);
+        if (dest_dir.empty()) {
+            set_status("Import save failed — set saves_root in Library Settings");
+            return;
+        }
+        if (!copy_into(dest_dir)) {
+            set_status("Import save failed");
+            return;
+        }
+        refresh_rows(false);
+        set_status("Imported save into " + dest_dir.string());
+        return;
+    }
+
+    if (kind == FilePickKind::ImportBios) {
+        if (cfg.bios_root.empty()) {
+            set_status("Import BIOS failed — set bios_root in Library Settings");
+            return;
+        }
+        const fs::path dest_dir =
+            ensure_platform_dir(cfg.bios_root, cfg.folders_for_platform(platform));
+        if (dest_dir.empty()) {
+            set_status("Import BIOS failed — cannot create BIOS folder");
+            return;
+        }
+        if (!copy_into(dest_dir)) {
+            set_status("Import BIOS failed");
+            return;
+        }
+        scans_platform_filter = platform;
+        set_status("Imported BIOS — scanning " + platform + "…");
+        start_job(HubJob::ScanBios);
+        return;
     }
 }
 

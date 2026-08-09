@@ -593,6 +593,35 @@ RetcommInstallInfo retcomm_install_info() {
 #endif
 }
 
+SelfUpdateCheckInfo check_retcomm_update(const Paths& /*paths*/, const SelfUpdateOptions& opts) {
+    SelfUpdateCheckInfo info;
+    info.current_tag = retcomm_app_version();
+    const RetcommInstallInfo install = retcomm_install_info();
+    info.supported = install.self_update_supported;
+    if (!install.self_update_supported) {
+        info.message = install.hint.empty() ? unsupported_hint() : install.hint;
+        return info;
+    }
+    const std::string slug = retcomm_github_slug();
+    std::string err;
+    GhRelease rel;
+    if (!fetch_latest_release(slug, rel, &err, opts.allow_prerelease)) {
+        info.message = "GitHub release check failed for " + slug + ": " + err;
+        return info;
+    }
+    info.ok = true;
+    info.latest_tag = rel.tag;
+    info.update_available =
+        normalize_tag(info.current_tag) != normalize_tag(info.latest_tag);
+    if (info.update_available) {
+        info.message = "RetComM Launcher update available: " + info.current_tag + " → " +
+                       info.latest_tag;
+    } else {
+        info.message = "RetComM Launcher is up to date (" + info.latest_tag + ").";
+    }
+    return info;
+}
+
 SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions& opts) {
     SelfUpdateResult result;
     result.current_tag = retcomm_app_version();

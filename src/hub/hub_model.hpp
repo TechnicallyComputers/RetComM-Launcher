@@ -263,6 +263,14 @@ enum class FolderPickTarget : int {
     SavesRoot,
 };
 
+// Native file dialog for Menu → Import (callback may be off-thread).
+enum class FilePickKind : int {
+    None = 0,
+    ImportRom,
+    ImportSave,
+    ImportBios,
+};
+
 // Center library panel: platforms list → titles for a platform (or all).
 enum class LibraryNav : int {
     Platforms = 0,
@@ -326,7 +334,11 @@ struct HubModel {
 
     // Shared cmake-clang-v1 toolchain update prompt (launch / Check Updates).
     std::atomic<bool> toolchain_prompt_pending{false};
-    // After idle: CheckUpdates (installed games + toolchain).
+    // RetComM launcher self-update prompt (shown before toolchain on startup).
+    std::atomic<bool> launcher_update_prompt_pending{false};
+    std::string launcher_current_version;
+    std::string launcher_latest_tag;
+    // After idle: CheckUpdates (launcher → games → toolchain).
     bool pending_startup_update_check = false;
     // Play preflight: update available → confirm; else launch this id on main thread.
     std::atomic<bool> launch_update_prompt_pending{false};
@@ -348,6 +360,17 @@ struct HubModel {
     FolderPickTarget folder_pick_target = FolderPickTarget::None;
     std::string folder_pick_path;
     bool folder_pick_busy = false;
+
+    // Menu → Import platform + file picker.
+    std::string menu_import_platform; // empty = none selected
+    std::mutex file_pick_mu;
+    FilePickKind file_pick_kind = FilePickKind::None;
+    std::string file_pick_platform;
+    std::vector<std::string> file_pick_paths; // set by dialog callback
+    bool file_pick_busy = false;
+    // Filter strings must outlive SDL_ShowOpenFileDialog until the callback.
+    std::string file_pick_filter_name;
+    std::string file_pick_filter_pattern;
 
     void refresh_rows(bool check_updates);
     void append_log(const std::string& line);
@@ -417,6 +440,8 @@ struct HubModel {
 
     // Apply a completed folder pick into settings drafts (call from UI thread).
     void apply_pending_folder_pick();
+    // Copy Menu → Import picks into library/bios/saves trees; may start a scan.
+    void apply_pending_file_pick();
 };
 
 } // namespace retcomm::hub

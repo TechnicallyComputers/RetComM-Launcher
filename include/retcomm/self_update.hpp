@@ -63,4 +63,17 @@ struct SelfUpdateResult {
 // Unsupported layouts (dev binaries, loose copies) fail with a clear hint.
 SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions& opts = {});
 
+// Query-only: compare the running launcher version to the latest GitHub release
+// (no download). Unsupported install channels report update_available=false.
+struct SelfUpdateCheckInfo {
+    bool ok = false;
+    bool update_available = false;
+    bool supported = false;
+    std::string current_tag;
+    std::string latest_tag;
+    std::string message;
+};
+SelfUpdateCheckInfo check_retcomm_update(const Paths& paths,
+                                         const SelfUpdateOptions& opts = {});
+
 } // namespace retcomm
