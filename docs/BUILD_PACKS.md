@@ -45,10 +45,11 @@ cmake-clang-v1-<os>/
 
 RetComM prepends `<pack>/bin` (or the single nested folder’s `bin/`) to `PATH`
 for configure/build (Windows: `CreateProcess` + env block — not `cmd /C` quote
-soup). It sets `ZLIB_ROOT`, `RETCOMM_TOOLCHAIN_DIR`, and `SDL3_DIR` when the
-pack ships CMake CONFIG — **not** pack-root `CMAKE_PREFIX_PATH` (llvm-mingw’s
-top-level `include/` poisons libc++). Ambient pack prefixes from older
-`env.bat` are stripped for cmake children. On Windows it forces `-G Ninja` when
+soup). It sets `RETCOMM_TOOLCHAIN_DIR`, and when present `ZLIB_ROOT` /
+`SDL3_DIR` pointing at pack **`deps/`** (1.0.9+) or legacy pack-root paths —
+**not** pack-root `CMAKE_PREFIX_PATH` (llvm-mingw’s top-level `include/`
+poisons libc++). Ambient pack prefixes from older `env.bat` are stripped for
+cmake children. On Windows it forces `-G Ninja` when
 `ninja.exe` is present (wiping a stale NMake/`Visual Studio` `CMakeCache.txt`
 if needed) and passes `-DCMAKE_C_COMPILER` / `-DCMAKE_CXX_COMPILER` to the
 pack’s `clang` / `clang++`. Prefer **downloading** `cmake-clang-v1` from

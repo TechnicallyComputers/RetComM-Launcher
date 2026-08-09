@@ -1585,8 +1585,9 @@ static std::string filter_pack_from_prefix_path(const std::string& cur,
 }
 
 // Pack root (parent of bin/) for find_package(ZLIB/SDL3) without CMAKE_PREFIX_PATH.
-// Putting the llvm-mingw pack root on CMAKE_PREFIX_PATH exposes mingw C headers
-// ahead of libc++ and breaks <cmath>/<cwchar> (Windows CTR/MotK builds).
+// Host deps live under pack/deps/ (1.0.9+). Never put the llvm-mingw pack root
+// on CMAKE_PREFIX_PATH / ZLIB_ROOT when that would -isystem mingw include/
+// ahead of libc++ (<cmath>/<cwchar> breaks on Windows game builds).
 std::vector<std::pair<std::string, std::string>> toolchain_cmake_env(
     const fs::path& path_prefix) {
     std::vector<std::pair<std::string, std::string>> out;
@@ -1600,17 +1601,38 @@ std::vector<std::pair<std::string, std::string>> toolchain_cmake_env(
     const char sep = ':';
     const std::string pack_s = pack.string();
 #endif
-    out.emplace_back("ZLIB_ROOT", pack_s);
     out.emplace_back("RETCOMM_TOOLCHAIN_DIR", pack_s);
 
     std::error_code ec;
-    const fs::path sdl3_cfg = pack / "lib" / "cmake" / "SDL3" / "SDL3Config.cmake";
-    const fs::path sdl3_cfg_alt = pack / "lib" / "cmake" / "SDL3" / "SDL3-config.cmake";
-    if (fs::is_regular_file(sdl3_cfg, ec) || fs::is_regular_file(sdl3_cfg_alt, ec)) {
+    const fs::path deps = pack / "deps";
+    const bool deps_zlib = fs::is_regular_file(deps / "include" / "zlib.h", ec);
+    const bool pack_zlib = fs::is_regular_file(pack / "include" / "zlib.h", ec);
+    if (deps_zlib) {
 #if defined(_WIN32)
-        out.emplace_back("SDL3_DIR", path_to_utf8(pack / "lib" / "cmake" / "SDL3"));
+        out.emplace_back("ZLIB_ROOT", path_to_utf8(deps));
 #else
-        out.emplace_back("SDL3_DIR", (pack / "lib" / "cmake" / "SDL3").string());
+        out.emplace_back("ZLIB_ROOT", deps.string());
+#endif
+    } else if (pack_zlib) {
+        // Legacy 1.0.3–1.0.8 layout (Windows: can still poison libc++).
+        out.emplace_back("ZLIB_ROOT", pack_s);
+    }
+
+    const fs::path sdl3_deps = deps / "lib" / "cmake" / "SDL3";
+    const fs::path sdl3_pack = pack / "lib" / "cmake" / "SDL3";
+    fs::path sdl3_dir;
+    if (fs::is_regular_file(sdl3_deps / "SDL3Config.cmake", ec) ||
+        fs::is_regular_file(sdl3_deps / "SDL3-config.cmake", ec)) {
+        sdl3_dir = sdl3_deps;
+    } else if (fs::is_regular_file(sdl3_pack / "SDL3Config.cmake", ec) ||
+               fs::is_regular_file(sdl3_pack / "SDL3-config.cmake", ec)) {
+        sdl3_dir = sdl3_pack;
+    }
+    if (!sdl3_dir.empty()) {
+#if defined(_WIN32)
+        out.emplace_back("SDL3_DIR", path_to_utf8(sdl3_dir));
+#else
+        out.emplace_back("SDL3_DIR", sdl3_dir.string());
 #endif
     }
 
