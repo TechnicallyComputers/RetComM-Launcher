@@ -1545,7 +1545,48 @@ std::string path_with_prefix(const fs::path& path_prefix) {
     return out;
 }
 
-// Pack root (parent of bin/) for find_package(ZLIB/SDL3) via CMAKE_PREFIX_PATH.
+static bool path_eq_ci(const std::string& a, const std::string& b) {
+#if defined(_WIN32)
+    if (a.size() != b.size()) return false;
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(a[i])) !=
+            std::tolower(static_cast<unsigned char>(b[i])))
+            return false;
+    }
+    return true;
+#else
+    return a == b;
+#endif
+}
+
+// Drop pack-root entries from CMAKE_PREFIX_PATH. llvm-mingw's top-level
+// include/math.h (etc.) must not precede libc++'s wrapping headers.
+static std::string filter_pack_from_prefix_path(const std::string& cur,
+                                                const std::string& pack_s, char sep) {
+    if (cur.empty() || pack_s.empty()) return cur;
+    std::string out;
+    std::string part;
+    auto flush = [&]() {
+        if (part.empty()) return;
+        if (!path_eq_ci(part, pack_s)) {
+            if (!out.empty()) out.push_back(sep);
+            out += part;
+        }
+        part.clear();
+    };
+    for (char c : cur) {
+        if (c == sep)
+            flush();
+        else
+            part.push_back(c);
+    }
+    flush();
+    return out;
+}
+
+// Pack root (parent of bin/) for find_package(ZLIB/SDL3) without CMAKE_PREFIX_PATH.
+// Putting the llvm-mingw pack root on CMAKE_PREFIX_PATH exposes mingw C headers
+// ahead of libc++ and breaks <cmath>/<cwchar> (Windows CTR/MotK builds).
 std::vector<std::pair<std::string, std::string>> toolchain_cmake_env(
     const fs::path& path_prefix) {
     std::vector<std::pair<std::string, std::string>> out;
@@ -1561,26 +1602,24 @@ std::vector<std::pair<std::string, std::string>> toolchain_cmake_env(
 #endif
     out.emplace_back("ZLIB_ROOT", pack_s);
     out.emplace_back("RETCOMM_TOOLCHAIN_DIR", pack_s);
-    std::string prefix = pack_s;
-    if (const char* cur = std::getenv("CMAKE_PREFIX_PATH"); cur && *cur) {
-        bool have = false;
-        std::string part;
-        for (size_t i = 0; i <= std::strlen(cur); ++i) {
-            if (i == std::strlen(cur) || cur[i] == sep) {
-                if (part == pack_s) have = true;
-                part.clear();
-            } else {
-                part.push_back(cur[i]);
-            }
-        }
-        if (!have) {
-            prefix += sep;
-            prefix += cur;
-        } else {
-            prefix = cur;
-        }
+
+    std::error_code ec;
+    const fs::path sdl3_cfg = pack / "lib" / "cmake" / "SDL3" / "SDL3Config.cmake";
+    const fs::path sdl3_cfg_alt = pack / "lib" / "cmake" / "SDL3" / "SDL3-config.cmake";
+    if (fs::is_regular_file(sdl3_cfg, ec) || fs::is_regular_file(sdl3_cfg_alt, ec)) {
+#if defined(_WIN32)
+        out.emplace_back("SDL3_DIR", path_to_utf8(pack / "lib" / "cmake" / "SDL3"));
+#else
+        out.emplace_back("SDL3_DIR", (pack / "lib" / "cmake" / "SDL3").string());
+#endif
     }
-    out.emplace_back("CMAKE_PREFIX_PATH", prefix);
+
+    // Strip ambient pack-root prefixes from env.bat / user Path activation so
+    // cmake children never inherit the libc++ poison path.
+    const char* cur = std::getenv("CMAKE_PREFIX_PATH");
+    const std::string filtered =
+        filter_pack_from_prefix_path(cur ? cur : "", pack_s, sep);
+    out.emplace_back("CMAKE_PREFIX_PATH", filtered);
     return out;
 }
 
