@@ -283,25 +283,33 @@ const LibraryTitleBind* LibraryIndex::find_title(const std::string& title_id) co
 
 fs::path LibraryIndex::preferred_rom(const std::string& title_id) const {
     if (const auto* t = find_title(title_id)) {
-        // Prefer best-ranked bound path (.cue first for discs).
-        std::string best = t->preferred_path;
-        int best_rank = best.empty() ? 100 : rom_path_rank(lower_ext_str(best));
+        // Rank candidates (.cue first for discs), skip paths gone from disk.
+        std::vector<std::string> ranked;
+        ranked.reserve(t->paths.size() + 1);
+        if (!t->preferred_path.empty()) ranked.push_back(t->preferred_path);
         for (const auto& p : t->paths) {
-            const int r = rom_path_rank(lower_ext_str(p));
-            if (best.empty() || r < best_rank || (r == best_rank && p < best)) {
-                best = p;
-                best_rank = r;
+            if (std::find(ranked.begin(), ranked.end(), p) == ranked.end())
+                ranked.push_back(p);
+        }
+        std::sort(ranked.begin(), ranked.end(), [](const std::string& a, const std::string& b) {
+            const int ra = rom_path_rank(lower_ext_str(a));
+            const int rb = rom_path_rank(lower_ext_str(b));
+            if (ra != rb) return ra < rb;
+            return a < b;
+        });
+
+        std::error_code ec;
+        for (const auto& best : ranked) {
+            if (best.empty()) continue;
+            fs::path preferred = best;
+            if (is_disc_dump_ext(lower_ext_str(preferred))) {
+                const fs::path cue = companion_cue_path(preferred);
+                // Disc Play stages .cue only — never surface a naked .bin/.img.
+                if (!cue.empty() && fs::is_regular_file(cue, ec)) return cue;
+                continue;
             }
+            if (fs::is_regular_file(preferred, ec)) return preferred;
         }
-        if (best.empty()) return {};
-        fs::path preferred = best;
-        if (is_disc_dump_ext(lower_ext_str(preferred))) {
-            const fs::path cue = companion_cue_path(preferred);
-            // Disc Play stages .cue only — never surface a naked .bin/.img.
-            if (!cue.empty()) return cue;
-            return {};
-        }
-        return preferred;
     }
     return {};
 }

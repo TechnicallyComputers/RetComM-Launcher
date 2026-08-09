@@ -368,6 +368,10 @@ struct HubModel {
     // Build & Install with no local ROM → quick scan / RomM download chooser.
     bool show_missing_rom_prompt = false;
     std::string missing_rom_prompt_id;
+    // If the library DB still points at a missing dump, purge stale rows for the
+    // title's platform and open the missing-ROM chooser. Returns true when the
+    // caller must not start Install (prompt shown or still no ROM).
+    bool prepare_build_rom_or_prompt(const std::string& title_id);
     // Set when Quick Scan is started from the missing-ROM prompt; after scan,
     // if still unbound, open_rom_folder_prompt_pending asks to open the folder.
     std::string pending_scan_missing_rom_id;

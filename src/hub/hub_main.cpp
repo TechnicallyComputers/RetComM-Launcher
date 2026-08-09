@@ -1161,7 +1161,7 @@ void draw_scans_popup(HubModel& hub, const Theme& th) {
     }
     if (ImGui::Button("Full Rescan", ImVec2(-1, 0)))
         ImGui::OpenPopup("Full rescan###confirm_full_rescan");
-    if (ImGui::Button("Purge Missing Files", ImVec2(-1, 0)))
+    if (ImGui::Button("Remove Missing Files From DB", ImVec2(-1, 0)))
         hub.start_job(HubJob::PurgeMissingFiles);
     ImGui::EndDisabled();
 
@@ -1358,12 +1358,10 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
         ImGui::BeginDisabled(block_title_mutate || (!row.has_rom && !row.has_rom_identity));
         if (accent_button(row.install_dir_present ? "Retry Build & Install" : "Build & Install", th,
                           ImVec2(-1, 0))) {
-            if (!row.has_rom && row.has_rom_identity) {
-                hub.missing_rom_prompt_id = row.id;
-                hub.show_missing_rom_prompt = true;
-            } else {
+            // Purges stale DB paths when the matched dump is gone, then prompts
+            // for Quick Scan / RomM (same chooser as a never-matched title).
+            if (!hub.prepare_build_rom_or_prompt(row.id))
                 hub.start_job(HubJob::Install, row.id);
-            }
         }
         // Wine only when there is no native release path for this OS.
         if (row.can_wine_install && !has_native_install) {

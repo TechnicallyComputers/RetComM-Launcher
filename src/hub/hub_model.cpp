@@ -743,10 +743,34 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     break;
                 }
                 // Local builds need a verified ROM; hub confirm sets fetch_romm_first.
-                if (!prebuilt && t->build.enabled && fetch_romm_first) {
-                    if (!ensure_rom_via_romm(*t)) {
-                        set_status("Install failed: " + title_id);
+                if (!prebuilt && t->build.enabled) {
+                    library = load_library_index(paths.library_index_path);
+                    std::error_code rom_ec;
+                    fs::path rom = library.preferred_rom(title_id);
+                    if ((rom.empty() || !fs::is_regular_file(rom, rom_ec)) && !fetch_romm_first) {
+                        // Stale index bind: drop missing paths and ask the UI to prompt.
+                        const auto* bind = library.find_title(title_id);
+                        if (bind && (!bind->paths.empty() || !bind->preferred_path.empty())) {
+                            append_log("Library DB path missing for " + title_id +
+                                       " — removing missing files from index");
+                            auto pr = purge_missing_library_files(library, t->platform);
+                            save_library_index(paths.library_index_path, library);
+                            append_log("Removed " + std::to_string(pr.removed_files) +
+                                       " missing file(s) from library DB");
+                        }
+                        {
+                            std::lock_guard<std::mutex> lock(mu);
+                            missing_rom_prompt_id = title_id;
+                            show_missing_rom_prompt = true;
+                        }
+                        set_status("ROM missing from disk — scan or download from RomM");
                         break;
+                    }
+                    if (fetch_romm_first) {
+                        if (!ensure_rom_via_romm(*t)) {
+                            set_status("Install failed: " + title_id);
+                            break;
+                        }
                     }
                 }
                 InstallOptions opts;
@@ -994,13 +1018,13 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
             }
             case HubJob::PurgeMissingFiles: {
                 const std::string plat_filter = scans_platform_filter;
-                set_status(plat_filter.empty() ? "Purging missing library files…"
-                                               : ("Purging missing [" + plat_filter + "]…"));
+                set_status(plat_filter.empty() ? "Removing missing files from DB…"
+                                               : ("Removing missing [" + plat_filter + "] from DB…"));
                 library = load_library_index(paths.library_index_path);
                 auto pr = purge_missing_library_files(library, plat_filter);
                 save_library_index(paths.library_index_path, library);
                 std::ostringstream oss;
-                oss << "Purge missing: removed " << pr.removed_files << " ROM file(s)";
+                oss << "Remove missing from DB: removed " << pr.removed_files << " ROM file(s)";
                 if (pr.removed_title_binds)
                     oss << ", " << pr.removed_title_binds << " title bind(s)";
                 if (!plat_filter.empty()) oss << " [platform=" << plat_filter << "]";
@@ -1015,16 +1039,17 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     auto bpr = purge_missing_bios_files(bios, catalog, plat_filter);
                     save_bios_index(paths.bios_index_path, bios);
                     std::ostringstream boss;
-                    boss << "Purge missing BIOS: removed " << bpr.removed_files << " file(s)";
+                    boss << "Remove missing BIOS from DB: removed " << bpr.removed_files
+                         << " file(s)";
                     if (bpr.removed_title_binds)
                         boss << ", " << bpr.removed_title_binds << " title bind(s)";
                     append_log(boss.str());
                     pr.removed_files += bpr.removed_files;
                 }
                 set_status(pr.removed_files == 0
-                               ? "Purge complete — nothing missing"
-                               : ("Purge complete — removed " + std::to_string(pr.removed_files) +
-                                  " missing file(s)"));
+                               ? "DB cleanup complete — nothing missing"
+                               : ("DB cleanup complete — removed " +
+                                  std::to_string(pr.removed_files) + " missing file(s)"));
                 break;
             }
             case HubJob::ScanBios:
@@ -1787,6 +1812,51 @@ bool HubModel::create_title_save(const std::string& title_id, std::string* error
     set_status("Created save " + created.save.label);
     app_state = load_app_state(paths.state_path);
     refresh_rows(false);
+    return true;
+}
+
+bool HubModel::prepare_build_rom_or_prompt(const std::string& title_id) {
+    const Title* t = catalog.find(title_id);
+    if (!t) {
+        append_log("unknown title: " + title_id);
+        set_status("Unknown title");
+        return true;
+    }
+
+    library = load_library_index(paths.library_index_path);
+    std::error_code ec;
+    fs::path rom = library.preferred_rom(title_id);
+    if (!rom.empty() && fs::is_regular_file(rom, ec)) return false; // ready to build
+
+    const auto* bind = library.find_title(title_id);
+    const bool had_stale_bind =
+        bind && (!bind->paths.empty() || !bind->preferred_path.empty());
+    if (had_stale_bind) {
+        append_log("Library DB path missing for " + title_id +
+                   " — removing missing files from index [" + t->platform + "]");
+        auto pr = purge_missing_library_files(library, t->platform);
+        save_library_index(paths.library_index_path, library);
+        std::ostringstream oss;
+        oss << "Removed " << pr.removed_files << " missing file(s) from library DB";
+        if (pr.removed_title_binds)
+            oss << ", " << pr.removed_title_binds << " title bind(s)";
+        append_log(oss.str());
+        rom = library.preferred_rom(title_id);
+        if (!rom.empty() && fs::is_regular_file(rom, ec)) {
+            refresh_rows(false);
+            return false;
+        }
+    }
+
+    refresh_rows(false);
+    if (!t->has_rom_identity()) {
+        set_status("No verified ROM for " + title_id);
+        return true;
+    }
+    missing_rom_prompt_id = title_id;
+    show_missing_rom_prompt = true;
+    set_status(had_stale_bind ? "ROM missing from disk — scan or download from RomM"
+                              : "No verified ROM — scan or download from RomM");
     return true;
 }
 
