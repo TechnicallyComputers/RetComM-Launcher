@@ -1034,6 +1034,15 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
             case HubJob::CheckUpdates: {
                 set_status("Checking updates…");
                 refresh_rows(true);
+                int game_updates = 0;
+                {
+                    std::lock_guard<std::mutex> lock(mu);
+                    for (const auto& r : rows)
+                        if (r.update_available) ++game_updates;
+                }
+                if (game_updates > 0) {
+                    append_log(std::to_string(game_updates) + " game update(s) available");
+                }
                 {
                     auto tc = check_toolchain_update(paths);
                     append_log(tc.message);
@@ -1044,7 +1053,10 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     toolchain_status = tc.message;
                     if (tc.update_available) toolchain_prompt_pending.store(true);
                 }
-                set_status("Update check complete");
+                if (game_updates > 0)
+                    set_status(std::to_string(game_updates) + " game update(s) available");
+                else
+                    set_status("Update check complete");
                 job_running = false;
                 job = HubJob::None;
                 return;

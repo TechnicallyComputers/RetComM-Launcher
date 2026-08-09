@@ -321,7 +321,8 @@ struct HubModel {
 
     // Shared cmake-clang-v1 toolchain update prompt (launch / Check Updates).
     std::atomic<bool> toolchain_prompt_pending{false};
-    bool pending_startup_toolchain_check = false;
+    // After idle: CheckUpdates (installed games + toolchain).
+    bool pending_startup_update_check = false;
     std::string toolchain_current_version;
     std::string toolchain_latest_tag;
     std::string toolchain_status; // short UI line
@@ -353,9 +354,9 @@ struct HubModel {
                    bool fetch_romm_first = false);
     void join_worker();
 
-    // Build & Install with no local ROM → confirm RomM download modal.
-    bool show_romm_install_prompt = false;
-    std::string romm_install_prompt_id;
+    // Build & Install with no local ROM → quick scan / RomM download chooser.
+    bool show_missing_rom_prompt = false;
+    std::string missing_rom_prompt_id;
 
     void open_settings();
     void open_setup();
