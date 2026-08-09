@@ -270,61 +270,6 @@ bool good_button(const char* label, const Theme& th, const ImVec2& size = ImVec2
     return clicked;
 }
 
-void draw_hub_menu(HubModel& hub, const Theme& th) {
-    const bool busy = hub.job_running.load();
-    // Settings stay reachable during Build & Install / scans.
-    if (ImGui::MenuItem("Library Settings")) hub.open_settings();
-    if (ImGui::MenuItem("RomM Sync Settings")) hub.open_romm_settings();
-    ImGui::Separator();
-    ImGui::BeginDisabled(busy);
-    if (ImGui::MenuItem("Check Updates")) hub.start_job(HubJob::CheckUpdates);
-    if (ImGui::MenuItem("Refresh Catalog")) hub.start_job(HubJob::RefreshCatalog);
-    if (ImGui::MenuItem("Refresh Library")) {
-        hub.refresh_rows(false);
-        hub.set_status("Library refreshed");
-    }
-    if (ImGui::MenuItem("Clean Unlisted Installs…")) {
-        const size_t n = hub.refresh_orphan_installs();
-        if (n == 0) {
-            hub.set_status("No installs outside the catalog");
-            hub.append_log("Orphan scan: none");
-        } else {
-            hub.orphan_prompt_pending.store(true);
-        }
-    }
-    ImGui::Separator();
-    {
-        const retcomm::RetcommInstallInfo install = retcomm::retcomm_install_info();
-        ImGui::BeginDisabled(!install.self_update_supported);
-        if (ImGui::MenuItem("Update RetComM")) hub.start_job(HubJob::SelfUpdate);
-        ImGui::EndDisabled();
-    }
-    {
-        bool tc_upd = false;
-        std::string tc_line;
-        {
-            std::lock_guard<std::mutex> lock(hub.mu);
-            tc_upd = hub.toolchain_update_available;
-            tc_line = hub.toolchain_status;
-            if (tc_line.empty() && !hub.toolchain_current_version.empty())
-                tc_line = "Toolchain " + hub.toolchain_current_version;
-        }
-        if (ImGui::MenuItem(tc_upd ? "Update Toolchain (available)" : "Update Toolchain"))
-            hub.start_job(HubJob::UpdateToolchain);
-        ImGui::Separator();
-        {
-            // Binary compile version is authoritative (not launcher.json).
-            const std::string ver = retcomm::retcomm_app_version();
-            const retcomm::RetcommInstallInfo install = retcomm::retcomm_install_info();
-            ImGui::TextColored(th.text_muted, "Launcher %s", ver.c_str());
-            if (install.self_update_supported && !install.channel_id.empty())
-                ImGui::TextColored(th.text_muted, "Channel %s", install.channel_id.c_str());
-            if (!tc_line.empty()) ImGui::TextColored(th.text_muted, "%s", tc_line.c_str());
-        }
-    }
-    ImGui::EndDisabled();
-}
-
 void draw_marquee(HubModel& hub, const Theme& th, float width) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
@@ -375,14 +320,10 @@ void draw_marquee(HubModel& hub, const Theme& th, float width) {
             hub.settings.dirty = false;
             hub.romm_settings.dirty = false;
         } else {
-            ImGui::OpenPopup("##hub_menu");
+            hub.pending_open_menu = true;
         }
     }
     ImGui::PopStyleVar();
-    if (!in_settings && ImGui::BeginPopup("##hub_menu")) {
-        draw_hub_menu(hub, th);
-        ImGui::EndPopup();
-    }
 
     ImGui::SetCursorScreenPos(ImVec2(p0.x, p0.y + h + 8.f));
 }
@@ -1008,6 +949,113 @@ void draw_detail_romm_sync_popup(HubModel& hub, const TitleRow& row, const Theme
     ImGui::EndPopup();
 }
 
+void draw_menu_popup(HubModel& hub, const Theme& th) {
+    if (hub.pending_open_menu) {
+        ImGui::OpenPopup("Menu###hub_menu_panel");
+        hub.pending_open_menu = false;
+    }
+
+    if (!ImGui::IsPopupOpen("Menu###hub_menu_panel")) return;
+    constexpr float kMenuW = 420.f;
+    center_modal_next();
+    // Fixed width — AlwaysAutoResize alone starts wide then shrinks on the next frame.
+    ImGui::SetNextWindowSizeConstraints(ImVec2(kMenuW, 0.f), ImVec2(kMenuW, FLT_MAX));
+    ImGui::SetNextWindowSize(ImVec2(kMenuW, 0.f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Menu###hub_menu_panel", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextUnformatted("MENU");
+    ImGui::PopStyleColor();
+
+    const bool busy = hub.job_running.load();
+    bool tc_upd = false;
+    std::string tc_line;
+    {
+        std::lock_guard<std::mutex> lock(hub.mu);
+        tc_upd = hub.toolchain_update_available;
+        tc_line = hub.toolchain_status;
+        if (tc_line.empty() && !hub.toolchain_current_version.empty())
+            tc_line = "Toolchain " + hub.toolchain_current_version;
+    }
+
+    ImGui::Dummy(ImVec2(0, 4));
+    ImGui::TextColored(th.text_muted, "Library");
+    ImGui::BeginDisabled(busy);
+    if (ImGui::Button("Refresh Library", ImVec2(-1, 0))) {
+        hub.refresh_rows(false);
+        hub.set_status("Library refreshed");
+        ImGui::CloseCurrentPopup();
+    }
+    if (ImGui::Button("Refresh Catalog", ImVec2(-1, 0))) {
+        hub.start_job(HubJob::RefreshCatalog);
+        ImGui::CloseCurrentPopup();
+    }
+    if (ImGui::Button("Clean Unlisted Installs…", ImVec2(-1, 0))) {
+        const size_t n = hub.refresh_orphan_installs();
+        if (n == 0) {
+            hub.set_status("No installs outside the catalog");
+            hub.append_log("Orphan scan: none");
+        } else {
+            hub.orphan_prompt_pending.store(true);
+        }
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled();
+
+    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::Separator();
+    ImGui::TextColored(th.text_muted, "Updates");
+    ImGui::BeginDisabled(busy);
+    if (ImGui::Button("Check Game Updates", ImVec2(-1, 0))) {
+        hub.start_job(HubJob::CheckUpdates);
+        ImGui::CloseCurrentPopup();
+    }
+    {
+        const retcomm::RetcommInstallInfo install = retcomm::retcomm_install_info();
+        ImGui::BeginDisabled(!install.self_update_supported);
+        if (ImGui::Button("Update RetComM", ImVec2(-1, 0))) {
+            hub.start_job(HubJob::SelfUpdate);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+    }
+    if (ImGui::Button(tc_upd ? "Update Toolchain (available)" : "Update Toolchain",
+                      ImVec2(-1, 0))) {
+        hub.start_job(HubJob::UpdateToolchain);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled();
+
+    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::Separator();
+    ImGui::TextColored(th.text_muted, "Settings");
+    // Settings stay reachable during Build & Install / scans.
+    if (ImGui::Button("Library Settings", ImVec2(-1, 0))) {
+        hub.open_settings();
+        ImGui::CloseCurrentPopup();
+    }
+    if (ImGui::Button("RomM Sync Settings", ImVec2(-1, 0))) {
+        hub.open_romm_settings();
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::Dummy(ImVec2(0, 8));
+    {
+        const std::string ver = retcomm::retcomm_app_version();
+        const retcomm::RetcommInstallInfo install = retcomm::retcomm_install_info();
+        ImGui::TextColored(th.text_muted, "Launcher %s", ver.c_str());
+        if (install.self_update_supported && !install.channel_id.empty())
+            ImGui::TextColored(th.text_muted, "Channel %s", install.channel_id.c_str());
+        if (!tc_line.empty()) ImGui::TextColored(th.text_muted, "%s", tc_line.c_str());
+    }
+
+    ImGui::Dummy(ImVec2(0, 10));
+    if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+    close_modal_on_outside_click();
+    ImGui::EndPopup();
+}
+
 void draw_scans_popup(HubModel& hub, const Theme& th) {
     if (hub.pending_open_scans) {
         ImGui::OpenPopup("Scans###scan_panel");
@@ -1017,96 +1065,86 @@ void draw_scans_popup(HubModel& hub, const Theme& th) {
     // Only set next-window pos/size when this popup will actually begin — otherwise
     // SetNextWindow* leaks onto the following modal in the frame.
     if (!ImGui::IsPopupOpen("Scans###scan_panel")) return;
+    constexpr float kScansW = 420.f;
     center_modal_next();
-    ImGui::SetNextWindowSize(ImVec2(440.f, 0.f), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(kScansW, 0.f), ImVec2(kScansW, FLT_MAX));
+    ImGui::SetNextWindowSize(ImVec2(kScansW, 0.f), ImGuiCond_Appearing);
     if (!ImGui::BeginPopupModal("Scans###scan_panel", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         return;
 
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
     ImGui::TextUnformatted("SCANS");
     ImGui::PopStyleColor();
-    ImGui::TextWrapped(
-        "Scan uses the saved library/BIOS roots and RomM settings. Save path changes in "
-        "Library Settings or RomM Sync Settings before scanning. Normal scan reuses the "
-        "index; full rescan clears caches and re-hashes everything.");
-    ImGui::Separator();
 
     const bool busy = hub.job_running.load();
 
-    ImGui::TextColored(th.text_muted, "Library");
-    ImGui::BeginDisabled(busy);
-    if (ImGui::Button("Scan ROMs", ImVec2(-1, 0))) hub.start_job(HubJob::ScanRoms);
-    if (ImGui::Button("Full Rescan ROMs", ImVec2(-1, 0)))
-        ImGui::OpenPopup("Full ROM rescan###confirm_full_rom_rescan");
-    if (ImGui::Button("Scan BIOS", ImVec2(-1, 0))) hub.start_job(HubJob::ScanBios);
-    if (ImGui::Button("Full Rescan BIOS", ImVec2(-1, 0)))
-        ImGui::OpenPopup("Full BIOS rescan###confirm_full_bios_rescan");
-    ImGui::EndDisabled();
+    // Catalog platforms that have titles (sorted).
+    std::vector<std::string> plats;
+    {
+        std::map<std::string, bool> seen;
+        for (const auto& t : hub.catalog.titles) {
+            if (t.platform.empty()) continue;
+            if (seen.emplace(t.platform, true).second) plats.push_back(t.platform);
+        }
+        std::sort(plats.begin(), plats.end(), [](const std::string& a, const std::string& b) {
+            return std::string(platform_display_name(a)) < std::string(platform_display_name(b));
+        });
+    }
+    // Drop a stale filter if the catalog no longer has that platform.
+    if (!hub.scans_platform_filter.empty() &&
+        std::find(plats.begin(), plats.end(), hub.scans_platform_filter) == plats.end())
+        hub.scans_platform_filter.clear();
+
+    ImGui::Dummy(ImVec2(0, 4));
+    ImGui::TextColored(th.text_muted, "Platform");
+    {
+        const char* preview = hub.scans_platform_filter.empty()
+                                  ? "All Platforms"
+                                  : platform_display_name(hub.scans_platform_filter);
+        ImGui::BeginDisabled(busy);
+        if (ImGui::BeginCombo("##scan_platform", preview)) {
+            if (ImGui::Selectable("All Platforms", hub.scans_platform_filter.empty()))
+                hub.scans_platform_filter.clear();
+            for (const auto& p : plats) {
+                const bool sel = hub.scans_platform_filter == p;
+                if (ImGui::Selectable(platform_display_name(p), sel))
+                    hub.scans_platform_filter = p;
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::EndDisabled();
+    }
 
     ImGui::Dummy(ImVec2(0, 10));
-    ImGui::Separator();
-    ImGui::TextColored(th.text_muted, "RomM");
-    {
-        const bool can_scan =
-            !busy && hub.cfg.romm.enabled() && !hub.cfg.romm.api_token.empty();
-        ImGui::BeginDisabled(!can_scan);
-        if (ImGui::Button("Scan RomM library", ImVec2(-1, 0)))
-            hub.start_job(HubJob::ScanRommRoms);
-        ImGui::EndDisabled();
-        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-        if (!hub.cfg.romm.enabled() || hub.cfg.romm.api_token.empty())
-            ImGui::TextWrapped("RomM not configured — set URL + API key in RomM Sync Settings.");
-        else
-            ImGui::TextWrapped(
-                "Match catalog rom_identity against your RomM library (ON ROMM chip).");
-        ImGui::PopStyleColor();
-
-        ImGui::Dummy(ImVec2(0, 6));
-        const bool can_resync = can_scan && hub.cfg.romm.sync_boxart;
-        ImGui::BeginDisabled(!can_resync);
-        if (ImGui::Button("Resync RomM boxart", ImVec2(-1, 0)))
-            hub.start_job(HubJob::FetchBoxart, {}, true);
-        ImGui::EndDisabled();
-        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-        if (!hub.cfg.romm.sync_boxart)
-            ImGui::TextWrapped("Enable Sync Boxart in RomM Sync Settings to refresh covers.");
-        else
-            ImGui::TextWrapped(
-                "Deletes cached RomM covers and re-downloads each title's menu cover.");
-        ImGui::PopStyleColor();
-    }
+    ImGui::BeginDisabled(busy);
+    if (ImGui::Button("Quick Scan", ImVec2(-1, 0))) hub.start_job(HubJob::ScanRoms);
+    if (ImGui::Button("Full Rescan", ImVec2(-1, 0)))
+        ImGui::OpenPopup("Full rescan###confirm_full_rescan");
+    if (ImGui::Button("Purge Missing Files", ImVec2(-1, 0)))
+        hub.start_job(HubJob::PurgeMissingFiles);
+    ImGui::EndDisabled();
 
     ImGui::Dummy(ImVec2(0, 10));
     if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
 
-    // Nested confirms (must be inside the Scans modal's ID stack).
-    if (ImGui::BeginPopupModal("Full ROM rescan###confirm_full_rom_rescan", nullptr,
+    if (ImGui::BeginPopupModal("Full rescan###confirm_full_rescan", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 360.f);
-        ImGui::TextWrapped(
-            "This clears the library index cache and re-hashes every candidate ROM under "
-            "your library root. On a large collection it can take a long time.");
+        if (hub.scans_platform_filter.empty()) {
+            ImGui::TextWrapped(
+                "Re-hash every ROM and BIOS candidate and rebuild the indexes. On a large "
+                "collection this can take a long time.");
+        } else {
+            ImGui::TextWrapped(
+                "Re-hash every ROM and BIOS candidate for %s. Other platforms in the index "
+                "are left alone.",
+                platform_display_name(hub.scans_platform_filter));
+        }
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0, 8));
         if (accent_button("Rescan", th, ImVec2(120, 0))) {
             hub.start_job(HubJob::FullScanRoms);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
-        close_modal_on_outside_click();
-        ImGui::EndPopup();
-    }
-    if (ImGui::BeginPopupModal("Full BIOS rescan###confirm_full_bios_rescan", nullptr,
-                               ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 360.f);
-        ImGui::TextWrapped(
-            "This clears the BIOS index cache and re-hashes every candidate dump under "
-            "your BIOS root.");
-        ImGui::PopTextWrapPos();
-        ImGui::Dummy(ImVec2(0, 8));
-        if (accent_button("Rescan", th, ImVec2(120, 0))) {
-            hub.start_job(HubJob::FullScanBios);
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
@@ -1346,7 +1384,7 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
         } else if (row.has_bios) {
             ImGui::TextColored(th.good, "BIOS matched");
         } else {
-            ImGui::TextColored(th.warn, "Missing — run Scan BIOS");
+            ImGui::TextColored(th.warn, "Missing — run Quick Scan / Full Rescan");
             if (row.supports_openbios)
                 ImGui::TextColored(th.text_muted, "Or use OpenBIOS after a catalog refresh.");
         }
@@ -1453,28 +1491,18 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     ImGui::Dummy(ImVec2(0, 12));
     ImGui::Separator();
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextWrapped("ROM and BIOS scans are under Scans in the top bar.");
+    ImGui::TextWrapped("Library scans (ROM + BIOS) are under Scans in the top bar.");
     ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0, 10));
     ImGui::Separator();
-    if (ImGui::Checkbox("Prefer Local Filesystem Boxart", &hub.settings.prefer_local_boxart))
-        hub.settings.dirty = true;
-    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextWrapped(
-        "Off (default): covers come from Libretro, or RomM when Sync Boxart is enabled. "
-        "On: use sibling/library images next to ROMs when present, otherwise fall back to "
-        "the remote source.");
-    ImGui::PopStyleColor();
-
-    ImGui::Dummy(ImVec2(0, 10));
     if (ImGui::Checkbox("Filter Unsupported Titles", &hub.settings.filter_unsupported_titles))
         hub.settings.dirty = true;
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
     ImGui::TextWrapped(
         "Hide catalog titles that do not have a ROM available — neither on your local ROM "
         "library path nor (when scanned) on RomM. Installed titles stay visible. Save, then "
-        "run Scan RomM library under Scans so remote-only matches appear.");
+        "use Build & Install / RomM sync so remote-only matches appear.");
     ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0, 8));
@@ -1822,13 +1850,9 @@ void draw_romm_settings_panel(HubModel& hub, const Theme& th) {
         hub.romm_settings.dirty = true;
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
     if (hub.romm_settings.sync_boxart)
-        ImGui::TextWrapped(
-            "On: all covers use RomM (requires URL + API key). Local filesystem art is "
-            "ignored unless Prefer Local Filesystem Boxart is enabled in Library Settings.");
+        ImGui::TextWrapped("On: all covers use RomM (requires URL + API key).");
     else
-        ImGui::TextWrapped(
-            "Off (default): all covers use Libretro Named_Boxarts. Local filesystem art is "
-            "ignored unless Prefer Local Filesystem Boxart is enabled in Library Settings.");
+        ImGui::TextWrapped("Off (default): all covers use Libretro Named_Boxarts.");
     ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0, 8));
@@ -1843,8 +1867,8 @@ void draw_romm_settings_panel(HubModel& hub, const Theme& th) {
     ImGui::Separator();
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
     ImGui::TextWrapped(
-        "Scan RomM library and Resync RomM boxart are under Scans "
-        "(requires a saved URL + API key; Sync Boxart for cover resync).");
+        "RomM matching is on-demand during Build & Install. Enable Sync Boxart here, then "
+        "use Find Missing Boxart in Library Settings to refresh covers.");
     ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0, 12));
@@ -2169,6 +2193,7 @@ int main(int argc, char** argv) {
         draw_log(hub, th, log_h);
         draw_setup_wizard(hub, th, window);
         draw_setup_scan_prompt(hub, th);
+        draw_menu_popup(hub, th);
         draw_scans_popup(hub, th);
 
         if (hub.show_romm_install_prompt) {

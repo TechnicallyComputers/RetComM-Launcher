@@ -65,7 +65,18 @@ struct BiosScanOptions {
     BiosIndex* index = nullptr; // for cache hits (ignored when full_rescan)
     // Ignore bios-index cache and re-hash every candidate.
     bool full_rescan = false;
+    // If set, only these catalog platforms are walked. Empty = all with bios_identity.
+    std::vector<std::string> platforms;
 };
+
+// Drop BIOS index rows whose paths are gone from disk. Empty platform = all.
+struct BiosPurgeMissingResult {
+    std::size_t removed_files = 0;
+    std::size_t removed_title_binds = 0;
+    std::vector<std::string> removed_paths;
+};
+BiosPurgeMissingResult purge_missing_bios_files(BiosIndex& index, const Catalog& catalog,
+                                                const std::string& platform = {});
 
 struct BiosScanResult {
     std::vector<fs::path> scanned_roots;

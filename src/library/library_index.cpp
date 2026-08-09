@@ -438,6 +438,74 @@ bool save_library_index(const fs::path& path, const LibraryIndex& index) {
     return !ec;
 }
 
+PurgeMissingResult purge_missing_library_files(LibraryIndex& index,
+                                               const std::string& platform) {
+    PurgeMissingResult r;
+    const size_t titles_before = index.titles.size();
+    std::vector<LibraryFile> kept;
+    kept.reserve(index.files.size());
+    for (auto& f : index.files) {
+        if (!platform.empty() && f.platform != platform) {
+            kept.push_back(std::move(f));
+            continue;
+        }
+        std::error_code ec;
+        if (fs::is_regular_file(f.path, ec)) {
+            kept.push_back(std::move(f));
+            continue;
+        }
+        ++r.removed_files;
+        r.removed_paths.push_back(f.path);
+    }
+    index.files = std::move(kept);
+    index.rebuild_path_map();
+
+    // Rebuild title binds from remaining files (drop binds with no paths left).
+    std::unordered_map<std::string, LibraryTitleBind> binds;
+    auto add_path = [](LibraryTitleBind& b, const std::string& path) {
+        if (path.empty()) return;
+        if (std::find(b.paths.begin(), b.paths.end(), path) == b.paths.end())
+            b.paths.push_back(path);
+    };
+    for (const auto& f : index.files) {
+        if (f.title_id.empty()) continue;
+        auto& b = binds[f.title_id];
+        b.title_id = f.title_id;
+        add_path(b, f.path);
+    }
+    for (auto& [id, b] : binds) {
+        (void)id;
+        std::sort(b.paths.begin(), b.paths.end(),
+                  [](const std::string& a, const std::string& bpath) {
+                      auto ext_of = [](const std::string& p) {
+                          auto pos = p.find_last_of('.');
+                          if (pos == std::string::npos) return std::string{};
+                          std::string e = p.substr(pos);
+                          for (char& c : e)
+                              c = char(std::tolower(static_cast<unsigned char>(c)));
+                          return e;
+                      };
+                      const int ra = rom_path_rank(ext_of(a));
+                      const int rb = rom_path_rank(ext_of(bpath));
+                      if (ra != rb) return ra < rb;
+                      return a < bpath;
+                  });
+        if (!b.paths.empty()) b.preferred_path = b.paths.front();
+    }
+    index.titles.clear();
+    for (auto& [id, b] : binds) {
+        (void)id;
+        index.titles.push_back(std::move(b));
+    }
+    std::sort(index.titles.begin(), index.titles.end(),
+              [](const LibraryTitleBind& a, const LibraryTitleBind& b) {
+                  return a.title_id < b.title_id;
+              });
+    if (titles_before > index.titles.size())
+        r.removed_title_binds = titles_before - index.titles.size();
+    return r;
+}
+
 void merge_scan_into_index(LibraryIndex& index, const Catalog& catalog,
                            const ScanResult& scan, const fs::path& library_root) {
     (void)catalog;

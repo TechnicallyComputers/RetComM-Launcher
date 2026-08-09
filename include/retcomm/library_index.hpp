@@ -64,6 +64,16 @@ bool save_library_index(const fs::path& path, const LibraryIndex& index);
 void merge_scan_into_index(LibraryIndex& index, const Catalog& catalog,
                            const ScanResult& scan, const fs::path& library_root);
 
+// Drop index rows whose paths are gone from disk. Empty platform = all platforms.
+// Rebuilds title bindings from remaining files.
+struct PurgeMissingResult {
+    std::size_t removed_files = 0;
+    std::size_t removed_title_binds = 0;
+    std::vector<std::string> removed_paths;
+};
+PurgeMissingResult purge_missing_library_files(LibraryIndex& index,
+                                               const std::string& platform = {});
+
 // After RomM (or manual) download: hash dumps next to saved_path, enforce TOC,
 // and upsert the title bind into the library index (does not write disk).
 struct BindDownloadResult {

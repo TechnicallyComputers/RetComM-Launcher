@@ -47,6 +47,7 @@ enum class HubJob : int {
     FullScanRoms,
     ScanBios,
     FullScanBios,
+    PurgeMissingFiles,
     CheckUpdates,
     FetchBoxart,
     FetchRommRom,
@@ -87,6 +88,7 @@ inline bool hub_job_is_scan(HubJob j) {
     case HubJob::FullScanRoms:
     case HubJob::ScanBios:
     case HubJob::FullScanBios:
+    case HubJob::PurgeMissingFiles:
     case HubJob::ScanRommRoms:
         return true;
     default:
@@ -290,10 +292,13 @@ struct HubModel {
     std::vector<std::string> setup_missing_roots; // absolute paths to create
     bool setup_create_platform_folders = true;
     bool pending_open_scans = false; // Top-bar Scans → open modal next frame
+    bool pending_open_menu = false;  // Top-bar Menu → open modal next frame
     // After setup Finish: ask whether to scan the library now.
     bool show_setup_scan_prompt = false;
     // When set, ScanRoms/FullScanRoms quietly syncs the catalog first.
     bool job_prefetch_catalog = false;
+    // Scans modal platform filter (empty = all catalog platforms).
+    std::string scans_platform_filter;
     SettingsDraft settings;
     RommSettingsDraft romm_settings;
     NetplayLobbyState netplay;

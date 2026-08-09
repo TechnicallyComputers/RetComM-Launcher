@@ -810,6 +810,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
             case HubJob::ScanRoms:
             case HubJob::FullScanRoms: {
                 const bool full = (j == HubJob::FullScanRoms);
+                const std::string plat_filter = scans_platform_filter;
                 const bool prefetch = job_prefetch_catalog;
                 job_prefetch_catalog = false;
                 if (prefetch) {
@@ -827,19 +828,24 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                                    " — continuing ROM scan with current catalog");
                     }
                 }
-                set_status(full ? "Full ROM rescan…" : "Scanning ROM library…");
-                if (full) {
-                    append_log("Full ROM rescan: clearing library index cache…");
+                const char* rom_label = full ? "Full Rescan" : "Quick Scan";
+                set_status(std::string(rom_label) + (plat_filter.empty()
+                                                         ? "…"
+                                                         : (" [" + plat_filter + "]…")));
+                // Only wipe the whole index on a full all-platforms rescan.
+                if (full && plat_filter.empty()) {
+                    append_log("Full Rescan: clearing library index cache…");
                     library = LibraryIndex{};
                 } else {
                     library = load_library_index(paths.library_index_path);
-                    append_log("ROM scan: starting…");
+                    append_log(std::string(rom_label) + ": starting…");
                 }
                 ScanOptions opts;
                 opts.full_rescan = full;
                 opts.index = full ? nullptr : &library;
+                if (!plat_filter.empty()) opts.platforms = {plat_filter};
                 opts.on_progress = [this, full](const ScanProgress& p) {
-                    const char* label = full ? "Full ROM rescan" : "ROM scan";
+                    const char* label = full ? "Full Rescan" : "Quick Scan";
                     if (p.phase == "walk") {
                         if (should_log_progress(p.current, 0, 50)) {
                             std::ostringstream oss;
@@ -874,24 +880,98 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 ScanResult result;
                 if (cfg.library_root.empty()) {
                     append_log("scan requires library_root in config.json");
-                    set_status("ROM scan failed — set library_root");
+                    set_status("Scan failed — set library_root");
                     break;
                 }
                 result = scan_rom_library(catalog, cfg, opts);
                 merge_scan_into_index(library, catalog, result, cfg.library_root);
                 save_library_index(paths.library_index_path, library);
                 std::ostringstream oss;
-                oss << (full ? "Full ROM rescan: " : "ROM scan: ") << result.files.size()
-                    << " files, " << result.matches.size() << " matches, hashed "
-                    << result.hashed_files << ", skipped-hash " << result.skipped_hash
-                    << ", cache-hits " << result.cache_hits;
+                oss << rom_label << ": " << result.files.size() << " files, "
+                    << result.matches.size() << " matches, hashed " << result.hashed_files
+                    << ", skipped-hash " << result.skipped_hash << ", cache-hits "
+                    << result.cache_hits;
+                if (!plat_filter.empty()) oss << " [platform=" << plat_filter << "]";
                 if (!result.scanned_roots.empty()) {
                     oss << "\n  roots:";
                     for (const auto& r : result.scanned_roots) oss << " " << r.string();
                 }
                 for (const auto& err : result.errors) oss << "\n  error: " << err;
                 append_log(oss.str());
-                set_status(full ? "Full ROM rescan complete" : "ROM scan complete");
+
+                // BIOS scan follows ROM scan (same scope / full flag).
+                if (!cfg.bios_root.empty()) {
+                    set_status(std::string(rom_label) + ": scanning BIOS…");
+                    if (full && plat_filter.empty()) {
+                        append_log("Full Rescan: clearing BIOS index cache…");
+                        bios = BiosIndex{};
+                    } else {
+                        bios = load_bios_index(paths.bios_index_path);
+                    }
+                    BiosScanOptions bopts;
+                    bopts.full_rescan = full;
+                    bopts.index = full ? nullptr : &bios;
+                    if (!plat_filter.empty()) bopts.platforms = {plat_filter};
+                    bopts.on_progress = [this, full](const BiosScanProgress& p) {
+                        const char* label = full ? "Full Rescan" : "Quick Scan";
+                        if (p.phase == "hash" && p.total > 0) {
+                            std::ostringstream st;
+                            st << label << ": BIOS hashing " << p.current << "/" << p.total;
+                            if (!p.platform.empty()) st << " [" << p.platform << "]";
+                            set_status(st.str());
+                        } else if (p.phase == "walk") {
+                            std::ostringstream st;
+                            st << label << ": BIOS indexing " << p.current << " files…";
+                            set_status(st.str());
+                        }
+                    };
+                    auto bios_result = scan_bios_library(catalog, cfg, bopts);
+                    merge_bios_scan_into_index(bios, catalog, bios_result, cfg.bios_root);
+                    save_bios_index(paths.bios_index_path, bios);
+                    std::ostringstream boss;
+                    boss << rom_label << " BIOS: " << bios_result.files.size()
+                         << " files, " << bios_result.matches.size() << " matches, hashed "
+                         << bios_result.hashed_files;
+                    for (const auto& err : bios_result.errors) boss << "\n  error: " << err;
+                    append_log(boss.str());
+                }
+
+                set_status(std::string(rom_label) + " complete");
+                break;
+            }
+            case HubJob::PurgeMissingFiles: {
+                const std::string plat_filter = scans_platform_filter;
+                set_status(plat_filter.empty() ? "Purging missing library files…"
+                                               : ("Purging missing [" + plat_filter + "]…"));
+                library = load_library_index(paths.library_index_path);
+                auto pr = purge_missing_library_files(library, plat_filter);
+                save_library_index(paths.library_index_path, library);
+                std::ostringstream oss;
+                oss << "Purge missing: removed " << pr.removed_files << " ROM file(s)";
+                if (pr.removed_title_binds)
+                    oss << ", " << pr.removed_title_binds << " title bind(s)";
+                if (!plat_filter.empty()) oss << " [platform=" << plat_filter << "]";
+                for (size_t i = 0; i < pr.removed_paths.size() && i < 40; ++i)
+                    oss << "\n  - " << pr.removed_paths[i];
+                if (pr.removed_paths.size() > 40)
+                    oss << "\n  … +" << (pr.removed_paths.size() - 40) << " more";
+                append_log(oss.str());
+
+                if (!cfg.bios_root.empty()) {
+                    bios = load_bios_index(paths.bios_index_path);
+                    auto bpr = purge_missing_bios_files(bios, catalog, plat_filter);
+                    save_bios_index(paths.bios_index_path, bios);
+                    std::ostringstream boss;
+                    boss << "Purge missing BIOS: removed " << bpr.removed_files << " file(s)";
+                    if (bpr.removed_title_binds)
+                        boss << ", " << bpr.removed_title_binds << " title bind(s)";
+                    append_log(boss.str());
+                    pr.removed_files += bpr.removed_files;
+                }
+                set_status(pr.removed_files == 0
+                               ? "Purge complete — nothing missing"
+                               : ("Purge complete — removed " + std::to_string(pr.removed_files) +
+                                  " missing file(s)"));
                 break;
             }
             case HubJob::ScanBios:

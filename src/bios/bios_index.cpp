@@ -345,12 +345,23 @@ BiosScanResult scan_bios_roots(const Catalog& catalog, const AppConfig& cfg,
         std::string platform;
         fs::path root;
     };
+    auto platform_allowed = [&](const std::string& plat) {
+        if (opts.platforms.empty()) return true;
+        return std::find(opts.platforms.begin(), opts.platforms.end(), plat) !=
+               opts.platforms.end();
+    };
+
     std::vector<Walk> walks;
     std::unordered_set<std::string> walk_keys;
     for (const auto& root : result.scanned_roots) {
-        const std::string flat_key = norm_path(root) + "|*";
-        if (walk_keys.insert(flat_key).second) walks.push_back({"", root}); // flat
+        // Flat root only when scanning all platforms (filtered scans stay in folders).
+        if (opts.platforms.empty()) {
+            const std::string flat_key = norm_path(root) + "|*";
+            if (walk_keys.insert(flat_key).second) walks.push_back({"", root});
+        }
         for (const auto& [plat, need] : needs) {
+            (void)need;
+            if (!platform_allowed(plat)) continue;
             for (const auto& folder : cfg.folders_for_platform(plat)) {
                 const fs::path sub = root / folder;
                 std::error_code ec;
@@ -586,6 +597,33 @@ void merge_bios_scan_into_index(BiosIndex& index, const Catalog& catalog,
     // Full catalog rematch from the merged file set (covers new titles that
     // share dumps already hashed in the index).
     rematch_bios_titles(index, catalog);
+}
+
+BiosPurgeMissingResult purge_missing_bios_files(BiosIndex& index, const Catalog& catalog,
+                                                const std::string& platform) {
+    BiosPurgeMissingResult r;
+    const size_t titles_before = index.titles.size();
+    std::vector<BiosFile> kept;
+    kept.reserve(index.files.size());
+    for (auto& f : index.files) {
+        if (!platform.empty() && f.platform != platform) {
+            kept.push_back(std::move(f));
+            continue;
+        }
+        std::error_code ec;
+        if (fs::is_regular_file(f.path, ec)) {
+            kept.push_back(std::move(f));
+            continue;
+        }
+        ++r.removed_files;
+        r.removed_paths.push_back(f.path);
+    }
+    index.files = std::move(kept);
+    index.rebuild_path_map();
+    rematch_bios_titles(index, catalog);
+    if (titles_before > index.titles.size())
+        r.removed_title_binds = titles_before - index.titles.size();
+    return r;
 }
 
 } // namespace retcomm
