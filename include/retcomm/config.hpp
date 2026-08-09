@@ -70,6 +70,21 @@ struct AppConfig {
 std::map<std::string, std::vector<std::string>> default_platform_folders();
 std::vector<std::string> default_exclude_dirs();
 
+// Suggested first-run layout under ~/Emulation/{roms,bios,saves}.
+struct SuggestedLibraryRoots {
+    fs::path library_root;
+    fs::path bios_root;
+    fs::path saves_root;
+};
+SuggestedLibraryRoots suggested_emulation_roots();
+
+// Prefer an existing folder among `folders`; otherwise create folders.front().
+fs::path ensure_platform_dir(const fs::path& root, const std::vector<std::string>& folders);
+
+// Create library/bios/saves platform subfolders for every configured mapping
+// (same ensure_platform_dir rule). Skips empty roots.
+bool ensure_configured_platform_dirs(const AppConfig& cfg, std::string* error = nullptr);
+
 AppConfig load_app_config(const fs::path& config_path);
 // Merge defaults under any loaded overrides.
 AppConfig normalize_config(AppConfig cfg);

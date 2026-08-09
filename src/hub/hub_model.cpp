@@ -810,6 +810,23 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
             case HubJob::ScanRoms:
             case HubJob::FullScanRoms: {
                 const bool full = (j == HubJob::FullScanRoms);
+                const bool prefetch = job_prefetch_catalog;
+                job_prefetch_catalog = false;
+                if (prefetch) {
+                    // Quiet catalog sync so ROM matching has an up-to-date title list.
+                    set_status("Updating catalog…");
+                    auto cr = sync_remote_catalog(paths, cfg, true);
+                    if (cr.ok) {
+                        try {
+                            catalog = load_catalog(paths.catalog_dir);
+                        } catch (const std::exception& e) {
+                            append_log(std::string("catalog reload after prefetch: ") + e.what());
+                        }
+                    } else {
+                        append_log("Catalog prefetch: " + cr.message +
+                                   " — continuing ROM scan with current catalog");
+                    }
+                }
                 set_status(full ? "Full ROM rescan…" : "Scanning ROM library…");
                 if (full) {
                     append_log("Full ROM rescan: clearing library index cache…");
@@ -1209,17 +1226,9 @@ void HubModel::join_worker() {
     if (launch_worker.joinable()) launch_worker.join();
 }
 
-void HubModel::open_settings() {
-    cfg = load_app_config(paths.config_path);
-    copy_buf(settings.library_root, sizeof(settings.library_root), cfg.library_root.string());
-    copy_buf(settings.bios_root, sizeof(settings.bios_root), cfg.bios_root.string());
-    copy_buf(settings.saves_root, sizeof(settings.saves_root), cfg.saves_root.string());
-    copy_buf(settings.exclude_dirs, sizeof(settings.exclude_dirs), join_csv(cfg.exclude_dirs));
-    settings.prefer_local_boxart = cfg.prefer_local_boxart;
-    settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
-
+void HubModel::seed_setup_platform_folders() {
     settings.platform_folders.clear();
-    // Prefer catalog platforms, then any extra keys already in config.
+    // Prefer catalog platforms, then any extra keys already in config / defaults.
     std::vector<std::string> plats;
     {
         std::unordered_set<std::string> seen;
@@ -1229,6 +1238,9 @@ void HubModel::open_settings() {
         for (const auto& [plat, _] : cfg.platform_folders) {
             if (seen.insert(plat).second) plats.push_back(plat);
         }
+        for (const auto& [plat, _] : default_platform_folders()) {
+            if (seen.insert(plat).second) plats.push_back(plat);
+        }
     }
     for (const auto& plat : plats) {
         PlatformFolderEdit row;
@@ -1236,6 +1248,80 @@ void HubModel::open_settings() {
         copy_buf(row.folders, sizeof(row.folders), join_csv(cfg.folders_for_platform(plat)));
         settings.platform_folders.push_back(row);
     }
+    settings.dirty = true;
+}
+
+void HubModel::apply_suggested_library_roots(bool overwrite_nonempty) {
+    const auto sug = suggested_emulation_roots();
+    if (sug.library_root.empty()) return;
+    auto fill = [&](char* buf, size_t n, const fs::path& path) {
+        if (!overwrite_nonempty && buf[0] != '\0') return;
+        copy_buf(buf, n, path.string());
+        settings.dirty = true;
+    };
+    fill(settings.library_root, sizeof(settings.library_root), sug.library_root);
+    fill(settings.bios_root, sizeof(settings.bios_root), sug.bios_root);
+    fill(settings.saves_root, sizeof(settings.saves_root), sug.saves_root);
+}
+
+void HubModel::collect_missing_setup_roots() {
+    setup_missing_roots.clear();
+    auto consider = [&](const char* path) {
+        if (!path || !path[0]) return;
+        std::error_code ec;
+        if (!fs::is_directory(path, ec)) setup_missing_roots.push_back(path);
+    };
+    consider(settings.library_root);
+    consider(settings.bios_root);
+    consider(settings.saves_root);
+}
+
+bool HubModel::create_missing_setup_roots(std::string* error) {
+    for (const auto& path : setup_missing_roots) {
+        std::error_code ec;
+        fs::create_directories(path, ec);
+        if (ec) {
+            if (error) *error = "cannot create " + path + ": " + ec.message();
+            return false;
+        }
+        append_log("Created " + path);
+    }
+    setup_missing_roots.clear();
+    setup_confirm_create_roots = false;
+    return true;
+}
+
+bool HubModel::create_setup_platform_folders(std::string* error) {
+    // Persist draft into cfg first so ensure_configured_platform_dirs sees mappings.
+    AppConfig next = cfg;
+    next.library_root = settings.library_root;
+    next.bios_root = settings.bios_root;
+    next.saves_root = settings.saves_root;
+    if (!settings.platform_folders.empty()) {
+        next.platform_folders.clear();
+        for (const auto& row : settings.platform_folders) {
+            if (row.platform[0] == '\0') continue;
+            auto folders = split_csv(row.folders);
+            if (folders.empty()) continue;
+            next.platform_folders[row.platform] = std::move(folders);
+        }
+    }
+    next = normalize_config(std::move(next));
+    if (!ensure_configured_platform_dirs(next, error)) return false;
+    append_log("Created missing platform folders under library/BIOS/saves roots");
+    return true;
+}
+
+void HubModel::open_settings() {
+    cfg = load_app_config(paths.config_path);
+    copy_buf(settings.library_root, sizeof(settings.library_root), cfg.library_root.string());
+    copy_buf(settings.bios_root, sizeof(settings.bios_root), cfg.bios_root.string());
+    copy_buf(settings.saves_root, sizeof(settings.saves_root), cfg.saves_root.string());
+    copy_buf(settings.exclude_dirs, sizeof(settings.exclude_dirs), join_csv(cfg.exclude_dirs));
+    settings.prefer_local_boxart = cfg.prefer_local_boxart;
+    settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
+
+    seed_setup_platform_folders();
     settings.dirty = false;
     show_romm_settings = false;
     show_setup = false;
@@ -1254,6 +1340,12 @@ void HubModel::open_setup() {
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
     settings.platform_folders.clear();
     settings.dirty = false;
+    apply_suggested_library_roots(/*overwrite_nonempty=*/false);
+    setup_step = 0;
+    setup_confirm_create_roots = false;
+    setup_missing_roots.clear();
+    setup_create_platform_folders = true;
+    show_setup_scan_prompt = false;
     copy_buf(romm_settings.base_url, sizeof(romm_settings.base_url), cfg.romm.base_url);
     copy_buf(romm_settings.api_token, sizeof(romm_settings.api_token), cfg.romm.api_token);
     romm_settings.sync_boxart = cfg.romm.sync_boxart;
@@ -1266,6 +1358,9 @@ void HubModel::open_setup() {
 bool HubModel::complete_setup(std::string* error) {
     if (!mark_hub_setup_completed(paths, exe_dir, error)) return false;
     show_setup = false;
+    setup_step = 0;
+    setup_confirm_create_roots = false;
+    setup_missing_roots.clear();
     return true;
 }
 

@@ -25,6 +25,9 @@ struct Paths {
 Paths default_paths();
 void ensure_dirs(const Paths& p);
 
+// USERPROFILE (Windows) or HOME. Empty when unset.
+fs::path user_home_dir();
+
 // Resolve catalog directory: --catalog, $RETCOMM_CATALOG, then on-device cache
 // under paths->catalog_dir (~/.local/share/retcomm/catalog). No bundled catalog.
 fs::path resolve_catalog_dir(const fs::path& exe_dir,

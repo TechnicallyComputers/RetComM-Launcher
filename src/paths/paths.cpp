@@ -18,16 +18,23 @@
 #endif
 
 namespace retcomm {
+
+fs::path user_home_dir() {
+#if defined(_WIN32)
+    if (const char* p = std::getenv("USERPROFILE"); p && *p) return fs::path(p);
+    if (const char* p = std::getenv("HOME"); p && *p) return fs::path(p);
+#else
+    if (const char* p = std::getenv("HOME"); p && *p) return fs::path(p);
+#endif
+    return {};
+}
+
 namespace {
 
 fs::path home_dir() {
-#if defined(_WIN32)
-    if (const char* p = std::getenv("USERPROFILE")) return fs::path(p);
-    if (const char* p = std::getenv("HOME")) return fs::path(p);
-#else
-    if (const char* p = std::getenv("HOME")) return fs::path(p);
-#endif
-    throw std::runtime_error("cannot resolve home directory");
+    fs::path h = user_home_dir();
+    if (h.empty()) throw std::runtime_error("cannot resolve home directory");
+    return h;
 }
 
 fs::path xdg_config_home() {

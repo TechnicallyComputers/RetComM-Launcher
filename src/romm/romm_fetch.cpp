@@ -175,21 +175,6 @@ IdentityHit score_bios(const BiosIdentity& id, const std::string& sha1, const st
     return score_hashes(proxy, sha1, crc, size, filename, md5);
 }
 
-fs::path ensure_platform_dir(const fs::path& root, const std::vector<std::string>& folders) {
-    if (root.empty()) return {};
-    std::error_code ec;
-    // Prefer an existing folder; otherwise create the first configured name.
-    for (const auto& folder : folders) {
-        if (folder.empty()) continue;
-        fs::path p = root / folder;
-        if (fs::is_directory(p, ec)) return p;
-    }
-    const std::string folder = folders.empty() ? std::string{} : folders.front();
-    fs::path p = folder.empty() ? root : (root / folder);
-    fs::create_directories(p, ec);
-    if (ec) return {};
-    return p;
-}
 
 bool http_get_json(const std::string& url,
                    const std::vector<std::pair<std::string, std::string>>& headers, json& out,

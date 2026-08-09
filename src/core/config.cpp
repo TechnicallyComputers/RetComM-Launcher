@@ -1,4 +1,5 @@
 #include "retcomm/config.hpp"
+#include "retcomm/paths.hpp"
 
 #include <nlohmann/json.hpp>
 
@@ -48,6 +49,51 @@ std::map<std::string, std::vector<std::string>> default_platform_folders() {
 
 std::vector<std::string> default_exclude_dirs() {
     return {"torrents", "emulators", ".git", "@eaDir"};
+}
+
+SuggestedLibraryRoots suggested_emulation_roots() {
+    SuggestedLibraryRoots out;
+    const fs::path home = user_home_dir();
+    if (home.empty()) return out;
+    const fs::path emu = home / "Emulation";
+    out.library_root = emu / "roms";
+    out.bios_root = emu / "bios";
+    out.saves_root = emu / "saves";
+    return out;
+}
+
+fs::path ensure_platform_dir(const fs::path& root, const std::vector<std::string>& folders) {
+    if (root.empty()) return {};
+    std::error_code ec;
+    // Prefer an existing folder; otherwise create the first configured name.
+    for (const auto& folder : folders) {
+        if (folder.empty()) continue;
+        fs::path p = root / folder;
+        if (fs::is_directory(p, ec)) return p;
+    }
+    const std::string folder = folders.empty() ? std::string{} : folders.front();
+    fs::path p = folder.empty() ? root : (root / folder);
+    fs::create_directories(p, ec);
+    if (ec) return {};
+    return p;
+}
+
+bool ensure_configured_platform_dirs(const AppConfig& cfg, std::string* error) {
+    auto process_root = [&](const fs::path& root) -> bool {
+        if (root.empty()) return true;
+        for (const auto& [plat, folders] : cfg.platform_folders) {
+            (void)plat;
+            if (folders.empty()) continue;
+            if (ensure_platform_dir(root, folders).empty()) {
+                if (error)
+                    *error = "cannot create platform folder under " + root.string();
+                return false;
+            }
+        }
+        return true;
+    };
+    return process_root(cfg.library_root) && process_root(cfg.bios_root) &&
+           process_root(cfg.saves_root);
 }
 
 AppConfig normalize_config(AppConfig cfg) {

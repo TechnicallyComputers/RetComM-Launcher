@@ -275,7 +275,6 @@ void draw_hub_menu(HubModel& hub, const Theme& th) {
     // Settings stay reachable during Build & Install / scans.
     if (ImGui::MenuItem("Library Settings")) hub.open_settings();
     if (ImGui::MenuItem("RomM Sync Settings")) hub.open_romm_settings();
-    if (ImGui::MenuItem("Scans")) hub.pending_open_scans = true;
     ImGui::Separator();
     ImGui::BeginDisabled(busy);
     if (ImGui::MenuItem("Check Updates")) hub.start_job(HubJob::CheckUpdates);
@@ -352,15 +351,24 @@ void draw_marquee(HubModel& hub, const Theme& th, float width) {
     ImGui::TextUnformatted("Retro Compilation Manager");
     ImGui::PopStyleColor();
 
-    // Top-right: Menu popup, or a one-click Back when editing settings.
+    // Top-right: Scans + Menu, or a one-click Back when editing settings.
     constexpr float kMenuH = 36.f;
+    constexpr float kBtnGap = 8.f;
     const bool in_settings = hub.show_settings || hub.show_romm_settings;
     const char* btn_label = in_settings ? "Back to Library" : "Menu";
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.f, 8.f));
-    const float btn_w =
+    const float menu_w =
         std::max(88.f, ImGui::CalcTextSize(btn_label).x + ImGui::GetStyle().FramePadding.x * 2.f);
-    ImGui::SetCursorScreenPos(ImVec2(p0.x + width - btn_w - 16.f, p0.y + (h - kMenuH) * 0.5f));
-    if (ImGui::Button(btn_label, ImVec2(btn_w, kMenuH))) {
+    const float scans_w =
+        std::max(72.f, ImGui::CalcTextSize("Scans").x + ImGui::GetStyle().FramePadding.x * 2.f);
+    const float btn_y = p0.y + (h - kMenuH) * 0.5f;
+    float btn_x = p0.x + width - 16.f - menu_w;
+    if (!in_settings) {
+        ImGui::SetCursorScreenPos(ImVec2(btn_x - kBtnGap - scans_w, btn_y));
+        if (ImGui::Button("Scans", ImVec2(scans_w, kMenuH))) hub.pending_open_scans = true;
+    }
+    ImGui::SetCursorScreenPos(ImVec2(btn_x, btn_y));
+    if (ImGui::Button(btn_label, ImVec2(menu_w, kMenuH))) {
         if (in_settings) {
             hub.show_settings = false;
             hub.show_romm_settings = false;
@@ -1445,7 +1453,7 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     ImGui::Dummy(ImVec2(0, 12));
     ImGui::Separator();
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextWrapped("ROM and BIOS scans are under Menu → Scans.");
+    ImGui::TextWrapped("ROM and BIOS scans are under Scans in the top bar.");
     ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0, 10));
@@ -1466,7 +1474,7 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     ImGui::TextWrapped(
         "Hide catalog titles that do not have a ROM available — neither on your local ROM "
         "library path nor (when scanned) on RomM. Installed titles stay visible. Save, then "
-        "run Scan RomM library under Menu → Scans so remote-only matches appear.");
+        "run Scan RomM library under Scans so remote-only matches appear.");
     ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0, 8));
@@ -1548,107 +1556,240 @@ void draw_setup_wizard(HubModel& hub, const Theme& th, SDL_Window* window) {
     if (!hub.show_setup) return;
 
     ImGui::OpenPopup("Welcome to RetComM###setup_wizard");
-    ImGui::SetNextWindowSize(ImVec2(560.f, 0.f), ImGuiCond_Appearing);
+    const float wiz_w = hub.setup_step == 0 ? 560.f : 640.f;
+    ImGui::SetNextWindowSize(ImVec2(wiz_w, hub.setup_step == 0 ? 0.f : 520.f),
+                             ImGuiCond_Appearing);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
                             ImVec2(0.5f, 0.5f));
     if (!ImGui::BeginPopupModal("Welcome to RetComM###setup_wizard", nullptr,
                                 ImGuiWindowFlags_AlwaysAutoResize))
         return;
 
-    ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 520.f);
-    ImGui::TextWrapped(
-        "Set your ROM library, BIOS, and game-saves folders. Optionally connect RomM for "
-        "library sync later. You can change all of this under Library Settings and RomM Sync "
-        "Settings.");
-    ImGui::PopTextWrapPos();
-    ImGui::Dummy(ImVec2(0, 12));
+    auto advance_to_platform_step = [&]() {
+        hub.seed_setup_platform_folders();
+        hub.setup_step = 1;
+        hub.setup_confirm_create_roots = false;
+    };
 
-    if (path_field_with_browse("ROM library root", "##setup_library_root",
-                               hub.settings.library_root, sizeof(hub.settings.library_root), hub,
-                               window, FolderPickTarget::LibraryRoot, th))
-        hub.settings.dirty = true;
-    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextWrapped("Required — EmulationStation / RomM-style root (e.g. …/roms).");
-    ImGui::PopStyleColor();
-
-    ImGui::Dummy(ImVec2(0, 10));
-    if (path_field_with_browse("BIOS root", "##setup_bios_root", hub.settings.bios_root,
-                               sizeof(hub.settings.bios_root), hub, window,
-                               FolderPickTarget::BiosRoot, th))
-        hub.settings.dirty = true;
-    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextWrapped("Optional — system BIOS / firmware dumps (e.g. …/bios).");
-    ImGui::PopStyleColor();
-
-    ImGui::Dummy(ImVec2(0, 10));
-    if (path_field_with_browse("Game saves root", "##setup_saves_root", hub.settings.saves_root,
-                               sizeof(hub.settings.saves_root), hub, window,
-                               FolderPickTarget::SavesRoot, th))
-        hub.settings.dirty = true;
-    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextWrapped(
-        "Recommended — shared SRAM / memcard library (e.g. …/saves). RomM sync and launches "
-        "use per-platform folders under this root.");
-    ImGui::PopStyleColor();
-
-    ImGui::Dummy(ImVec2(0, 14));
-    ImGui::Separator();
-    ImGui::Dummy(ImVec2(0, 8));
-    ImGui::TextColored(th.text_muted, "RomM (optional)");
-    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextWrapped(
-        "Leave blank for local-only. Use a Client API Token from RomM → Administration → "
-        "Client API Tokens (Bearer rmm_…).");
-    ImGui::PopStyleColor();
-    ImGui::Dummy(ImVec2(0, 6));
-    ImGui::TextColored(th.text_muted, "RomM Instance URL");
-    if (ImGui::InputText("##setup_romm_base_url", hub.romm_settings.base_url,
-                         sizeof(hub.romm_settings.base_url)))
-        hub.romm_settings.dirty = true;
-    ImGui::Dummy(ImVec2(0, 6));
-    ImGui::TextColored(th.text_muted, "RomM Client API Key");
-    if (ImGui::InputText("##setup_romm_api_token", hub.romm_settings.api_token,
-                         sizeof(hub.romm_settings.api_token), ImGuiInputTextFlags_Password))
-        hub.romm_settings.dirty = true;
-
-    const bool library_ok = hub.settings.library_root[0] != '\0';
-    ImGui::Dummy(ImVec2(0, 16));
-    ImGui::BeginDisabled(!library_ok);
-    if (accent_button("Continue", th, ImVec2(160, 0))) {
-        std::string err;
-        if (!hub.save_settings(&err)) {
-            hub.append_log("setup save failed: " + err);
-            hub.set_status("Setup save failed");
-        } else if (!hub.save_romm_settings(&err, /*refresh_boxart=*/false)) {
-            hub.append_log("setup RomM save failed: " + err);
-            hub.set_status("Setup RomM save failed");
-        } else if (!hub.complete_setup(&err)) {
-            hub.append_log("setup marker failed: " + err);
-            hub.set_status("Setup marker failed");
-        } else {
-            hub.set_status("Setup complete");
-            hub.append_log("First-time setup saved");
-            // One background job at a time — scan ROMs; user can Scan BIOS after.
-            hub.start_job(HubJob::ScanRoms);
+    if (hub.setup_confirm_create_roots) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 520.f);
+        ImGui::TextWrapped("These folders do not exist yet. Create them now?");
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 8));
+        for (const auto& p : hub.setup_missing_roots) {
+            ImGui::BulletText("%s", p.c_str());
         }
-    }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (ImGui::Button("Skip for now", ImVec2(140, 0))) {
-        std::string err;
-        if (!hub.complete_setup(&err)) {
-            hub.append_log("setup marker failed: " + err);
-            hub.set_status("Setup marker failed");
-        } else {
-            hub.set_status("Setup skipped — set library root in Library settings");
-            hub.append_log("First-time setup skipped");
+        ImGui::Dummy(ImVec2(0, 14));
+        if (accent_button("Create folders", th, ImVec2(160, 0))) {
+            std::string err;
+            if (!hub.create_missing_setup_roots(&err)) {
+                hub.append_log("setup create roots failed: " + err);
+                hub.set_status("Could not create folders");
+            } else {
+                hub.set_status("Folders created");
+                advance_to_platform_step();
+            }
         }
+        ImGui::SameLine();
+        if (ImGui::Button("Back", ImVec2(120, 0))) {
+            hub.setup_confirm_create_roots = false;
+            hub.setup_missing_roots.clear();
+        }
+        ImGui::EndPopup();
+        return;
     }
-    if (!library_ok) {
+
+    if (hub.setup_step == 0) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 520.f);
+        ImGui::TextWrapped(
+            "Step 1 of 2 — Set your ROM library, BIOS, and game-saves folders. Suggested "
+            "paths use ~/Emulation/{roms,bios,saves}. Optionally connect RomM for library "
+            "sync later.");
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 8));
+        if (ImGui::Button("Use suggested paths")) {
+            hub.apply_suggested_library_roots(/*overwrite_nonempty=*/true);
+            hub.set_status("Suggested Emulation paths applied");
+        }
+        ImGui::Dummy(ImVec2(0, 10));
+
+        if (path_field_with_browse("ROM library root", "##setup_library_root",
+                                   hub.settings.library_root, sizeof(hub.settings.library_root),
+                                   hub, window, FolderPickTarget::LibraryRoot, th))
+            hub.settings.dirty = true;
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped("Required — EmulationStation / RomM-style root (e.g. …/roms).");
+        ImGui::PopStyleColor();
+
+        ImGui::Dummy(ImVec2(0, 10));
+        if (path_field_with_browse("BIOS root", "##setup_bios_root", hub.settings.bios_root,
+                                   sizeof(hub.settings.bios_root), hub, window,
+                                   FolderPickTarget::BiosRoot, th))
+            hub.settings.dirty = true;
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped("Optional — system BIOS / firmware dumps (e.g. …/bios).");
+        ImGui::PopStyleColor();
+
+        ImGui::Dummy(ImVec2(0, 10));
+        if (path_field_with_browse("Game saves root", "##setup_saves_root",
+                                   hub.settings.saves_root, sizeof(hub.settings.saves_root), hub,
+                                   window, FolderPickTarget::SavesRoot, th))
+            hub.settings.dirty = true;
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Recommended — shared SRAM / memcard library (e.g. …/saves). RomM sync and "
+            "launches use per-platform folders under this root.");
+        ImGui::PopStyleColor();
+
+        ImGui::Dummy(ImVec2(0, 14));
+        ImGui::Separator();
+        ImGui::Dummy(ImVec2(0, 8));
+        ImGui::TextColored(th.text_muted, "RomM (optional)");
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Leave blank for local-only. Use a Client API Token from RomM → Administration → "
+            "Client API Tokens (Bearer rmm_…).");
+        ImGui::PopStyleColor();
         ImGui::Dummy(ImVec2(0, 6));
-        ImGui::TextColored(th.warn, "Choose a ROM library folder to continue.");
+        ImGui::TextColored(th.text_muted, "RomM Instance URL");
+        if (ImGui::InputText("##setup_romm_base_url", hub.romm_settings.base_url,
+                             sizeof(hub.romm_settings.base_url)))
+            hub.romm_settings.dirty = true;
+        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::TextColored(th.text_muted, "RomM Client API Key");
+        if (ImGui::InputText("##setup_romm_api_token", hub.romm_settings.api_token,
+                             sizeof(hub.romm_settings.api_token), ImGuiInputTextFlags_Password))
+            hub.romm_settings.dirty = true;
+
+        const bool library_ok = hub.settings.library_root[0] != '\0';
+        ImGui::Dummy(ImVec2(0, 16));
+        ImGui::BeginDisabled(!library_ok);
+        if (accent_button("Next", th, ImVec2(160, 0))) {
+            hub.collect_missing_setup_roots();
+            if (!hub.setup_missing_roots.empty()) {
+                hub.setup_confirm_create_roots = true;
+            } else {
+                advance_to_platform_step();
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Skip for now", ImVec2(140, 0))) {
+            std::string err;
+            if (!hub.complete_setup(&err)) {
+                hub.append_log("setup marker failed: " + err);
+                hub.set_status("Setup marker failed");
+            } else {
+                hub.set_status("Setup skipped — set library root in Library settings");
+                hub.append_log("First-time setup skipped");
+            }
+        }
+        if (!library_ok) {
+            ImGui::Dummy(ImVec2(0, 6));
+            ImGui::TextColored(th.warn, "Choose a ROM library folder to continue.");
+        }
+    } else {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 600.f);
+        ImGui::TextWrapped(
+            "Step 2 of 2 — Platform folder mappings (ES-DE / RomM defaults). On Finish, "
+            "RetComM creates any missing platform folders using the first name in each "
+            "comma-separated list when none of the aliases already exist.");
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 8));
+        ImGui::Checkbox("Create missing platform folders under roms / bios / saves",
+                        &hub.setup_create_platform_folders);
+
+        ImGui::Dummy(ImVec2(0, 8));
+        ImGui::BeginChild("##setup_platform_table", ImVec2(0, 280.f), ImGuiChildFlags_Borders);
+        if (ImGui::BeginTable("setup_platform_folders", 3,
+                              ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp |
+                                  ImGuiTableFlags_ScrollY)) {
+            ImGui::TableSetupColumn("platform", ImGuiTableColumnFlags_WidthFixed, 120.f);
+            ImGui::TableSetupColumn("folders", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("##rm", ImGuiTableColumnFlags_WidthFixed, 36.f);
+            ImGui::TableHeadersRow();
+            for (int i = 0; i < static_cast<int>(hub.settings.platform_folders.size()); ++i) {
+                auto& row = hub.settings.platform_folders[static_cast<size_t>(i)];
+                ImGui::PushID(i);
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                if (ImGui::InputText("##plat", row.platform, sizeof(row.platform)))
+                    hub.settings.dirty = true;
+                ImGui::TableNextColumn();
+                if (ImGui::InputText("##folders", row.folders, sizeof(row.folders)))
+                    hub.settings.dirty = true;
+                ImGui::TableNextColumn();
+                if (ImGui::Button("X")) {
+                    hub.settings.platform_folders.erase(hub.settings.platform_folders.begin() +
+                                                        i);
+                    hub.settings.dirty = true;
+                    ImGui::PopID();
+                    break;
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+        ImGui::EndChild();
+        if (ImGui::Button("Add platform row")) hub.add_platform_folder_row();
+
+        ImGui::Dummy(ImVec2(0, 14));
+        if (ImGui::Button("Back", ImVec2(120, 0))) {
+            hub.setup_step = 0;
+        }
+        ImGui::SameLine();
+        if (accent_button("Finish", th, ImVec2(160, 0))) {
+            std::string err;
+            if (!hub.save_settings(&err)) {
+                hub.append_log("setup save failed: " + err);
+                hub.set_status("Setup save failed");
+            } else if (hub.setup_create_platform_folders &&
+                       !hub.create_setup_platform_folders(&err)) {
+                hub.append_log("setup platform folders failed: " + err);
+                hub.set_status("Could not create platform folders");
+            } else if (!hub.save_romm_settings(&err, /*refresh_boxart=*/false)) {
+                hub.append_log("setup RomM save failed: " + err);
+                hub.set_status("Setup RomM save failed");
+            } else if (!hub.complete_setup(&err)) {
+                hub.append_log("setup marker failed: " + err);
+                hub.set_status("Setup marker failed");
+            } else {
+                hub.set_status("Setup complete");
+                hub.append_log("First-time setup saved");
+                hub.show_setup_scan_prompt = true;
+            }
+        }
     }
 
+    ImGui::EndPopup();
+}
+
+void draw_setup_scan_prompt(HubModel& hub, const Theme& th) {
+    if (!hub.show_setup_scan_prompt) return;
+    ImGui::OpenPopup("Scan library?###setup_scan_prompt");
+    center_modal_next();
+    if (!ImGui::BeginPopupModal("Scan library?###setup_scan_prompt", nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+
+    ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 420.f);
+    ImGui::TextWrapped(
+        "Folder layout is ready. Scan your ROM library now? RetComM will quietly refresh "
+        "the catalog first so title matches are available immediately.");
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy(ImVec2(0, 14));
+    if (accent_button("Scan now", th, ImVec2(140, 0))) {
+        hub.show_setup_scan_prompt = false;
+        hub.job_prefetch_catalog = true;
+        hub.start_job(HubJob::ScanRoms);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Not now", ImVec2(120, 0))) {
+        hub.show_setup_scan_prompt = false;
+        hub.set_status("Setup complete — scan later from Scans");
+        ImGui::CloseCurrentPopup();
+    }
     ImGui::EndPopup();
 }
 
@@ -1702,7 +1843,7 @@ void draw_romm_settings_panel(HubModel& hub, const Theme& th) {
     ImGui::Separator();
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
     ImGui::TextWrapped(
-        "Scan RomM library and Resync RomM boxart are under Menu → Scans "
+        "Scan RomM library and Resync RomM boxart are under Scans "
         "(requires a saved URL + API key; Sync Boxart for cover resync).");
     ImGui::PopStyleColor();
 
@@ -2027,6 +2168,7 @@ int main(int argc, char** argv) {
         draw_log_splitter(log_h, log_h_pref, avail_y, th);
         draw_log(hub, th, log_h);
         draw_setup_wizard(hub, th, window);
+        draw_setup_scan_prompt(hub, th);
         draw_scans_popup(hub, th);
 
         if (hub.show_romm_install_prompt) {

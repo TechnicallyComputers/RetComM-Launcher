@@ -283,7 +283,17 @@ struct HubModel {
     bool show_settings = false;
     bool show_romm_settings = false;
     bool show_setup = false; // first-time library/BIOS/RomM wizard
-    bool pending_open_scans = false; // Menu → Scans (open modal next frame)
+    // Setup wizard: 0 = roots (+ optional RomM), 1 = platform folder mappings.
+    int setup_step = 0;
+    // After Next on step 0: confirm creating missing roms/saves/bios roots.
+    bool setup_confirm_create_roots = false;
+    std::vector<std::string> setup_missing_roots; // absolute paths to create
+    bool setup_create_platform_folders = true;
+    bool pending_open_scans = false; // Top-bar Scans → open modal next frame
+    // After setup Finish: ask whether to scan the library now.
+    bool show_setup_scan_prompt = false;
+    // When set, ScanRoms/FullScanRoms quietly syncs the catalog first.
+    bool job_prefetch_catalog = false;
     SettingsDraft settings;
     RommSettingsDraft romm_settings;
     NetplayLobbyState netplay;
@@ -344,13 +354,23 @@ struct HubModel {
 
     void open_settings();
     void open_setup();
+    // Prefill empty library/bios/saves drafts from ~/Emulation/{roms,bios,saves}.
+    void apply_suggested_library_roots(bool overwrite_nonempty = false);
+    // Seed settings.platform_folders from catalog + ES-DE defaults.
+    void seed_setup_platform_folders();
+    // Collect missing non-empty root paths into setup_missing_roots.
+    void collect_missing_setup_roots();
+    // Create paths in setup_missing_roots. Clears the list on success.
+    bool create_missing_setup_roots(std::string* error = nullptr);
+    // Create per-platform folders under configured roots (first CSV name).
+    bool create_setup_platform_folders(std::string* error = nullptr);
     // Continue / Skip: write install setup marker so the wizard does not reappear.
     bool complete_setup(std::string* error = nullptr);
     bool save_settings(std::string* error = nullptr);
     void add_platform_folder_row();
 
     void open_romm_settings();
-    // When refresh_boxart is false, persist only (setup wizard starts ScanRoms next).
+    // When refresh_boxart is false, persist only (setup wizard does not start a job).
     bool save_romm_settings(std::string* error = nullptr, bool refresh_boxart = true);
 
     // Persist preferred managed save for a title (empty clears).
