@@ -253,7 +253,8 @@ int cmd_library(const retcomm::Paths& paths, const retcomm::Catalog& cat,
                     std::string err;
                     const std::string latest = retcomm::fetch_latest_release_tag(
                         t->release.github, &err, t->release.allow_prerelease);
-                    if (!latest.empty() && latest != plan.installed_tag)
+                    const std::string have = retcomm::install_release_compare_tag(plan);
+                    if (!latest.empty() && !have.empty() && latest != have)
                         std::cout << "  [update available: " << latest << "]";
                     else if (!latest.empty())
                         std::cout << "  [up to date]";

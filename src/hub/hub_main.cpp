@@ -296,7 +296,7 @@ void draw_marquee(HubModel& hub, const Theme& th, float width) {
     ImGui::TextUnformatted("Retro Compilation Manager");
     ImGui::PopStyleColor();
 
-    // Top-right: Scans + Menu, or a one-click Back when editing settings.
+    // Top-right: Scans + Updates + Menu, or a one-click Back when editing settings.
     constexpr float kMenuH = 36.f;
     constexpr float kBtnGap = 8.f;
     const bool in_settings = hub.show_settings || hub.show_romm_settings;
@@ -306,11 +306,15 @@ void draw_marquee(HubModel& hub, const Theme& th, float width) {
         std::max(88.f, ImGui::CalcTextSize(btn_label).x + ImGui::GetStyle().FramePadding.x * 2.f);
     const float scans_w =
         std::max(72.f, ImGui::CalcTextSize("Scans").x + ImGui::GetStyle().FramePadding.x * 2.f);
+    const float updates_w =
+        std::max(80.f, ImGui::CalcTextSize("Updates").x + ImGui::GetStyle().FramePadding.x * 2.f);
     const float btn_y = p0.y + (h - kMenuH) * 0.5f;
     float btn_x = p0.x + width - 16.f - menu_w;
     if (!in_settings) {
-        ImGui::SetCursorScreenPos(ImVec2(btn_x - kBtnGap - scans_w, btn_y));
+        ImGui::SetCursorScreenPos(ImVec2(btn_x - kBtnGap - updates_w - kBtnGap - scans_w, btn_y));
         if (ImGui::Button("Scans", ImVec2(scans_w, kMenuH))) hub.pending_open_scans = true;
+        ImGui::SetCursorScreenPos(ImVec2(btn_x - kBtnGap - updates_w, btn_y));
+        if (ImGui::Button("Updates", ImVec2(updates_w, kMenuH))) hub.pending_open_updates = true;
     }
     ImGui::SetCursorScreenPos(ImVec2(btn_x, btn_y));
     if (ImGui::Button(btn_label, ImVec2(menu_w, kMenuH))) {
@@ -988,7 +992,6 @@ void draw_menu_popup(HubModel& hub, const Theme& th) {
     ImGui::TextUnformatted("MENU");
     ImGui::PopStyleColor();
 
-    const bool busy = hub.job_running.load();
     bool tc_upd = false;
     std::string tc_line;
     {
@@ -1000,55 +1003,6 @@ void draw_menu_popup(HubModel& hub, const Theme& th) {
     }
 
     ImGui::Dummy(ImVec2(0, 4));
-    ImGui::TextColored(th.text_muted, "Library");
-    ImGui::BeginDisabled(busy);
-    if (ImGui::Button("Refresh Library", ImVec2(-1, 0))) {
-        hub.refresh_rows(false);
-        hub.set_status("Library refreshed");
-        ImGui::CloseCurrentPopup();
-    }
-    if (ImGui::Button("Refresh Catalog", ImVec2(-1, 0))) {
-        hub.start_job(HubJob::RefreshCatalog);
-        ImGui::CloseCurrentPopup();
-    }
-    if (ImGui::Button("Clean Unlisted Installs…", ImVec2(-1, 0))) {
-        const size_t n = hub.refresh_orphan_installs();
-        if (n == 0) {
-            hub.set_status("No installs outside the catalog");
-            hub.append_log("Orphan scan: none");
-        } else {
-            hub.orphan_prompt_pending.store(true);
-        }
-        ImGui::CloseCurrentPopup();
-    }
-    ImGui::EndDisabled();
-
-    ImGui::Dummy(ImVec2(0, 8));
-    ImGui::Separator();
-    ImGui::TextColored(th.text_muted, "Updates");
-    ImGui::BeginDisabled(busy);
-    if (ImGui::Button("Check Game Updates", ImVec2(-1, 0))) {
-        hub.start_job(HubJob::CheckUpdates);
-        ImGui::CloseCurrentPopup();
-    }
-    {
-        const retcomm::RetcommInstallInfo install = retcomm::retcomm_install_info();
-        ImGui::BeginDisabled(!install.self_update_supported);
-        if (ImGui::Button("Update RetComM", ImVec2(-1, 0))) {
-            hub.start_job(HubJob::SelfUpdate);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndDisabled();
-    }
-    if (ImGui::Button(tc_upd ? "Update Toolchain (available)" : "Update Toolchain",
-                      ImVec2(-1, 0))) {
-        hub.start_job(HubJob::UpdateToolchain);
-        ImGui::CloseCurrentPopup();
-    }
-    ImGui::EndDisabled();
-
-    ImGui::Dummy(ImVec2(0, 8));
-    ImGui::Separator();
     ImGui::TextColored(th.text_muted, "Settings");
     // Settings stay reachable during Build & Install / scans.
     if (ImGui::Button("Library Settings", ImVec2(-1, 0))) {
@@ -1067,8 +1021,71 @@ void draw_menu_popup(HubModel& hub, const Theme& th) {
         ImGui::TextColored(th.text_muted, "Launcher %s", ver.c_str());
         if (install.self_update_supported && !install.channel_id.empty())
             ImGui::TextColored(th.text_muted, "Channel %s", install.channel_id.c_str());
-        if (!tc_line.empty()) ImGui::TextColored(th.text_muted, "%s", tc_line.c_str());
+        if (!tc_line.empty()) {
+            ImGui::TextColored(tc_upd ? th.warn : th.text_muted, "%s", tc_line.c_str());
+        }
     }
+
+    ImGui::Dummy(ImVec2(0, 10));
+    if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+    close_modal_on_outside_click();
+    ImGui::EndPopup();
+}
+
+void draw_updates_popup(HubModel& hub, const Theme& th) {
+    if (hub.pending_open_updates) {
+        ImGui::OpenPopup("Updates###updates_panel");
+        hub.pending_open_updates = false;
+    }
+    if (!ImGui::IsPopupOpen("Updates###updates_panel")) return;
+    constexpr float kUpdatesW = 420.f;
+    center_modal_next();
+    ImGui::SetNextWindowSizeConstraints(ImVec2(kUpdatesW, 0.f), ImVec2(kUpdatesW, FLT_MAX));
+    ImGui::SetNextWindowSize(ImVec2(kUpdatesW, 0.f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Updates###updates_panel", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextUnformatted("UPDATES");
+    ImGui::PopStyleColor();
+
+    const bool busy = hub.job_running.load();
+    bool tc_upd = false;
+    {
+        std::lock_guard<std::mutex> lock(hub.mu);
+        tc_upd = hub.toolchain_update_available;
+    }
+
+    ImGui::Dummy(ImVec2(0, 6));
+    ImGui::BeginDisabled(busy);
+    {
+        const retcomm::RetcommInstallInfo install = retcomm::retcomm_install_info();
+        ImGui::BeginDisabled(!install.self_update_supported);
+        if (ImGui::Button("Update RetComM", ImVec2(-1, 0))) {
+            hub.start_job(HubJob::SelfUpdate);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        if (!install.self_update_supported) {
+            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+            ImGui::TextWrapped("Self-update is only available from a RetComM portable install.");
+            ImGui::PopStyleColor();
+        }
+    }
+    if (ImGui::Button("Update Catalog", ImVec2(-1, 0))) {
+        hub.start_job(HubJob::RefreshCatalog);
+        ImGui::CloseCurrentPopup();
+    }
+    if (ImGui::Button("Check Game Updates", ImVec2(-1, 0))) {
+        hub.start_job(HubJob::CheckUpdates);
+        ImGui::CloseCurrentPopup();
+    }
+    if (ImGui::Button(tc_upd ? "Update Toolchain (available)" : "Update Toolchain",
+                      ImVec2(-1, 0))) {
+        hub.start_job(HubJob::UpdateToolchain);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled();
 
     ImGui::Dummy(ImVec2(0, 10));
     if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
@@ -1138,7 +1155,10 @@ void draw_scans_popup(HubModel& hub, const Theme& th) {
 
     ImGui::Dummy(ImVec2(0, 10));
     ImGui::BeginDisabled(busy);
-    if (ImGui::Button("Quick Scan", ImVec2(-1, 0))) hub.start_job(HubJob::ScanRoms);
+    if (ImGui::Button("Quick Scan", ImVec2(-1, 0))) {
+        hub.pending_scan_missing_rom_id.clear();
+        hub.start_job(HubJob::ScanRoms);
+    }
     if (ImGui::Button("Full Rescan", ImVec2(-1, 0)))
         ImGui::OpenPopup("Full rescan###confirm_full_rescan");
     if (ImGui::Button("Purge Missing Files", ImVec2(-1, 0)))
@@ -1164,6 +1184,7 @@ void draw_scans_popup(HubModel& hub, const Theme& th) {
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0, 8));
         if (accent_button("Rescan", th, ImVec2(120, 0))) {
+            hub.pending_scan_missing_rom_id.clear();
             hub.start_job(HubJob::FullScanRoms);
             ImGui::CloseCurrentPopup();
         }
@@ -1292,9 +1313,23 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
     const bool has_native_install = row.supports_local_build || row.can_prebuilt_install;
     if (row.installed) {
         // Play stays available during Build & Install / scans (own worker thread).
-        ImGui::BeginDisabled(hub.launch_running.load());
-        if (ImGui::Button("Play", ImVec2(btn_w, 0)))
-            hub.start_job(HubJob::Launch, row.id);
+        const bool play_blocked = hub.launch_running.load() ||
+                                  (hub.job_running.load() && hub.job == HubJob::CheckLaunchUpdate);
+        ImGui::BeginDisabled(play_blocked);
+        const bool play_clicked =
+            row.update_available ? ImGui::Button("Play", ImVec2(btn_w, 0))
+                                 : good_button("Play", th, ImVec2(btn_w, 0));
+        if (play_clicked) {
+            if (hub.cfg.check_updates_before_launch) {
+                const auto* t = hub.catalog.find(row.id);
+                if (t && !t->release.github.empty())
+                    hub.start_job(HubJob::CheckLaunchUpdate, row.id);
+                else
+                    hub.start_job(HubJob::Launch, row.id);
+            } else {
+                hub.start_job(HubJob::Launch, row.id);
+            }
+        }
         ImGui::EndDisabled();
         ImGui::SameLine(0, 8);
         ImGui::BeginDisabled(block_title_mutate);
@@ -1437,8 +1472,10 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
     ImGui::Dummy(ImVec2(0, 10));
     ImGui::TextColored(th.text_muted, "App");
     if (row.installed) {
+        const std::string& shown_tag =
+            !row.release_compare_tag.empty() ? row.release_compare_tag : row.installed_tag;
         ImGui::TextColored(th.good, "Installed %s%s",
-                           row.installed_tag.empty() ? "" : row.installed_tag.c_str(),
+                           shown_tag.empty() ? "" : shown_tag.c_str(),
                            row.runtime == "wine" ? " (Wine)" : "");
         if (row.update_available)
             ImGui::TextColored(th.warn, "Update available: %s", row.latest_tag.c_str());
@@ -1518,6 +1555,16 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
 
     ImGui::Dummy(ImVec2(0, 10));
     ImGui::Separator();
+    if (ImGui::Checkbox("Always Check For Updates Before Game Launch",
+                        &hub.settings.check_updates_before_launch))
+        hub.settings.dirty = true;
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextWrapped(
+        "When enabled, Play queries GitHub for that title and asks before launching if a newer "
+        "release is available. Save to apply.");
+    ImGui::PopStyleColor();
+
+    ImGui::Dummy(ImVec2(0, 10));
     if (ImGui::Checkbox("Filter Unsupported Titles", &hub.settings.filter_unsupported_titles))
         hub.settings.dirty = true;
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
@@ -1542,6 +1589,27 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
             "Find Missing downloads covers only for titles with no cached art. "
             "Resync All clears the cover cache and re-downloads every catalog title "
             "(Libretro thumbnails, or RomM when Sync Boxart is enabled).");
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Dummy(ImVec2(0, 8));
+    {
+        const bool busy = hub.job_running.load();
+        ImGui::BeginDisabled(busy);
+        if (ImGui::Button("Clean Unlisted Installs…", ImVec2(-1, 0))) {
+            const size_t n = hub.refresh_orphan_installs();
+            if (n == 0) {
+                hub.set_status("No installs outside the catalog");
+                hub.append_log("Orphan scan: none");
+            } else {
+                hub.orphan_prompt_pending.store(true);
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Find apps/ installs that are no longer in the catalog (after Update Catalog) and "
+            "offer to remove them.");
         ImGui::PopStyleColor();
     }
 
@@ -2148,6 +2216,16 @@ int main(int argc, char** argv) {
             hub.pending_startup_update_check = false;
             hub.start_job(HubJob::CheckUpdates);
         }
+        // Play preflight finished with no update → start Launch on the main thread.
+        if (!hub.job_running.load() && !hub.launch_running.load()) {
+            std::string launch_id;
+            {
+                std::lock_guard<std::mutex> lock(hub.mu);
+                launch_id = std::move(hub.pending_launch_title_id);
+                hub.pending_launch_title_id.clear();
+            }
+            if (!launch_id.empty()) hub.start_job(HubJob::Launch, launch_id);
+        }
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
@@ -2217,6 +2295,7 @@ int main(int argc, char** argv) {
         draw_setup_scan_prompt(hub, th);
         draw_menu_popup(hub, th);
         draw_scans_popup(hub, th);
+        draw_updates_popup(hub, th);
 
         if (hub.show_missing_rom_prompt) {
             ImGui::OpenPopup("ROM not found###missing_rom_prompt");
@@ -2257,6 +2336,7 @@ int main(int argc, char** argv) {
             std::snprintf(scan_label, sizeof(scan_label), "Quick Scan %s", plat_label);
             if (accent_button(scan_label, th, ImVec2(-1, 0))) {
                 hub.scans_platform_filter = plat;
+                hub.pending_scan_missing_rom_id = tid;
                 hub.start_job(HubJob::ScanRoms);
                 ImGui::CloseCurrentPopup();
             }
@@ -2264,6 +2344,106 @@ int main(int argc, char** argv) {
             ImGui::BeginDisabled(busy || !romm_ok);
             if (ImGui::Button("Download from RomM & Build", ImVec2(-1, 0))) {
                 hub.start_job(HubJob::Install, tid, false, true);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            if (ImGui::Button("Cancel", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+            close_modal_on_outside_click();
+            ImGui::EndPopup();
+        }
+
+        if (hub.open_rom_folder_prompt_pending.exchange(false))
+            ImGui::OpenPopup("ROM still missing###open_rom_folder_prompt");
+        if (ImGui::BeginPopupModal("ROM still missing###open_rom_folder_prompt", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            std::string tid, plat;
+            {
+                std::lock_guard<std::mutex> lock(hub.mu);
+                tid = hub.open_rom_folder_prompt_id;
+                plat = hub.open_rom_folder_prompt_platform;
+            }
+            const TitleRow* prow = nullptr;
+            for (const auto& r : hub.rows) {
+                if (r.id == tid) {
+                    prow = &r;
+                    break;
+                }
+            }
+            const char* plat_label = plat.empty() ? "this platform" : platform_display_name(plat);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 420.f);
+            ImGui::TextWrapped("%s", prow ? prow->name.c_str() : tid.c_str());
+            ImGui::Dummy(ImVec2(0, 6));
+            ImGui::TextWrapped(
+                "Quick Scan did not find a verified dump for this title under %s. "
+                "Open the ROM folder to add the files, then run Quick Scan again "
+                "(or download from RomM if configured).",
+                plat_label);
+            ImGui::PopTextWrapPos();
+            ImGui::Dummy(ImVec2(0, 10));
+            ImGui::BeginDisabled(plat.empty() || hub.cfg.library_root.empty());
+            char open_label[96];
+            std::snprintf(open_label, sizeof(open_label), "Open %s ROM Folder", plat_label);
+            if (accent_button(open_label, th, ImVec2(-1, 0))) {
+                const fs::path dir =
+                    retcomm::ensure_platform_dir(hub.cfg.library_root,
+                                                 hub.cfg.folders_for_platform(plat));
+                std::string err;
+                if (dir.empty() || !retcomm::open_path_in_file_manager(dir, &err)) {
+                    hub.append_log("Open ROM folder failed: " +
+                                   (err.empty() ? dir.string() : err));
+                    hub.set_status("Could not open ROM folder");
+                } else {
+                    hub.set_status("Opened " + dir.string());
+                }
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            const bool romm_ok = prow && prow->romm_ready && prow->has_rom_identity;
+            ImGui::BeginDisabled(hub.job_running.load() || !romm_ok || tid.empty());
+            if (ImGui::Button("Download from RomM & Build", ImVec2(-1, 0))) {
+                hub.start_job(HubJob::Install, tid, false, true);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+            close_modal_on_outside_click();
+            ImGui::EndPopup();
+        }
+
+        if (hub.launch_update_prompt_pending.exchange(false))
+            ImGui::OpenPopup("Update available###launch_update_prompt");
+        if (ImGui::BeginPopupModal("Update available###launch_update_prompt", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            std::string tid, from, to, name;
+            {
+                std::lock_guard<std::mutex> lock(hub.mu);
+                tid = hub.launch_update_prompt_id;
+                from = hub.launch_update_from;
+                to = hub.launch_update_to;
+            }
+            for (const auto& r : hub.rows) {
+                if (r.id == tid) {
+                    name = r.name;
+                    break;
+                }
+            }
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 420.f);
+            ImGui::TextWrapped("%s", name.empty() ? tid.c_str() : name.c_str());
+            ImGui::Dummy(ImVec2(0, 6));
+            ImGui::TextWrapped(
+                "A newer release is available.\n\nInstalled: %s\nLatest: %s\n\n"
+                "Update before playing?",
+                from.empty() ? "?" : from.c_str(), to.empty() ? "?" : to.c_str());
+            ImGui::PopTextWrapPos();
+            ImGui::Dummy(ImVec2(0, 10));
+            const bool busy = hub.job_running.load() || hub.launch_running.load();
+            ImGui::BeginDisabled(busy || tid.empty());
+            if (good_button("Update", th, ImVec2(-1, 0))) {
+                hub.start_job(HubJob::Update, tid);
+                ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::Button("Play Without Updating", ImVec2(-1, 0))) {
+                hub.start_job(HubJob::Launch, tid);
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndDisabled();

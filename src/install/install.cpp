@@ -1342,6 +1342,20 @@ std::string fetch_latest_release_tag(const std::string& github_slug, std::string
     return rel.tag;
 }
 
+std::string install_release_compare_tag(const InstallRecord& rec) {
+    if (rec.method == "build") {
+        if (!rec.source_ref.empty()) return rec.source_ref;
+        if (rec.tag.rfind("build-", 0) == 0) return rec.tag.substr(6);
+    }
+    return rec.tag;
+}
+
+std::string install_release_compare_tag(const InstallPlan& plan) {
+    if (plan.record) return install_release_compare_tag(*plan.record);
+    if (plan.installed_tag.rfind("build-", 0) == 0) return plan.installed_tag.substr(6);
+    return plan.installed_tag;
+}
+
 InstallPlan inspect_install(const Paths& paths, const Title& title) {
     InstallPlan plan;
     plan.title = &title;
@@ -1371,12 +1385,11 @@ InstallPlan plan_install(const Paths& paths, const Title& title, const InstallOp
             fetch_latest_release_tag(title.release.github, &err, allow_pre);
         if (!plan.latest_tag.empty()) {
             oss << "  latest:  " << plan.latest_tag << "\n";
-            if (plan.installed && !plan.installed_tag.empty() &&
-                plan.installed_tag != plan.latest_tag) {
+            const std::string have = install_release_compare_tag(plan);
+            if (plan.installed && !have.empty() && have != plan.latest_tag) {
                 plan.update_available = true;
-                oss << "  update:  available (" << plan.installed_tag << " → "
-                    << plan.latest_tag << ")\n";
-            } else if (plan.installed && plan.installed_tag == plan.latest_tag) {
+                oss << "  update:  available (" << have << " → " << plan.latest_tag << ")\n";
+            } else if (plan.installed && !have.empty() && have == plan.latest_tag) {
                 oss << "  update:  up to date\n";
             }
         } else if (!err.empty()) {

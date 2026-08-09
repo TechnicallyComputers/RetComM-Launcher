@@ -44,6 +44,8 @@ struct AppConfig {
     // Hide catalog titles with no local ROM and no cached RomM match.
     // Installed / partial installs stay visible.
     bool filter_unsupported_titles = false;
+    // When Play is pressed, query GitHub for that title and prompt if newer.
+    bool check_updates_before_launch = true;
     CatalogConfig catalog;
     RommConfig romm;
     NetplayConfig netplay;

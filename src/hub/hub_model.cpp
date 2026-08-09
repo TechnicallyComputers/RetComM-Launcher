@@ -304,6 +304,7 @@ void HubModel::refresh_rows(bool check_updates) {
         if (plan.install_dir_present && !plan.installed)
             row.install_issue = plan.message;
         row.installed_tag = plan.installed_tag;
+        row.release_compare_tag = install_release_compare_tag(plan);
         row.install_root = plan.install_root.string();
         row.binary_path = plan.binary_path.string();
         if (plan.record) {
@@ -489,8 +490,11 @@ void HubModel::refresh_rows(bool check_updates) {
             } else if (const auto it = prev_updates.find(row.id); it != prev_updates.end()) {
                 row.latest_tag = it->second.latest_tag;
             }
-            if (!row.latest_tag.empty() && !row.installed_tag.empty() &&
-                row.latest_tag != row.installed_tag)
+            // Match update_title_auto: compare GitHub latest to source_ref for
+            // build pins (install.json tag is "build-<ref>", not the release tag).
+            const std::string& have = row.release_compare_tag.empty() ? row.installed_tag
+                                                                     : row.release_compare_tag;
+            if (!row.latest_tag.empty() && !have.empty() && row.latest_tag != have)
                 row.update_available = true;
         }
 
@@ -957,7 +961,35 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     append_log(boss.str());
                 }
 
-                set_status(std::string(rom_label) + " complete");
+                // Build & Install → Quick Scan follow-up: still missing → open folder.
+                std::string scan_missing_id;
+                {
+                    std::lock_guard<std::mutex> lock(mu);
+                    scan_missing_id = std::move(pending_scan_missing_rom_id);
+                    pending_scan_missing_rom_id.clear();
+                }
+                if (!scan_missing_id.empty()) {
+                    if (!library.preferred_rom(scan_missing_id).empty()) {
+                        set_status("ROM found for " + scan_missing_id +
+                                   " — ready to Build & Install");
+                        append_log("Missing-ROM scan: bound " + scan_missing_id);
+                    } else {
+                        std::string plat;
+                        if (const Title* mt = catalog.find(scan_missing_id))
+                            plat = mt->platform;
+                        {
+                            std::lock_guard<std::mutex> lock(mu);
+                            open_rom_folder_prompt_id = scan_missing_id;
+                            open_rom_folder_prompt_platform = plat;
+                            open_rom_folder_prompt_pending.store(true);
+                        }
+                        set_status("Still no verified ROM for " + scan_missing_id);
+                        append_log("Missing-ROM scan: no match for " + scan_missing_id +
+                                   " — offering to open library folder");
+                    }
+                } else {
+                    set_status(std::string(rom_label) + " complete");
+                }
                 break;
             }
             case HubJob::PurgeMissingFiles: {
@@ -1081,6 +1113,53 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 job_running = false;
                 job = HubJob::None;
                 return;
+            }
+            case HubJob::CheckLaunchUpdate: {
+                set_status("Checking for updates…");
+                const auto* t = find_title();
+                if (!t) {
+                    append_log("unknown title: " + title_id);
+                    break;
+                }
+                if (t->release.github.empty()) {
+                    std::lock_guard<std::mutex> lock(mu);
+                    pending_launch_title_id = title_id;
+                    set_status("Launching " + title_id + "…");
+                    break;
+                }
+                const auto plan = inspect_install(paths, *t);
+                std::string err;
+                const std::string latest = fetch_latest_release_tag(
+                    t->release.github, &err, t->release.allow_prerelease);
+                const std::string have = install_release_compare_tag(plan);
+                const bool upd =
+                    !latest.empty() && !have.empty() && latest != have;
+                if (!latest.empty())
+                    append_log(title_id + ": installed " + have + ", latest " + latest);
+                else if (!err.empty())
+                    append_log(title_id + ": update check failed (" + err + ") — launching");
+                {
+                    std::lock_guard<std::mutex> lock(mu);
+                    for (auto& r : rows) {
+                        if (r.id != title_id) continue;
+                        r.installed_tag = plan.installed_tag;
+                        r.release_compare_tag = have;
+                        if (!latest.empty()) r.latest_tag = latest;
+                        r.update_available = upd;
+                        break;
+                    }
+                    if (upd) {
+                        launch_update_prompt_id = title_id;
+                        launch_update_from = have;
+                        launch_update_to = latest;
+                        launch_update_prompt_pending.store(true);
+                        status = "Update available for " + title_id;
+                    } else {
+                        pending_launch_title_id = title_id;
+                        status = "Up to date — launching " + title_id;
+                    }
+                }
+                break;
             }
             case HubJob::CheckToolchainUpdate: {
                 set_status("Checking toolchain updates…");
@@ -1433,6 +1512,7 @@ void HubModel::open_settings() {
     copy_buf(settings.exclude_dirs, sizeof(settings.exclude_dirs), join_csv(cfg.exclude_dirs));
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
+    settings.check_updates_before_launch = cfg.check_updates_before_launch;
 
     seed_setup_platform_folders();
     settings.dirty = false;
@@ -1451,6 +1531,7 @@ void HubModel::open_setup() {
     copy_buf(settings.exclude_dirs, sizeof(settings.exclude_dirs), join_csv(cfg.exclude_dirs));
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
+    settings.check_updates_before_launch = cfg.check_updates_before_launch;
     settings.platform_folders.clear();
     settings.dirty = false;
     apply_suggested_library_roots(/*overwrite_nonempty=*/false);
@@ -1522,6 +1603,7 @@ bool HubModel::save_settings(std::string* error) {
     next.exclude_dirs = split_csv(settings.exclude_dirs);
     next.prefer_local_boxart = settings.prefer_local_boxart;
     next.filter_unsupported_titles = settings.filter_unsupported_titles;
+    next.check_updates_before_launch = settings.check_updates_before_launch;
 
     // Setup wizard leaves platform_folders empty — keep whatever was already in cfg.
     if (!settings.platform_folders.empty()) {
@@ -1539,6 +1621,7 @@ bool HubModel::save_settings(std::string* error) {
     cfg = std::move(next);
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
+    settings.check_updates_before_launch = cfg.check_updates_before_launch;
     settings.dirty = false;
     set_status("Saved library settings");
     append_log("Wrote " + paths.config_path.string());

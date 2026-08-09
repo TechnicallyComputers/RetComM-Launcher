@@ -72,6 +72,11 @@ struct InstallResult {
 InstallRecord load_install_record(const fs::path& install_root);
 bool save_install_record(const fs::path& install_root, const InstallRecord& rec);
 
+// Tag to compare against GitHub latest release. Build installs pin install.json
+// tag as "build-<ref>"; prefer source_ref (or strip the build- prefix).
+std::string install_release_compare_tag(const InstallRecord& rec);
+std::string install_release_compare_tag(const InstallPlan& plan);
+
 InstallPlan inspect_install(const Paths& paths, const Title& title);
 
 // Plan + optional remote latest tag (when check_latest).

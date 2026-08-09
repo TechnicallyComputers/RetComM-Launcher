@@ -49,6 +49,7 @@ enum class HubJob : int {
     FullScanBios,
     PurgeMissingFiles,
     CheckUpdates,
+    CheckLaunchUpdate, // Play → check this title, then launch or prompt
     FetchBoxart,
     FetchRommRom,
     FetchRommBios,
@@ -110,6 +111,8 @@ struct TitleRow {
     std::string install_issue;   // human-readable reason when !installed && dir present
     std::string expected_binary; // catalog launch name looked for
     std::string installed_tag;
+    // Release tag used for update compares (source_ref for build installs).
+    std::string release_compare_tag;
     std::string latest_tag;
     bool update_available = false;
     bool has_rom = false;
@@ -240,6 +243,7 @@ struct SettingsDraft {
     char exclude_dirs[1024]{}; // comma-separated
     bool prefer_local_boxart = false;
     bool filter_unsupported_titles = false;
+    bool check_updates_before_launch = true;
     std::vector<PlatformFolderEdit> platform_folders;
     bool dirty = false;
 };
@@ -291,8 +295,9 @@ struct HubModel {
     bool setup_confirm_create_roots = false;
     std::vector<std::string> setup_missing_roots; // absolute paths to create
     bool setup_create_platform_folders = true;
-    bool pending_open_scans = false; // Top-bar Scans → open modal next frame
-    bool pending_open_menu = false;  // Top-bar Menu → open modal next frame
+    bool pending_open_scans = false;   // Top-bar Scans → open modal next frame
+    bool pending_open_updates = false; // Top-bar Updates → open modal next frame
+    bool pending_open_menu = false;    // Top-bar Menu → open modal next frame
     // After setup Finish: ask whether to scan the library now.
     bool show_setup_scan_prompt = false;
     // When set, ScanRoms/FullScanRoms quietly syncs the catalog first.
@@ -323,6 +328,12 @@ struct HubModel {
     std::atomic<bool> toolchain_prompt_pending{false};
     // After idle: CheckUpdates (installed games + toolchain).
     bool pending_startup_update_check = false;
+    // Play preflight: update available → confirm; else launch this id on main thread.
+    std::atomic<bool> launch_update_prompt_pending{false};
+    std::string launch_update_prompt_id; // guarded by mu
+    std::string launch_update_from;
+    std::string launch_update_to;
+    std::string pending_launch_title_id; // guarded by mu; main thread starts Launch
     std::string toolchain_current_version;
     std::string toolchain_latest_tag;
     std::string toolchain_status; // short UI line
@@ -357,6 +368,12 @@ struct HubModel {
     // Build & Install with no local ROM → quick scan / RomM download chooser.
     bool show_missing_rom_prompt = false;
     std::string missing_rom_prompt_id;
+    // Set when Quick Scan is started from the missing-ROM prompt; after scan,
+    // if still unbound, open_rom_folder_prompt_pending asks to open the folder.
+    std::string pending_scan_missing_rom_id;
+    std::atomic<bool> open_rom_folder_prompt_pending{false};
+    std::string open_rom_folder_prompt_id;       // guarded by mu
+    std::string open_rom_folder_prompt_platform; // catalog platform slug
 
     void open_settings();
     void open_setup();

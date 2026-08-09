@@ -12,6 +12,8 @@
 #include <iomanip>
 #include <sstream>
 #include <system_error>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace retcomm {
@@ -194,6 +196,15 @@ bool http_get_json(const std::string& url,
     return true;
 }
 
+bool ends_with_ci_local(const std::string& s, const char* suf) {
+    const std::string lower = lower_copy(s);
+    const std::string suffix = lower_copy(suf);
+    return lower.size() >= suffix.size() &&
+           lower.compare(lower.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+bool is_cue_filename(const std::string& name) { return ends_with_ci_local(name, ".cue"); }
+
 struct RomCandidate {
     int rom_id = 0;
     int file_id = 0; // when >0, download via /files/content
@@ -201,6 +212,8 @@ struct RomCandidate {
     std::string matched_by;
     int score = 0;
     std::uint64_t size = 0;
+    bool entry_has_cue = false; // this rom_id's file set includes a .cue
+    bool matched_file_is_cue = false;
 };
 
 RommFetchResult fail(const std::string& msg) {
@@ -223,6 +236,46 @@ std::string iso_utc_now() {
     return oss.str();
 }
 
+void enqueue_sibling_ids(const json& detail, std::vector<int>& queue,
+                         std::unordered_set<int>& seen) {
+    auto push_id = [&](int sid) {
+        if (sid <= 0 || seen.count(sid)) return;
+        seen.insert(sid);
+        queue.push_back(sid);
+    };
+    for (const char* key : {"siblings", "sibling_roms"}) {
+        if (!detail.contains(key) || !detail.at(key).is_array()) continue;
+        for (const auto& s : detail.at(key)) {
+            if (s.is_number_integer()) {
+                push_id(s.get<int>());
+            } else if (s.is_object()) {
+                push_id(s.value("id", 0));
+            }
+        }
+    }
+}
+
+bool entry_files_include_cue(const json& detail) {
+    if (is_cue_filename(detail.value("fs_name", ""))) return true;
+    if (!detail.contains("files") || !detail.at("files").is_array()) return false;
+    for (const auto& f : detail.at("files")) {
+        if (!f.is_object()) continue;
+        if (is_cue_filename(f.value("file_name", ""))) return true;
+    }
+    return false;
+}
+
+// Prefer stronger hash scores; when catalog requires a .cue, prefer entries that
+// actually contain one (iso-only / romhack siblings often hash-miss or win search).
+bool candidate_better(const RomCandidate& cand, const RomCandidate& best, bool require_cue) {
+    if (best.rom_id <= 0) return cand.score >= 200;
+    if (cand.score != best.score) return cand.score > best.score;
+    if (require_cue && cand.entry_has_cue != best.entry_has_cue) return cand.entry_has_cue;
+    if (require_cue && cand.matched_file_is_cue != best.matched_file_is_cue)
+        return cand.matched_file_is_cue;
+    return false;
+}
+
 RommRomMatch match_rom_on_romm_impl(const AppConfig& cfg, const Title& title,
                                     RommProgressFn on_progress) {
     RommRomMatch out;
@@ -241,6 +294,7 @@ RommRomMatch match_rom_on_romm_impl(const AppConfig& cfg, const Title& title,
 
     const std::string base = normalize_base(cfg.romm.base_url);
     const auto headers = auth_headers(cfg.romm);
+    const bool require_cue = title.rom_identity.require_cue;
 
     std::string search = title.name;
     if (search.empty()) search = title.id;
@@ -252,13 +306,19 @@ RommRomMatch match_rom_on_romm_impl(const AppConfig& cfg, const Title& title,
     }
 
     progress(on_progress, "RomM: searching for \"" + search + "\"…");
-    const std::string search_url =
-        base + "/api/roms?limit=40&search_term=" + url_encode(search);
+    // with_siblings helps newer RomM builds surface iso/cue/region variants.
+    const std::string search_url = base + "/api/roms?limit=60&with_siblings=true&with_files=true&" +
+                                   "search_term=" + url_encode(search);
     json root;
     std::string err;
     if (!http_get_json(search_url, headers, root, &err)) {
-        out.message = "RomM search failed: " + err;
-        return out;
+        // Older RomM may reject with_* — retry plain search.
+        const std::string fallback =
+            base + "/api/roms?limit=60&search_term=" + url_encode(search);
+        if (!http_get_json(fallback, headers, root, &err)) {
+            out.message = "RomM search failed: " + err;
+            return out;
+        }
     }
 
     if (!root.contains("items") || !root.at("items").is_array() || root.at("items").empty()) {
@@ -272,6 +332,7 @@ RommRomMatch match_rom_on_romm_impl(const AppConfig& cfg, const Title& title,
         std::string name;
     };
     std::vector<Ranked> ranked;
+    std::unordered_map<int, json> list_items;
     for (const auto& item : root.at("items")) {
         if (!item.is_object()) continue;
         Ranked r;
@@ -284,61 +345,109 @@ RommRomMatch match_rom_on_romm_impl(const AppConfig& cfg, const Title& title,
                          item.value("crc_hash", ""), item.value("fs_size_bytes", 0ull),
                          item.value("fs_name", ""), item.value("md5_hash", ""));
         r.pre += list_hit.score;
+        if (entry_files_include_cue(item)) r.pre += require_cue ? 60 : 10;
         ranked.push_back(r);
+        list_items[r.id] = item;
     }
     std::sort(ranked.begin(), ranked.end(),
               [](const Ranked& a, const Ranked& b) { return a.pre > b.pre; });
 
-    RomCandidate best;
-    const size_t detail_limit = std::min<size_t>(ranked.size(), 12);
-    for (size_t i = 0; i < detail_limit; ++i) {
-        const auto& r = ranked[i];
-        progress(on_progress, "RomM: checking " + r.name + "…");
+    std::vector<int> queue;
+    std::unordered_set<int> seen;
+    const size_t seed_limit = std::min<size_t>(ranked.size(), 24);
+    for (size_t i = 0; i < seed_limit; ++i) {
+        if (seen.insert(ranked[i].id).second) queue.push_back(ranked[i].id);
+        // Sibling ids from list payload (when with_siblings worked).
+        if (const auto it = list_items.find(ranked[i].id); it != list_items.end())
+            enqueue_sibling_ids(it->second, queue, seen);
+    }
+
+    std::unordered_map<int, json> details;
+    auto load_detail = [&](int id) -> const json* {
+        if (const auto it = details.find(id); it != details.end()) return &it->second;
+        // Prefer list payload when it already includes files (with_files=true).
+        if (const auto lit = list_items.find(id); lit != list_items.end() &&
+            lit->second.contains("files") && lit->second.at("files").is_array() &&
+            !lit->second.at("files").empty()) {
+            details[id] = lit->second;
+            return &details[id];
+        }
         json detail;
-        if (!http_get_json(base + "/api/roms/" + std::to_string(r.id), headers, detail, &err))
-            continue;
+        std::string derr;
+        if (!http_get_json(base + "/api/roms/" + std::to_string(id), headers, detail, &derr))
+            return nullptr;
+        details[id] = std::move(detail);
+        return &details[id];
+    };
+
+    RomCandidate best;
+    constexpr size_t kMaxInspect = 40;
+    for (size_t qi = 0; qi < queue.size() && qi < kMaxInspect; ++qi) {
+        const int rom_id = queue[qi];
+        progress(on_progress, "RomM: checking rom #" + std::to_string(rom_id) + "…");
+        const json* detail_ptr = load_detail(rom_id);
+        if (!detail_ptr) continue;
+        const json& detail = *detail_ptr;
+        enqueue_sibling_ids(detail, queue, seen);
 
         const std::string plat = detail.value("platform_slug", "");
         const int plat_bonus = platform_score(title, plat);
+        const bool has_cue = entry_files_include_cue(detail);
+        const std::string fs_name = detail.value("fs_name", "");
+        const std::string fs_path = detail.value("fs_path", "");
+
+        auto consider = [&](IdentityHit hit, int file_id, const std::string& file_name,
+                            std::uint64_t size) {
+            if (hit.matched_by.empty() && hit.score < 200) return;
+            hit.score += plat_bonus;
+            if (require_cue && has_cue) hit.score += 80;
+            if (require_cue && is_cue_filename(file_name)) hit.score += 40;
+            // Prefer Redump-style cue sets over lone .iso when hashes are equal-ish.
+            if (require_cue && !has_cue) hit.score -= 120;
+            // Mild path hint: folder names containing "cue" / "redump".
+            const std::string path_l = lower_copy(fs_path + "/" + fs_name);
+            if (require_cue && (path_l.find("redump") != std::string::npos ||
+                                path_l.find("/cue") != std::string::npos))
+                hit.score += 25;
+
+            RomCandidate cand;
+            cand.score = hit.score;
+            cand.matched_by = hit.matched_by;
+            cand.rom_id = rom_id;
+            cand.file_id = file_id;
+            cand.file_name = file_name;
+            cand.size = size;
+            cand.entry_has_cue = has_cue;
+            cand.matched_file_is_cue = is_cue_filename(file_name);
+            if (candidate_better(cand, best, require_cue)) best = cand;
+        };
 
         {
             auto hit = score_hashes(title.rom_identity, detail.value("sha1_hash", ""),
                                     detail.value("crc_hash", ""),
-                                    detail.value("fs_size_bytes", 0ull),
-                                    detail.value("fs_name", ""), detail.value("md5_hash", ""));
-            hit.score += plat_bonus;
-            if (hit.score > best.score && hit.score >= 200) {
-                best.score = hit.score;
-                best.matched_by = hit.matched_by;
-                best.rom_id = r.id;
-                best.file_id = 0;
-                best.file_name = detail.value("fs_name", "");
-                best.size = detail.value("fs_size_bytes", 0ull);
-                if (hit.matched_by == "sha1" || hit.matched_by == "md5" ||
-                    hit.matched_by == "crc32")
-                    break;
-            }
+                                    detail.value("fs_size_bytes", 0ull), fs_name,
+                                    detail.value("md5_hash", ""));
+            consider(hit, 0, fs_name, detail.value("fs_size_bytes", 0ull));
         }
 
         if (detail.contains("files") && detail.at("files").is_array()) {
             for (const auto& f : detail.at("files")) {
                 if (!f.is_object()) continue;
+                const std::string fname = f.value("file_name", "");
                 auto hit = score_hashes(title.rom_identity, f.value("sha1_hash", ""),
                                         f.value("crc_hash", ""),
-                                        f.value("file_size_bytes", 0ull),
-                                        f.value("file_name", ""), f.value("md5_hash", ""));
-                hit.score += plat_bonus;
-                if (hit.score > best.score && hit.score >= 200) {
-                    best.score = hit.score;
-                    best.matched_by = hit.matched_by;
-                    best.rom_id = r.id;
-                    best.file_id = f.value("id", 0);
-                    best.file_name = f.value("file_name", "");
-                    best.size = f.value("file_size_bytes", 0ull);
-                }
+                                        f.value("file_size_bytes", 0ull), fname,
+                                        f.value("md5_hash", ""));
+                consider(hit, f.value("id", 0), fname, f.value("file_size_bytes", 0ull));
             }
-            if (best.matched_by == "sha1" || best.matched_by == "crc32") break;
         }
+
+        // Strong hash on a cue-capable entry is enough to stop; otherwise keep
+        // walking siblings (iso vs cue/bin, regions, romhacks).
+        if ((best.matched_by == "sha1" || best.matched_by == "md5" ||
+             best.matched_by == "crc32") &&
+            (!require_cue || best.entry_has_cue))
+            break;
     }
 
     if (best.rom_id <= 0 || best.file_name.empty() ||
@@ -364,6 +473,7 @@ RommRomMatch match_rom_on_romm_impl(const AppConfig& cfg, const Title& title,
     out.file_name = best.file_name;
     out.matched_by = best.matched_by;
     out.message = "matched " + best.file_name + " via " + best.matched_by;
+    if (best.entry_has_cue) out.message += " (cue set)";
     return out;
 }
 
