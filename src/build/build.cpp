@@ -1545,6 +1545,45 @@ std::string path_with_prefix(const fs::path& path_prefix) {
     return out;
 }
 
+// Pack root (parent of bin/) for find_package(ZLIB/SDL3) via CMAKE_PREFIX_PATH.
+std::vector<std::pair<std::string, std::string>> toolchain_cmake_env(
+    const fs::path& path_prefix) {
+    std::vector<std::pair<std::string, std::string>> out;
+    if (path_prefix.empty()) return out;
+    const fs::path pack = path_prefix.parent_path();
+    if (pack.empty()) return out;
+#if defined(_WIN32)
+    const char sep = ';';
+    const std::string pack_s = path_to_utf8(pack);
+#else
+    const char sep = ':';
+    const std::string pack_s = pack.string();
+#endif
+    out.emplace_back("ZLIB_ROOT", pack_s);
+    out.emplace_back("RETCOMM_TOOLCHAIN_DIR", pack_s);
+    std::string prefix = pack_s;
+    if (const char* cur = std::getenv("CMAKE_PREFIX_PATH"); cur && *cur) {
+        bool have = false;
+        std::string part;
+        for (size_t i = 0; i <= std::strlen(cur); ++i) {
+            if (i == std::strlen(cur) || cur[i] == sep) {
+                if (part == pack_s) have = true;
+                part.clear();
+            } else {
+                part.push_back(cur[i]);
+            }
+        }
+        if (!have) {
+            prefix += sep;
+            prefix += cur;
+        } else {
+            prefix = cur;
+        }
+    }
+    out.emplace_back("CMAKE_PREFIX_PATH", prefix);
+    return out;
+}
+
 // CMAKE_GENERATOR:STRING=Ninja (empty if missing / unreadable).
 std::string read_cmake_cache_generator(const fs::path& cache_file) {
     std::error_code ec;
@@ -2396,6 +2435,10 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
         if (!psxrecomp_bios.empty())
             gen_env.emplace_back("PSXRECOMP_BIOS", psxrecomp_bios.string());
 #endif
+        {
+            const auto tc_env = toolchain_cmake_env(path_prefix);
+            gen_env.insert(gen_env.end(), tc_env.begin(), tc_env.end());
+        }
 
         if (opts.on_output) opts.on_output("$ " + gen_preview.str());
         std::string gen_log;
@@ -2516,7 +2559,9 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
         }
         opts.on_output("$ " + cmd_preview.str());
     }
-    int crc_rc = run_with_path(conf, src.root, path_prefix, &cmake_log, stream_cli);
+    const auto tc_cmake_env = toolchain_cmake_env(path_prefix);
+    int crc_rc =
+        run_with_path(conf, src.root, path_prefix, &cmake_log, stream_cli, tc_cmake_env);
     if (crc_rc != 0) {
         result.message = fail_with_log(
             "cmake configure failed (exit " + std::to_string(crc_rc) + ")", cmake_log,
@@ -2541,8 +2586,8 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
         }
         opts.on_output("$ " + cmd_preview.str());
     }
-    const int build_rc =
-        run_with_path(build_args, src.root, path_prefix, &cmake_log, stream_cli);
+    const int build_rc = run_with_path(build_args, src.root, path_prefix, &cmake_log,
+                                       stream_cli, tc_cmake_env);
     if (build_rc != 0) {
         result.message = fail_with_log(
             "cmake build failed (exit " + std::to_string(build_rc) + ")", cmake_log,
