@@ -394,7 +394,7 @@ void draw_busy_spinner(ImDrawList* dl, const ImVec2& art0, const ImVec2& art1, c
 float draw_grid_tile(const ImVec2& tile_min, float tile_w, bool selected, const Theme& th,
                      const BoxartTexture* tex, float art_aspect_wh, const char* title,
                      const char* subtitle, const ImVec4* badge_col, bool busy_spinner = false,
-                     bool dim_art = false) {
+                     bool dim_art = false, bool update_overlay = false) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     constexpr float kArtPad = 8.f;
     constexpr float kLabelGap = 4.f;
@@ -432,6 +432,25 @@ float draw_grid_tile(const ImVec2& tile_min, float tile_w, bool selected, const 
 
     if (dim_art || busy_spinner) draw_art_dim(dl, art0, art1, th.radius_sm);
     if (busy_spinner) draw_busy_spinner(dl, art0, art1, th);
+
+    // Update-available: centered soft disc + up arrow over dimmed cover.
+    if (update_overlay && !busy_spinner) {
+        const ImVec2 c((art0.x + art1.x) * 0.5f, (art0.y + art1.y) * 0.5f);
+        const float s = std::min(art1.x - art0.x, art1.y - art0.y);
+        const float rad = s * 0.20f;
+        dl->AddCircleFilled(c, rad, IM_COL32(12, 16, 28, 220), 36);
+        dl->AddCircle(c, rad, ImGui::ColorConvertFloat4ToU32(th.good), 36, 2.2f);
+        const ImU32 arrow = ImGui::ColorConvertFloat4ToU32(th.good);
+        const float h = rad * 0.58f;
+        const float w = rad * 0.48f;
+        const ImVec2 tip(c.x, c.y - h * 0.72f);
+        const ImVec2 bl(c.x - w, c.y + h * 0.08f);
+        const ImVec2 br(c.x + w, c.y + h * 0.08f);
+        dl->AddTriangleFilled(tip, bl, br, arrow);
+        const float stem_w = w * 0.42f;
+        dl->AddRectFilled(ImVec2(c.x - stem_w * 0.5f, c.y - h * 0.08f),
+                          ImVec2(c.x + stem_w * 0.5f, c.y + h * 0.72f), arrow, 2.f);
+    }
 
     if (badge_col) {
         const float r = 7.f;
@@ -644,13 +663,14 @@ void draw_library(HubModel& hub, BoxartCache& boxart, const Theme& th) {
             const ImVec2 tile_min = ImGui::GetCursorScreenPos();
             const bool selected = (hub.selected == i);
             const bool title_busy = install_busy && r.id == busy_title_id;
-            const bool dim_uninstalled = !r.installed;
+            const bool needs_update = r.update_available;
+            const bool dim_art = !r.installed || needs_update;
             const BoxartTexture* tex =
                 r.boxart_path.empty() ? nullptr : boxart.get(r.id, r.boxart_path);
             const ImVec4 badge = chip_color(r, th);
             const float tile_h =
                 draw_grid_tile(tile_min, tile_w, selected, th, tex, aspect, r.name.c_str(),
-                               nullptr, &badge, title_busy, dim_uninstalled);
+                               nullptr, &badge, title_busy, dim_art, needs_update);
 
             ImGui::SetCursorScreenPos(tile_min);
             if (ImGui::InvisibleButton("##row", ImVec2(tile_w, tile_h))) {
@@ -1273,12 +1293,17 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
     if (row.installed) {
         // Play stays available during Build & Install / scans (own worker thread).
         ImGui::BeginDisabled(hub.launch_running.load());
-        if (good_button("Play", th, ImVec2(btn_w, 0)))
+        if (ImGui::Button("Play", ImVec2(btn_w, 0)))
             hub.start_job(HubJob::Launch, row.id);
         ImGui::EndDisabled();
         ImGui::SameLine(0, 8);
         ImGui::BeginDisabled(block_title_mutate);
-        if (ImGui::Button("Update", ImVec2(btn_w, 0))) hub.start_job(HubJob::Update, row.id);
+        if (row.update_available) {
+            if (good_button("Update", th, ImVec2(btn_w, 0)))
+                hub.start_job(HubJob::Update, row.id);
+        } else if (ImGui::Button("Update", ImVec2(btn_w, 0))) {
+            hub.start_job(HubJob::Update, row.id);
+        }
         ImGui::EndDisabled();
     } else if (row.supports_local_build) {
         if (!row.has_rom) {

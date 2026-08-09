@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cstring>
 #include <sstream>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace retcomm::hub {
@@ -245,6 +246,22 @@ size_t HubModel::refresh_orphan_installs() {
 }
 
 void HubModel::refresh_rows(bool check_updates) {
+    // Keep last GitHub check results across refresh_rows(false) so one Update /
+    // scan job does not clear UPDATE badges for every other title.
+    struct CachedUpdate {
+        std::string latest_tag;
+        bool update_available = false;
+    };
+    std::unordered_map<std::string, CachedUpdate> prev_updates;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        prev_updates.reserve(rows.size());
+        for (const auto& r : rows) {
+            if (r.latest_tag.empty() && !r.update_available) continue;
+            prev_updates[r.id] = CachedUpdate{r.latest_tag, r.update_available};
+        }
+    }
+
     library = load_library_index(paths.library_index_path);
     romm_roms = load_romm_rom_index(paths.romm_rom_index_path);
     app_state = load_app_state(paths.state_path);
@@ -464,10 +481,14 @@ void HubModel::refresh_rows(bool check_updates) {
             }
         }
 
-        if (check_updates && row.installed && !t.release.github.empty()) {
-            std::string err;
-            row.latest_tag = fetch_latest_release_tag(t.release.github, &err,
-                                                     t.release.allow_prerelease);
+        if (row.installed && !t.release.github.empty()) {
+            if (check_updates) {
+                std::string err;
+                row.latest_tag = fetch_latest_release_tag(t.release.github, &err,
+                                                         t.release.allow_prerelease);
+            } else if (const auto it = prev_updates.find(row.id); it != prev_updates.end()) {
+                row.latest_tag = it->second.latest_tag;
+            }
             if (!row.latest_tag.empty() && !row.installed_tag.empty() &&
                 row.latest_tag != row.installed_tag)
                 row.update_available = true;
