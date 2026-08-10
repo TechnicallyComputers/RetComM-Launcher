@@ -80,14 +80,15 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
 // Local generate + cmake + stage into releases/build-<ref>/ + install.json.
 InstallResult build_title(const Paths& paths, const Title& title, const BuildOptions& opts = {});
 
-// Prefer prebuilt zip when host release assets exist; else local build when
-// the catalog recipe allows. prefer_prebuilt / Wine skips the build fallback.
+// Setup-host / one-zip titles (build.enabled): release zip is SOURCE → generate+cmake.
+// Pure prebuilt titles: zip extract. prefer_prebuilt forces zip extract.
 InstallResult install_title_auto(const Paths& paths, const Title& title,
                                  const InstallOptions& install_opts = {},
                                  const BuildOptions& build_opts = {});
 
-// Same prefer-zip-then-build policy as install_title_auto for updates.
-// Generate & Rebuild still forces a local build.
+// Setup-host titles: rebuild from latest release zip; codegen-cache skips regenerate
+// when ROM/BIOS/emitters match (host/UI-only updates). Pure prebuilt: zip extract.
+// Generate & Rebuild sets force_generate.
 InstallResult update_title_auto(const Paths& paths, const Title& title,
                                 const InstallOptions& install_opts = {},
                                 const BuildOptions& build_opts = {});

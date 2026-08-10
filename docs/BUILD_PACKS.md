@@ -25,8 +25,14 @@ counts.
 **Codegen reuse on update:** after the first successful generate, RetComM keeps
 `apps/<title>/codegen-cache/` keyed by ROM/BIOS + emitter fingerprints. Updates
 that only change runtime/UI sources restore that cache (or a stamped prior
-`src/<tag>/`) and skip regenerate; pass `force_generate` to rebuild C from the
-disc again.
+`src/<tag>/`) and skip regenerate; pass `force_generate` (Hub **Generate &
+Rebuild**) to rebuild C from the disc again.
+
+**Setup-host vs raw zip:** catalog titles with `build.enabled` treat the GitHub
+release zip as *source* for generate+cmake (`install_title_auto` /
+`update_title_auto`). Blind zip extract would replace a built Play binary with
+the setup-host wizard — never do that for MotK/BPE-style packs. Pure prebuilt
+titles (no local build recipe) still Update via zip extract.
 
 Optional: `RETCOMM_PYTHON` selects the interpreter for SDK CLIs
 (default `python3` / `python` on Windows).
