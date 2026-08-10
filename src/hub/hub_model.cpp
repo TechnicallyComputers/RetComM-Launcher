@@ -930,12 +930,21 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     append_log("unknown title: " + title_id);
                     break;
                 }
+                InstallOptions iopts;
+                {
+                    std::lock_guard<std::mutex> lock(mu);
+                    for (const auto& r : rows) {
+                        if (r.id != title_id) continue;
+                        iopts.hint_latest_tag = r.latest_tag;
+                        break;
+                    }
+                }
                 BuildOptions bopts;
                 bopts.rom_path = library.preferred_rom(title_id);
                 app_state = load_app_state(paths.state_path);
                 apply_bios_choice_to_build(*t, bios, app_state, bopts);
                 wire_build_activity(this, bopts);
-                auto r = update_title_auto(paths, *t, {}, bopts);
+                auto r = update_title_auto(paths, *t, iopts, bopts);
                 append_log(r.message);
                 set_status(r.ok ? (r.skipped ? ("Up to date: " + title_id)
                                              : ("Updated " + title_id))
@@ -1277,6 +1286,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                         }
                     }
                 }
+                bool launcher_upd = false;
                 {
                     set_status("Checking RetComM…");
                     auto lc = check_retcomm_update(paths);
@@ -1284,7 +1294,8 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     std::lock_guard<std::mutex> lock(mu);
                     launcher_current_version = lc.current_tag;
                     launcher_latest_tag = lc.latest_tag;
-                    if (lc.ok && lc.update_available) launcher_update_prompt_pending.store(true);
+                    launcher_upd = lc.ok && lc.update_available;
+                    if (launcher_upd) launcher_update_prompt_pending.store(true);
                 }
                 set_status("Checking game updates…");
                 refresh_rows(true);
@@ -1294,11 +1305,11 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     for (const auto& r : rows)
                         if (r.update_available) ++game_updates;
                     game_updates_prompt_count = game_updates;
-                    if (game_updates > 0) game_updates_prompt_pending.store(true);
                 }
                 if (game_updates > 0) {
                     append_log(std::to_string(game_updates) + " game update(s) available");
                 }
+                bool toolchain_upd = false;
                 {
                     set_status("Checking toolchain…");
                     auto tc = check_toolchain_update(paths);
@@ -1308,10 +1319,25 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     toolchain_latest_tag = tc.latest_tag;
                     toolchain_update_available = tc.update_available;
                     toolchain_status = tc.message;
-                    if (tc.update_available) toolchain_prompt_pending.store(true);
+                    toolchain_upd = tc.update_available;
                 }
-                if (launcher_update_prompt_pending.load() || toolchain_prompt_pending.load() ||
-                    game_updates > 0)
+                if (launcher_upd) {
+                    // Hold game/toolchain prompts until Later. Accepting self-update
+                    // discards them so nothing else starts before restart.
+                    std::lock_guard<std::mutex> lock(mu);
+                    deferred_followup_updates = true;
+                    deferred_game_updates_count = game_updates;
+                    deferred_toolchain_prompt = toolchain_upd;
+                    game_updates_prompt_pending.store(false);
+                    toolchain_prompt_pending.store(false);
+                    set_status("Updates available");
+                    job_running = false;
+                    job = HubJob::None;
+                    return;
+                }
+                if (game_updates > 0) game_updates_prompt_pending.store(true);
+                if (toolchain_upd) toolchain_prompt_pending.store(true);
+                if (toolchain_prompt_pending.load() || game_updates > 0)
                     set_status("Updates available");
                 else
                     set_status("Up to date");
@@ -1506,6 +1532,8 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 break;
             }
             case HubJob::SelfUpdate: {
+                // Do not surface game/toolchain prompts while we download + restart.
+                discard_followup_update_prompts();
                 set_status("Checking RetComM Launcher updates…");
                 const auto install = retcomm_install_info();
                 append_log("Self-update: current=" + retcomm_app_version() +
@@ -1520,6 +1548,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     launcher_version = retcomm_app_version();
                 }
                 if (ur.ok && ur.restart_scheduled) {
+                    discard_followup_update_prompts();
                     set_status("Updating RetComM — restarting…");
                     request_exit.store(true);
                     job_running = false;
@@ -1629,6 +1658,35 @@ void HubModel::join_worker() {
     if (worker.joinable()) worker.join();
     if (launch_worker.joinable()) launch_worker.join();
     if (prefetch_worker.joinable()) prefetch_worker.join();
+}
+
+void HubModel::discard_followup_update_prompts() {
+    std::lock_guard<std::mutex> lock(mu);
+    deferred_followup_updates = false;
+    deferred_game_updates_count = 0;
+    deferred_toolchain_prompt = false;
+    game_updates_prompt_pending.store(false);
+    toolchain_prompt_pending.store(false);
+}
+
+void HubModel::release_deferred_followup_updates() {
+    int games = 0;
+    bool toolchain = false;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        if (!deferred_followup_updates) return;
+        deferred_followup_updates = false;
+        games = deferred_game_updates_count;
+        toolchain = deferred_toolchain_prompt;
+        deferred_game_updates_count = 0;
+        deferred_toolchain_prompt = false;
+        if (games > 0) {
+            game_updates_prompt_count = games;
+            game_updates_prompt_pending.store(true);
+        }
+        if (toolchain) toolchain_prompt_pending.store(true);
+    }
+    if (games > 0) start_prefetch_updates();
 }
 
 void HubModel::start_prefetch_updates(const std::vector<std::string>& title_ids) {

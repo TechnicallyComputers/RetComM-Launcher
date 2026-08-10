@@ -3060,18 +3060,35 @@ int main(int argc, char** argv) {
             const bool busy = hub.job_running.load();
             ImGui::BeginDisabled(busy);
             if (accent_button("Update RetComM", th, ImVec2(160, 0))) {
+                hub.discard_followup_update_prompts();
                 hub.start_job(HubJob::SelfUpdate);
                 ImGui::CloseCurrentPopup();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Later", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+            if (ImGui::Button("Later", ImVec2(120, 0))) {
+                hub.release_deferred_followup_updates();
+                ImGui::CloseCurrentPopup();
+            }
             ImGui::EndDisabled();
             close_modal_on_outside_click();
             ImGui::EndPopup();
         }
 
+        const bool launcher_self_updating =
+            hub.request_exit.load() ||
+            (hub.job_running.load() && hub.job == HubJob::SelfUpdate);
+        // Outside-click dismiss is "Later" — release deferred game/toolchain prompts.
+        {
+            static bool launcher_modal_was_open = false;
+            const bool launcher_modal_open =
+                open_launcher_update || ImGui::IsPopupOpen("RetComM update###launcher_update");
+            if (launcher_modal_was_open && !launcher_modal_open && !launcher_self_updating)
+                hub.release_deferred_followup_updates();
+            launcher_modal_was_open = launcher_modal_open;
+        }
         const bool launcher_blocking =
-            open_launcher_update || ImGui::IsPopupOpen("RetComM update###launcher_update") ||
+            launcher_self_updating || open_launcher_update ||
+            ImGui::IsPopupOpen("RetComM update###launcher_update") ||
             hub.launcher_update_prompt_pending.load();
         const bool open_game_updates =
             !launcher_blocking && hub.game_updates_prompt_pending.exchange(false);

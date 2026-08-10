@@ -362,25 +362,92 @@ bool schedule_replace_portable_and_restart(const fs::path& new_portable, const f
                                            std::string* error) {
     const DWORD pid = GetCurrentProcessId();
     const fs::path script = new_portable.parent_path() / "apply_portable_update.bat";
+    const fs::path log_path = new_portable.parent_path() / "apply_portable_update.log";
+    std::string log_js = log_path.generic_string(); // forward slashes for mshta/JS
+    for (char& c : log_js) {
+        if (c == '\'') c = ' ';
+    }
     {
         std::ofstream out(script);
         if (!out) {
             if (error) *error = "cannot write apply script";
             return false;
         }
+        // Harden replace: retry + rename dance; only invalidate/relaunch if the
+        // new bytes land at dest. A failed copy used to delete version.txt and
+        // restart the old stub (same version forever).
         out << "@echo off\r\n"
+            << "setlocal EnableExtensions EnableDelayedExpansion\r\n"
             << "set PID=" << pid << "\r\n"
+            << "set \"NEW=" << new_portable.string() << "\"\r\n"
+            << "set \"DEST=" << dest_portable.string() << "\"\r\n"
+            << "set \"OLD=!DEST!.retcomm-old\"\r\n"
+            << "set \"LOG=" << log_path.string() << "\"\r\n"
+            << "echo RetComM portable update > \"!LOG!\"\r\n"
+            << "echo NEW=!NEW!>> \"!LOG!\"\r\n"
+            << "echo DEST=!DEST!>> \"!LOG!\"\r\n"
+            << "echo Waiting for PID !PID!>> \"!LOG!\"\r\n"
+            << "set W=0\r\n"
             << ":wait\r\n"
-            << "tasklist /FI \"PID eq %PID%\" 2>NUL | find \"%PID%\" >NUL\r\n"
-            << "if not errorlevel 1 (\r\n"
+            << "tasklist /FI \"PID eq !PID!\" 2>NUL | findstr /I /C:\"No tasks\" >NUL\r\n"
+            << "if errorlevel 1 (\r\n"
+            << "  set /a W+=1\r\n"
+            << "  if !W! GTR 120 (\r\n"
+            << "    echo Timed out waiting for PID !PID!>> \"!LOG!\"\r\n"
+            << "    goto fail\r\n"
+            << "  )\r\n"
             << "  timeout /t 1 /nobreak >NUL\r\n"
             << "  goto wait\r\n"
             << ")\r\n"
-            << "copy /Y \"" << new_portable.string() << "\" \"" << dest_portable.string()
-            << "\"\r\n"
+            << "if not exist \"!NEW!\" (\r\n"
+            << "  echo Staged portable missing>> \"!LOG!\"\r\n"
+            << "  goto fail\r\n"
+            << ")\r\n"
+            << "del /F /Q \"!OLD!\" 2>NUL\r\n"
+            << "set TRIES=0\r\n"
+            << ":retry\r\n"
+            << "set /a TRIES+=1\r\n"
+            << "if !TRIES! GTR 40 (\r\n"
+            << "  echo Replace retries exhausted>> \"!LOG!\"\r\n"
+            << "  goto fail\r\n"
+            << ")\r\n"
+            << "echo Attempt !TRIES!>> \"!LOG!\"\r\n"
+            << "if exist \"!DEST!\" (\r\n"
+            << "  move /Y \"!DEST!\" \"!OLD!\" >> \"!LOG!\" 2>&1\r\n"
+            << "  if errorlevel 1 (\r\n"
+            << "    timeout /t 1 /nobreak >NUL\r\n"
+            << "    goto retry\r\n"
+            << "  )\r\n"
+            << ")\r\n"
+            << "copy /Y \"!NEW!\" \"!DEST!\" >> \"!LOG!\" 2>&1\r\n"
+            << "if errorlevel 1 (\r\n"
+            << "  if exist \"!OLD!\" move /Y \"!OLD!\" \"!DEST!\" >> \"!LOG!\" 2>&1\r\n"
+            << "  timeout /t 1 /nobreak >NUL\r\n"
+            << "  goto retry\r\n"
+            << ")\r\n"
+            << "for %%A in (\"!NEW!\") do set NEWSIZE=%%~zA\r\n"
+            << "for %%A in (\"!DEST!\") do set DESTSIZE=%%~zA\r\n"
+            << "if not \"!NEWSIZE!\"==\"!DESTSIZE!\" (\r\n"
+            << "  echo Size mismatch NEW=!NEWSIZE! DEST=!DESTSIZE!>> \"!LOG!\"\r\n"
+            << "  del /F /Q \"!DEST!\" 2>NUL\r\n"
+            << "  if exist \"!OLD!\" move /Y \"!OLD!\" \"!DEST!\" >> \"!LOG!\" 2>&1\r\n"
+            << "  timeout /t 1 /nobreak >NUL\r\n"
+            << "  goto retry\r\n"
+            << ")\r\n"
+            << "del /F /Q \"!OLD!\" 2>NUL\r\n"
+            << "echo Replace OK size=!DESTSIZE!>> \"!LOG!\"\r\n"
             // Invalidate extracted runtime so the new stub re-unpacks.
             << "del /Q \"%LOCALAPPDATA%\\retcomm\\portable\\version.txt\" 2>NUL\r\n"
-            << "start \"\" \"" << dest_portable.string() << "\"\r\n";
+            << "start \"\" \"!DEST!\"\r\n"
+            << "exit /b 0\r\n"
+            << ":fail\r\n"
+            << "echo FAILED>> \"!LOG!\"\r\n"
+            << "if exist \"!OLD!\" if not exist \"!DEST!\" move /Y \"!OLD!\" \"!DEST!\" >> \"!LOG!\" 2>&1\r\n"
+            << "mshta \"javascript:alert('RetComM portable update failed to replace the "
+               "exe.\\n\\nMove it out of Downloads/OneDrive if needed, ensure the folder "
+               "is writable, then try Update again.\\n\\nLog:\\n"
+            << log_js << "');close()\"\r\n"
+            << "exit /b 1\r\n";
     }
     return schedule_bat(script, error);
 }

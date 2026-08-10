@@ -60,6 +60,9 @@ struct InstallOptions {
     bool use_wine = false;
     // When the title supports local build, force the prebuilt zip path instead.
     bool prefer_prebuilt = false;
+    // Optional latest tag from a prior check (hub row / ReleaseTagCache). Used when
+    // the live GitHub API is rate-limited so Update can still apply a prefetched zip.
+    std::string hint_latest_tag;
 };
 
 struct InstallResult {

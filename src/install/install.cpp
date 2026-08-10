@@ -4,6 +4,7 @@
 #include "retcomm/http.hpp"
 #include "retcomm/library_index.hpp"
 #include "retcomm/paths.hpp"
+#include "retcomm/release_tags.hpp"
 #include "retcomm/romm_fetch.hpp"
 
 #include <nlohmann/json.hpp>
@@ -1488,8 +1489,16 @@ InstallPlan plan_install(const Paths& paths, const Title& title, const InstallOp
     if (opts.check_latest && !title.release.github.empty()) {
         std::string err;
         const bool allow_pre = opts.allow_prerelease || title.release.allow_prerelease;
-        plan.latest_tag =
-            fetch_latest_release_tag(title.release.github, &err, allow_pre);
+        // Prefer hub/CLI hint, then the same ReleaseTagCache as Check Updates (keeps
+        // serving a recent tag when GitHub returns 403).
+        if (!opts.hint_latest_tag.empty()) {
+            plan.latest_tag = opts.hint_latest_tag;
+        } else {
+            ReleaseTagCache tag_cache(release_tags_cache_path(paths));
+            plan.latest_tag =
+                tag_cache.latest_tag(title.release.github, allow_pre, /*force=*/false, &err);
+            tag_cache.save_if_dirty();
+        }
         if (!plan.latest_tag.empty()) {
             oss << "  latest:  " << plan.latest_tag << "\n";
             const std::string have = install_release_compare_tag(plan);
@@ -1579,14 +1588,79 @@ EnsuredReleaseAsset ensure_release_asset_cached(const Paths& paths, const Title&
 
     std::string err;
     const bool allow_pre = opts.allow_prerelease || title.release.allow_prerelease;
-    if (!fetch_latest_release(title.release.github, out.rel, &err, allow_pre)) {
-        out.message = "failed to fetch release: " + err;
+    const bool fetched = fetch_latest_release(title.release.github, out.rel, &err, allow_pre);
+    if (!fetched) {
+        // Live API failed (often HTTP 403). Fall back to a known tag + on-disk cache
+        // so Update can still apply a zip that Check Updates / prefetch already got.
+        std::string tag = opts.hint_latest_tag;
+        if (tag.empty()) {
+            ReleaseTagCache tag_cache(release_tags_cache_path(paths));
+            tag = tag_cache.latest_tag(title.release.github, allow_pre, /*force=*/false, nullptr);
+            tag_cache.save_if_dirty();
+        }
+        if (tag.empty()) {
+            out.message = "failed to fetch release: " + err;
+            return out;
+        }
+        const fs::path cache_dir =
+            release_download_cache_path(paths, title.release.github, tag, "_").parent_path();
+        std::error_code ec;
+        std::string best_name;
+        fs::path best_path;
+        std::uint64_t best_size = 0;
+        int best_score = -1;
+        if (fs::is_directory(cache_dir, ec)) {
+            for (auto it = fs::directory_iterator(cache_dir, ec);
+                 !ec && it != fs::directory_iterator(); it.increment(ec)) {
+                if (!it->is_regular_file(ec)) continue;
+                const std::string name = it->path().filename().string();
+                if (name.size() > 5 && name.compare(name.size() - 5, 5, ".part") == 0) continue;
+                if (!asset_name_matches_glob(glob, name)) continue;
+                int score = ends_with_ci(name, ".zip") ? 3 : 0;
+                if (score < best_score) continue;
+                best_score = score;
+                best_name = name;
+                best_path = it->path();
+                best_size = fs::file_size(best_path, ec);
+            }
+        }
+        if (best_name.empty()) {
+            out.message = "failed to fetch release: " + err +
+                          " (no cached asset for " + tag + ")";
+            return out;
+        }
+        out.rel.tag = tag;
+        out.rel.html_url =
+            "https://github.com/" + title.release.github + "/releases/tag/" + tag;
+        out.asset_name = best_name;
+        out.asset_size = best_size;
+        out.browser_download_url.clear();
+        out.download = best_path;
+        out.ok = true;
+        out.from_cache = true;
+        out.message = "cached " + best_name + " (" + tag + ") — offline/API fallback";
+        if (allow_skip_uptodate) {
+            InstallPlan plan = inspect_install(paths, title);
+            const std::string have = install_release_compare_tag(plan);
+            if (plan.installed && !opts.force && !have.empty() && have == tag) {
+                const bool same_runtime =
+                    !plan.record ||
+                    (out.use_wine ? plan.record->runtime == "wine"
+                                  : plan.record->runtime != "wine");
+                if (same_runtime) {
+                    out.skipped_uptodate = true;
+                    out.message = "already installed at " + tag;
+                }
+            }
+        }
         return out;
     }
 
     if (allow_skip_uptodate) {
         InstallPlan plan = inspect_install(paths, title);
-        if (plan.installed && !opts.force && plan.installed_tag == out.rel.tag) {
+        // Compare release tag to source_ref / zip tag — not raw "build-<ref>".
+        const std::string have = install_release_compare_tag(plan);
+        if (plan.installed && !opts.force && !have.empty() && have == out.rel.tag) {
             const bool same_runtime =
                 !plan.record ||
                 (out.use_wine ? plan.record->runtime == "wine"
@@ -1867,13 +1941,22 @@ InstallResult update_title(const Paths& paths, const Title& title, const Install
     }
     InstallPlan plan = plan_install(paths, title, o);
     if (plan.installed && !plan.update_available && !o.force) {
-        InstallResult r;
-        r.ok = true;
-        r.skipped = true;
-        r.plan = std::move(plan);
-        r.message = title.id + " is up to date (" + r.plan.installed_tag + ")\n";
-        return r;
+        // Only treat as up to date when we successfully resolved a latest tag.
+        // A failed/empty check used to report "up to date" while the hub still
+        // showed an update from ReleaseTagCache — leave that path and try install.
+        if (!plan.latest_tag.empty()) {
+            InstallResult r;
+            r.ok = true;
+            r.skipped = true;
+            r.plan = std::move(plan);
+            r.message = title.id + " is up to date (" + r.plan.installed_tag + ")\n";
+            return r;
+        }
+        // latest unknown — continue; install_title may use cache / live fetch.
+        if (!o.hint_latest_tag.empty()) o.force = true;
     }
+    if (!plan.latest_tag.empty() && o.hint_latest_tag.empty())
+        o.hint_latest_tag = plan.latest_tag;
     o.force = o.force || plan.update_available;
     return install_title(paths, title, o);
 }

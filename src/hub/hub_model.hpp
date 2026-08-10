@@ -354,6 +354,10 @@ struct HubModel {
     // After launcher prompt: summary when CheckUpdates finds outdated titles.
     std::atomic<bool> game_updates_prompt_pending{false};
     int game_updates_prompt_count = 0; // guarded by mu
+    // Held while the launcher self-update modal is up — released on Later, dropped on Update.
+    bool deferred_followup_updates = false; // guarded by mu
+    int deferred_game_updates_count = 0;    // guarded by mu
+    bool deferred_toolchain_prompt = false; // guarded by mu
     // Background release-zip prefetch (separate from job_running so Update still works).
     std::atomic<bool> prefetch_running{false};
     std::thread prefetch_worker;
@@ -419,6 +423,10 @@ struct HubModel {
     // Download pending game update zips into the release cache (non-blocking job slot).
     // empty ids → all rows with update_available. Safe to call from worker or UI thread.
     void start_prefetch_updates(const std::vector<std::string>& title_ids = {});
+    // After dismissing RetComM update with Later: show deferred game/toolchain prompts.
+    void release_deferred_followup_updates();
+    // Accepting RetComM self-update / restart: drop follow-up prompts so nothing else starts.
+    void discard_followup_update_prompts();
 
     // Build & Install with no local ROM → quick scan / RomM download chooser.
     bool show_missing_rom_prompt = false;
