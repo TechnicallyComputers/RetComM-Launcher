@@ -1,37 +1,152 @@
 # RetComM Launcher
 
-Desktop hub for the RetComM team's **recomp** and **decomp** titles: browse a
-supported catalog, install/update builds, match ROMs from a local library (and
-optionally RomM), then launch each game into its own `recomp-ui` session.
+**RetComM — Retro Compilation Manager** catalogs and installs recomps that
+**self-compile on the end user’s machine**. For liability reasons we encourage
+releases that do **not** ship machine-generated C derived from proprietary
+software; users generate that code locally instead. First installs can take
+**5–10 minutes**, which is a lot to manage by hand — this hub exists to make
+that workflow practical.
 
-This repo is the **multi-title manager**. Per-game settings, ROM verification,
-controllers, and PLAY still live in [`recomp-ui`](https://github.com/mstan/recomp-ui)
-inside each game binary.
+RetComM checks for updates, rebuilds with **existing build data** when
+possible, shares the same **portable toolchain** used by per-title self-compiling
+launchers, and automates BIOS/ROM wiring so you are not stuck in each game’s
+Generate & Build wizard.
 
 ```
-RetComM Launcher          →  install / update / recommend / launch
+RetComM Launcher          →  catalog / install / queue / update / launch
         │
         ▼
-each recomp/decomp exe    →  recomp-ui (settings + PLAY)
+each recomp/decomp exe    →  recomp-ui (settings, disc verify, PLAY)
 ```
 
-## Status (MVP scaffold)
+Windows, Linux, and macOS builds are available from
+[Releases](https://github.com/TechnicallyComputers/RetComM-Launcher/releases).
+Feedback is welcome while the project keeps evolving.
 
-| Piece | State |
+<p align="center">
+  <img src="docs/screenshots/hub-and-game-launcher.png" alt="RetComM hub with a background build, next to a title’s recomp-ui launcher" width="900">
+</p>
+
+## Why self-compiling?
+
+Shipping pre-generated recomp C from commercial ROMs is a legal grey area we
+prefer to avoid. Catalog titles that use **psxrecomp + recomp-ui** (and similar
+self-compiling stacks) ask each user to generate and compile on their own PC.
+RetComM’s job is to make that tolerable: shared toolchains, incremental rebuilds,
+queued installs, and automatic ROM/BIOS/save plumbing.
+
+Submit a title via the
+[catalog submission form](https://technicallycomputers.github.io/retcomm-catalog/submit/).
+psxrecomp + recomp-ui projects can auto-fill most fields. Other self-compiling
+launchers can still be listed so RetComM fetches releases/updates and hands users
+off to that title’s install flow as gracefully as possible.
+
+## Features
+
+### Queue installs & updates; play while builds run
+
+Queue every pending update at once, or queue Install/Update for individual
+titles anytime. Builds and installs continue in the background while you browse
+the library and launch other games. Builds are CPU-heavy — expect some lag until
+they finish.
+
+<p align="center">
+  <img src="docs/screenshots/queue-all-updates.png" alt="Game updates dialog with Queue All Updates" width="720">
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/queue-and-background-build.png" alt="Background cmake build with five titles queued" width="720">
+</p>
+
+### Install locations
+
+ROM/BIOS/save libraries stay in your emulation tree. Recomp app data can install
+under the default apps folder or extra roots you add in Library Settings (e.g. a
+fast SSD). When more than one root is configured, Install asks where to put the
+title.
+
+<p align="center">
+  <img src="docs/screenshots/install-location.png" alt="Install location picker for Home vs Raid" width="720">
+</p>
+
+### Library import & scan
+
+**Easy Install** scaffolds a common EmulationStation-style folder layout.
+Advanced users can point RetComM at an existing ES-DE / RomM-style library and
+map platform folders. Import ROMs, saves, and BIOS dumps from **Add/Scan Files**;
+files are hashed, indexed, and stored in your library directories. Scan also picks up
+files you placed on disk manually.
+
+<p align="center">
+  <img src="docs/screenshots/library-import.png" alt="Library modal: import ROM / save / BIOS and scan" width="720">
+</p>
+
+### Memory cards & save management
+
+Pick memcards (or cart battery files) per title, create/rename/import saves, and
+optionally **two-way sync with [RomM](https://romm.app/)** via the RomM API.
+Saves and configs are preserved across app updates, and uninstall can keep them
+for a later reinstall.
+
+<p align="center">
+  <img src="docs/screenshots/memory-cards.png" alt="Memory Card 1 picker with Select, Create, Import, Sync with RomM" width="720">
+</p>
+
+### BIOS, OpenBIOS, and hot-swap
+
+Install with bundled **OpenBIOS**, then add a retail dump such as `SCPH1001.BIN`
+later and RetComM can prompt a rebuild with SCPH support. After that, hot-swap
+between BIOS choices in the hub. Online multiplayer may force the lobby down to
+OpenBIOS if a player lacks an SCPH-capable build.
+
+### RomM integration
+
+With a RomM base URL + client API token, RetComM can:
+
+- Match catalog titles to your RomM library by hash (fast — RomM already hashed them)
+- Download matching ROMs and BIOS into your library
+- Bidirectionally sync native saves (newer wins)
+
+### Toolchain, rebuilds, and preservation
+
+RetComM uses the same portable toolchain packs as the per-title self-compiling
+launchers. It preserves cmake/build intermediates when possible so updates rebuild
+faster, wires ROMs and BIOS automatically, and skips the per-game Generate & Build
+wizard when you manage installs through the hub.
+
+### Catalog, boxart, and power-user options
+
+Remote catalog from
+[`retcomm-catalog`](https://github.com/TechnicallyComputers/retcomm-catalog),
+automatic boxart (Libretro by default; optional RomM covers or local art),
+uninstall with keep-saves, and deeper options under **Menu** (library roots,
+exclude dirs, update checks, etc.).
+
+## Coming soon
+
+- **Centralized per-platform config** — preferred render/controller/hotkey defaults
+  applied at launch, with optional per-game blacklist for power users
+- **Mod management** and optional launcher bypass when RetComM owns configuration
+- **Centralized netplay lobby** — stay in one lobby, hot-swap titles after a match,
+  filter by player count / shared library, backwards compatible with each game’s
+  built-in lobby
+
+## Downloads
+
+| Artifact | Platform |
 |---|---|
-| Title catalog (JSON manifests) | Working (remote cache + bundled fallback) |
-| CLI: `list` / `scan` / `status` / `config` | Working |
-| RomM-style library scan (platform folders) | Working |
-| Local ROM scan + CRC/SHA-1 match | Working |
-| Library index (incremental + launch paths) | Working |
-| BIOS scan + index (title bindings) | Working |
-| Install from GitHub release | Working (OS asset + nested zip unwrap) |
-| Launch installed title | Working (`--launcher` / `--bios`; disc via settings.toml) |
-| Update check | Working (`update`, `library --check-updates`) |
-| RomM API client | Working (boxart search + ROM/BIOS identity match + download) |
-| Hub UI (ImGui) | Working scaffold (`retcomm-hub`) |
+| `RetComM-Launcher-<ver>-linux-x86_64.AppImage` | Linux |
+| `RetComM-Launcher-<ver>-windows-x64-setup.exe` | Windows installer |
+| `RetComM-Launcher-<ver>-windows-portable.exe` | Windows portable |
+| `RetComM-Launcher-<ver>-macos-arm64.dmg` | macOS Apple Silicon |
+| `RetComM-Launcher-<ver>-macos-x86_64.dmg` | macOS Intel |
 
-## Build
+Releases are published manually via Actions → **Release**. Hub **Update RetComM**
+pulls the matching asset for your install channel. Windows portable: run with no
+args for the hub, or `…-portable.exe cli <command>` for the CLI (same idea as the
+Linux AppImage `cli` dispatch).
+
+## Build from source
 
 ```sh
 cmake -G Ninja -S . -B build
@@ -40,134 +155,48 @@ cmake --build build -j
 ./build/retcomm-hub   # SDL3 + ImGui dashboard
 ```
 
-Requires CMake 3.24+, a C++17 compiler, and **libcurl**. Archive tools used at
-runtime: `bsdtar` (preferred), `unzip`, or `7z`. Optional `GITHUB_TOKEN` /
-`GH_TOKEN` raises GitHub API rate limits. Hub UI needs system **SDL3** + OpenGL
-and Dear ImGui (sibling `../recomp-ui` checkout, or CMake FetchContent). Wine
-installs need `wine` or `wine64` on `PATH`.
+Requires CMake 3.24+, a C++17 compiler, and **libcurl**. Runtime archive tools:
+`bsdtar` (preferred), `unzip`, or `7z`. Optional `GITHUB_TOKEN` / `GH_TOKEN` for
+GitHub rate limits. Hub UI needs system **SDL3** + OpenGL and Dear ImGui (sibling
+`../recomp-ui`, or CMake FetchContent). Wine installs need `wine` / `wine64` on
+`PATH`.
 
-### Release packages (CI)
+Packaging lives under `packaging/`; icon source is `assets/retcomm.svg`.
 
-Releases are **manual only** (Actions → **Release** → Run workflow). The workflow
-does not run on push. It builds all platforms, creates tag `v<version>` if needed,
-and publishes a GitHub Release with end-user installers only (no zips).
-
-- **Version** input empty → uses `RETCOMM_VERSION` from `CMakeLists.txt`
-- Optional **prerelease** checkbox for pre-release tags
-
-| Artifact | Platform |
-|---|---|
-| `RetComM-Launcher-<ver>-linux-x86_64.AppImage` | Linux |
-| `RetComM-Launcher-<ver>-windows-x64-setup.exe` | Windows installer (Start Menu / desktop) |
-| `RetComM-Launcher-<ver>-windows-portable.exe` | Windows single-file portable |
-| `RetComM-Launcher-<ver>-macos-arm64.dmg` | macOS Apple Silicon (drag into Applications) |
-| `RetComM-Launcher-<ver>-macos-x86_64.dmg` | macOS Intel (drag into Applications) |
-
-Windows portable launches the hub with no args; use
-`RetComM-Launcher-*-windows-portable.exe cli <command>` for the CLI (same idea as the
-Linux AppImage `cli` dispatch). **Update RetComM** in the hub pulls the matching
-AppImage / DMG / setup / portable asset for the install channel.
-
-Packaging scripts live under `packaging/`; the generic icon is `assets/retcomm.svg`
-(rasterized by `packaging/make-icons.sh`).
-
-## Quick start
+## Quick start (CLI)
 
 ```sh
-# List supported titles (from on-device catalog cache)
 ./build/retcomm list
-
-# Refresh title list from retcomm-catalog (fetched on first run; auto-update on by default)
 ./build/retcomm catalog update
-# ./build/retcomm catalog update --force
 
-# Configure a RomM/ES-style library (see config.example.json)
 mkdir -p ~/.config/retcomm
 cp config.example.json ~/.config/retcomm/config.json
-# edit library_root / bios_root / saves_root / platform_folders as needed
+# edit library_root / bios_root / saves_root / platform_folders
 
-./build/retcomm config
 ./build/retcomm scan
 ./build/retcomm bios scan
-# Rebuild indexes from disk (ignore hash cache; drop missing files):
-./build/retcomm scan --full
-./build/retcomm bios scan --full
-# or one-shot without config:
-./build/retcomm scan --rom-dir /mnt/crucial4tb/Emulation/roms
-./build/retcomm bios scan --bios-dir /mnt/crucial4tb/Emulation/bios
-
-# Indexed title → ROM / BIOS bindings
 ./build/retcomm library
-./build/retcomm bios list
-
-# Where RetComM will store installs + config
-./build/retcomm status
-
-# Install / update a title (host-OS asset from GitHub Releases)
-./build/retcomm install masters-of-teras-kasi-psx --dry-run
 ./build/retcomm install masters-of-teras-kasi-psx
-# Linux/macOS fallback: Windows build launched through Wine
-# ./build/retcomm install some-title --wine
-./build/retcomm update masters-of-teras-kasi-psx
-./build/retcomm library --check-updates
-
-# Launch into the title's dedicated recomp-ui (ROM/disc from library index)
-./build/retcomm launch masters-of-teras-kasi-psx --dry-run
 ./build/retcomm launch masters-of-teras-kasi-psx
-# ./build/retcomm launch masters-of-teras-kasi-psx --detach
-
-# Remove an install (keeps memcards/SRAM/savestates by default)
-./build/retcomm uninstall masters-of-teras-kasi-psx --dry-run
-./build/retcomm uninstall masters-of-teras-kasi-psx
-# ./build/retcomm uninstall masters-of-teras-kasi-psx --delete-saves
+./build/retcomm uninstall masters-of-teras-kasi-psx   # keeps saves by default
 ```
 
-`launch` stages `disc.cfg` / `rom.cfg` (and for disc titles, `settings.toml`
-`[bios]` / `[disc]`) next to the install, passes `--launcher` and `--bios`, and
-prefers a companion `.cue` over raw `.bin`/`.iso`/`.img`. Current MotK builds
-preselect the disc from `settings.toml` / `disc.cfg` — RetComM does not pass
-`--disc` (that flag skips settings disc and does not seed the launcher). Future
-`--mode netplay` will hook a generic lobby frontend.
+`launch` stages disc/ROM/BIOS sidecars next to the install and prefers a companion
+`.cue` for disc titles. Installs land under
+`~/.local/share/retcomm/apps/<install_dir>/` (or your configured install roots)
+with `releases/<tag>/`, a `current` link, and `install.json`.
 
-Installs land in `~/.local/share/retcomm/apps/<install_dir_name>/` with
-`releases/<tag>/`, a `current` symlink, and `install.json` for version tracking.
-Nested release zips (outer wrapper + inner build) are unwrapped automatically.
-
-Scan only walks platform folders the catalog needs (`snes/`, `n64/`, `ps/`, …),
-skips `torrents/` / `emulators/`, and hashes only when a title has CRC/SHA-1/SHA-256
-identity — so a full library root will not CRC every PS2/PS3 ISO. Results are
-saved to `~/.local/share/retcomm/library-index.json`; a second scan reuses
-unchanged hashes (`cache-hits`). Use `scan --full` (or hub **Full Rescan ROMs**)
-to ignore the cache, rehash everything, drop vanished files, and rebuild matches.
-
-## Layout
-
-```
-docs/                   architecture + catalog schema notes
-src/                    CLI + core libraries
-include/retcomm/        public headers
-third_party/            nlohmann/json + stb
-assets/                 app icon (SVG / PNG)
-packaging/              AppImage, macOS .app/DMG, Windows zip helpers
-.github/workflows/      Release CI
-```
+Scan walks only the platform folders the catalog needs, skips junk dirs, and
+hashes when identity digests are present. Results go to
+`library-index.json` with incremental cache hits; use `scan --full` (or hub
+**Full rebuild index**) to rehash everything.
 
 ## Catalog
 
-Supported titles are maintained in
-[`retcomm-catalog`](https://github.com/TechnicallyComputers/retcomm-catalog)
-— not in this repo. The launcher downloads `catalog.zip` from the latest
-**dated** GitHub release into `~/.local/share/retcomm/catalog/` and keeps that
-cache on-device. First run (or an empty cache) always fetches; afterward,
-`auto_update` checks the latest release tag/date on startup and downloads only
-when it changed (stored in `catalog-state.json`).
-
-```sh
-./build/retcomm catalog update
-./build/retcomm catalog update --force   # always re-download
-```
-
-In **retcomm-hub**, use **Refresh catalog**. Optional `config.json` block:
+Titles live in
+[`retcomm-catalog`](https://github.com/TechnicallyComputers/retcomm-catalog),
+not this repo. The launcher caches `catalog.zip` under
+`~/.local/share/retcomm/catalog/` and can auto-update on startup.
 
 ```json
 "catalog": {
@@ -177,8 +206,7 @@ In **retcomm-hub**, use **Refresh catalog**. Optional `config.json` block:
 }
 ```
 
-Overrides: `--catalog DIR`, `$RETCOMM_CATALOG`. Resolution order: override →
-env → on-device cache.
+Overrides: `--catalog DIR`, `$RETCOMM_CATALOG`.
 
 ## Data dirs
 
@@ -187,10 +215,21 @@ env → on-device cache.
 | Config | `~/.config/retcomm/` |
 | Installs + state | `~/.local/share/retcomm/` |
 | Catalog cache | `~/.local/share/retcomm/catalog/` |
-| Catalog override | `$RETCOMM_CATALOG` or `--catalog DIR` |
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
-[`docs/CATALOG.md`](docs/CATALOG.md).
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md),
+[`docs/CATALOG.md`](docs/CATALOG.md), and
+[`docs/BUILD_PACKS.md`](docs/BUILD_PACKS.md).
+
+## Layout
+
+```
+docs/                   architecture, catalog notes, screenshots/
+src/                    CLI + core + hub
+include/retcomm/        public headers
+assets/                 app icon + hub assets
+packaging/              AppImage, DMG, Windows helpers
+.github/workflows/      Release CI
+```
 
 ## License
 
