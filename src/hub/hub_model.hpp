@@ -8,6 +8,7 @@
 #include "retcomm/launch.hpp"
 #include "retcomm/library_index.hpp"
 #include "retcomm/paths.hpp"
+#include "retcomm/psx_platform_settings.hpp"
 #include "retcomm/romm_fetch.hpp"
 
 #include <atomic>
@@ -46,6 +47,8 @@ enum class HubJob : int {
     UninstallPurge,
     // Drop per-title cmake build/ intermediates (keeps Play binary + saves).
     DeleteBuildData,
+    // Move apps/<title> tree between configured install roots.
+    MoveInstall,
     Launch,
     ScanRoms,
     FullScanRoms,
@@ -69,6 +72,10 @@ enum class HubJob : int {
     CleanupOldReleases,
     // Wipe apps/*/src/*/build/ cmake trees for every install (keeps Play + saves).
     CleanupCmakeBuildDirs,
+    // Purge every install root + managed saves_root + platform/game config prefs.
+    DeleteAllAppsAndSaves,
+    // Wipe library/RomM config + indexes, clear setup marker, relaunch into wizard.
+    HardResetLibrarySettings,
 };
 
 // Title install/build/update family — mutually exclusive with library scans.
@@ -82,6 +89,9 @@ inline bool hub_job_is_install(HubJob j) {
     case HubJob::Uninstall:
     case HubJob::UninstallPurge:
     case HubJob::DeleteBuildData:
+    case HubJob::MoveInstall:
+    case HubJob::DeleteAllAppsAndSaves:
+    case HubJob::HardResetLibrarySettings:
     case HubJob::FetchRommRom:
     case HubJob::FetchRommBios:
         return true;
@@ -90,7 +100,7 @@ inline bool hub_job_is_install(HubJob j) {
     }
 }
 
-// Jobs that may wait behind the current main-worker job (Install/Update queue).
+// Jobs that may wait behind the current main-worker job (Install/Update/scan queue).
 inline bool hub_job_is_queueable(HubJob j) {
     switch (j) {
     case HubJob::Install:
@@ -98,6 +108,12 @@ inline bool hub_job_is_queueable(HubJob j) {
     case HubJob::InstallWine:
     case HubJob::Update:
     case HubJob::GenerateRebuild:
+    case HubJob::MoveInstall:
+    case HubJob::ScanRoms:
+    case HubJob::FullScanRoms:
+    case HubJob::ScanBios:
+    case HubJob::FullScanBios:
+    case HubJob::PurgeMissingFiles:
         return true;
     default:
         return false;
@@ -109,6 +125,11 @@ struct QueuedHubJob {
     std::string title_id;
     bool force_boxart = false;
     bool fetch_romm_first = false;
+    // Install family: apps root chosen in the location modal (empty → default).
+    fs::path apps_dir;
+    // Scan/Purge: platform scope at enqueue time (empty = all platforms).
+    std::string platform_filter;
+    bool prefetch_catalog = false;
 };
 
 // ROM / BIOS / RomM library index scans — mutually exclusive with install jobs.
@@ -298,6 +319,25 @@ struct RommSettingsDraft {
     bool dirty = false;
 };
 
+struct PsxSettingsDraft {
+    PsxPlatformSettings settings;
+    bool dirty = false;
+    // Hotkey rebind: index into PsxPlatformSettings::hotkeys, or -1.
+    int capturing_hotkey = -1;
+    // false = Display/Audio/Input system page; true = Gamepads slots page.
+    bool gamepads_tab = false;
+    // Configure modal: 0..kMaxPlayers-1, or -1 when closed.
+    int configuring_player = -1;
+    // Bind capture inside Configure (Esc cancels; Map All walks all 24).
+    int capturing_bind = -1; // button index, or -1
+    bool capture_is_pad = false;
+    bool map_all_active = false;
+    bool map_all_wait_release = false;
+    int map_all_step = 0;
+    bool rename_open = false;
+    char rename_buf[64]{};
+};
+
 // Target buffer for an in-flight SDL folder dialog (callback may be off-thread).
 enum class FolderPickTarget : int {
     None = 0,
@@ -348,6 +388,7 @@ struct HubModel {
     std::string library_platform;
     bool show_settings = false;
     bool show_romm_settings = false;
+    bool show_psx_settings = false; // global PlayStation Configure page
     bool show_setup = false; // first-time library/BIOS/RomM wizard
     SetupPath setup_path = SetupPath::Chooser;
     // Advanced wizard: 0 = roots (+ optional RomM), 1 = platform folder mappings.
@@ -370,6 +411,7 @@ struct HubModel {
     std::string scans_platform_filter;
     SettingsDraft settings;
     RommSettingsDraft romm_settings;
+    PsxSettingsDraft psx_settings;
     NetplayLobbyState netplay;
 
     mutable std::mutex mu;
@@ -382,11 +424,13 @@ struct HubModel {
     std::atomic<bool> request_exit{false}; // set after self-update schedules restart
     HubJob job = HubJob::None;
     std::string job_title_id;
+    // Active scan/purge platform scope (mirrors QueuedHubJob::platform_filter).
+    std::string job_platform_filter;
     bool job_force_boxart = false; // FetchBoxart: re-download even when cached
     bool job_fetch_romm_first = false;
     std::thread worker;
     std::thread launch_worker;
-    // Install/Update backlog while the main worker is busy (guarded by mu).
+    // Install/Update/scan backlog while the main worker is busy (guarded by mu).
     std::deque<QueuedHubJob> job_queue;
     std::string launcher_version; // display: running binary version (RETCOMM_VERSION)
 
@@ -466,12 +510,16 @@ struct HubModel {
     void fetch_boxart_for_catalog(bool force = false);
     // fetch_romm_first: Install/Build searches RomM + rescans before building when
     // the library has no verified ROM (set by the hub confirm modal).
-    // Queueable jobs (Install/Update/…) enqueue when the main worker is busy.
+    // Queueable jobs (Install/Update/library scan/…) enqueue when the main worker is busy.
     bool start_job(HubJob j, const std::string& title_id = {}, bool force_boxart = false,
                    bool fetch_romm_first = false);
-    // Waiting Install/Update jobs (not including the one currently running).
+    // Waiting queueable jobs (not including the one currently running).
     std::size_t queued_job_count() const;
-    bool is_job_queued(HubJob j, const std::string& title_id) const;
+    // title_id for install family; platform_filter for scan/purge (empty = all).
+    bool is_job_queued(HubJob j, const std::string& title_id,
+                       const std::string& platform_filter = {}) const;
+    // True when any library scan/purge is already waiting in the backlog.
+    bool has_queued_scan() const;
     // True if any queueable job for this title is waiting in the backlog.
     bool is_title_queued(const std::string& title_id) const;
     // Enqueue Update for every installed title with update_available; starts the
@@ -493,15 +541,22 @@ struct HubModel {
     // Build & Install with no local ROM → quick scan / RomM download chooser.
     bool show_missing_rom_prompt = false;
     std::string missing_rom_prompt_id;
-    // Multi-root Install: choose apps/ location before ROM prompts / job.
+    // Multi-root Install / Move: choose apps/ location before ROM prompts / job.
     bool show_install_root_prompt = false;
     std::string install_root_prompt_id;
     int install_root_prompt_index = 0;
-    // Apps root for the next Install/Update job (empty → default / existing).
+    // When true, confirm starts MoveInstall instead of Install.
+    bool install_root_prompt_move = false;
+    // Apps root where the title currently lives (empty if none); used to preselect
+    // and label "(current)" in the location chooser.
+    fs::path install_root_prompt_from_apps;
+    // Apps root for the next Install/Update/Move job (empty → default / existing).
     fs::path job_apps_dir;
     // Start Install: may open install-root chooser. Returns true if job started
     // (or ROM prompt shown); false if waiting on install-root modal.
     bool begin_install(const std::string& title_id);
+    // Open install-root chooser to relocate an existing install / preserved tree.
+    bool begin_move_install(const std::string& title_id);
     void confirm_install_root_and_continue();
     // If the library DB still points at a missing dump, purge stale rows for the
     // title's platform and open the missing-ROM chooser. Returns true when the
@@ -541,6 +596,12 @@ struct HubModel {
     void open_romm_settings();
     // When refresh_boxart is false, persist only (setup wizard does not start a job).
     bool save_romm_settings(std::string* error = nullptr, bool refresh_boxart = true);
+
+    void open_psx_settings();
+    bool save_psx_settings(std::string* error = nullptr);
+    // Manage Game Data: blacklist title from global platform Configure merge.
+    bool set_title_exclude_platform_config(const std::string& title_id, bool exclude,
+                                           std::string* error = nullptr);
 
     // Persist preferred managed save for a title (empty clears).
     // Cart: battery file. Disc: memcard 1.

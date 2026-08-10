@@ -5,6 +5,7 @@
 #include "retcomm/catalog_sync.hpp"
 #include "retcomm/config.hpp"
 #include "retcomm/paths.hpp"
+#include "retcomm/psx_input_profiles.hpp"
 #include "retcomm/romm_saves.hpp"
 #include "retcomm/self_update.hpp"
 
@@ -12,6 +13,9 @@
 #include "imgui_internal.h"
 #include "imgui_impl_opengl3.h"
 #include "imgui_impl_sdl3.h"
+#if defined(IMGUI_ENABLE_FREETYPE)
+#include "misc/freetype/imgui_freetype.h"
+#endif
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_dialog.h>
@@ -21,6 +25,7 @@
 #include <unordered_set>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -117,8 +122,13 @@ fs::path platform_icon_path(const std::string& slug) {
 }
 
 // Load Lato like recomp-ui (18px body, oversample 2). Falls back to ImGui default.
+// Merge symbols + (when FreeType is enabled) CBDT color emoji (Noto Color Emoji).
 void load_hub_fonts() {
     ImGuiIO& io = ImGui::GetIO();
+#if defined(IMGUI_ENABLE_FREETYPE)
+    // Color-layered glyphs (CBDT/CBLC) for Noto Color Emoji / Segoe UI Emoji.
+    io.Fonts->FontBuilderFlags |= ImGuiFreeTypeBuilderFlags_LoadColor;
+#endif
     const fs::path regular = find_hub_font_file("LatoLatin-Regular.ttf");
     ImFontConfig cfg;
     cfg.OversampleH = 2;
@@ -150,6 +160,122 @@ void load_hub_fonts() {
         cfg.SizePixels = kBody;
         io.Fonts->AddFontDefault(&cfg);
     }
+
+    auto merge_font_if_present = [&](const char* path, const ImWchar* ranges,
+                                     bool color_emoji) -> bool {
+        if (!path || !*path || !ranges) return false;
+        std::error_code ec;
+        if (!fs::is_regular_file(path, ec)) return false;
+        ImFontConfig merge_cfg;
+        merge_cfg.MergeMode = true;
+        merge_cfg.PixelSnapH = true;
+        // Color emoji bitmaps ignore oversampling; keep outline fonts crisp.
+        merge_cfg.OversampleH = color_emoji ? 1 : 2;
+        merge_cfg.OversampleV = color_emoji ? 1 : 2;
+#if defined(IMGUI_ENABLE_FREETYPE)
+        if (color_emoji) merge_cfg.FontBuilderFlags |= ImGuiFreeTypeBuilderFlags_LoadColor;
+#else
+        if (color_emoji) return false;
+#endif
+        if (!io.Fonts->AddFontFromFileTTF(path, kBody, &merge_cfg, ranges)) return false;
+        std::fprintf(stderr, "retcomm-hub: merged %s font %s\n",
+                     color_emoji ? "color-emoji" : "symbol/emoji", path);
+        return true;
+    };
+    static const ImWchar kSymbolRanges[] = {
+        0x2000, 0x206F, // General Punctuation
+        0x2190, 0x21FF, // Arrows
+        0x2300, 0x23FF, // Misc Technical
+        0x2460, 0x24FF, // Enclosed Alphanumerics
+        0x25A0, 0x25FF, // Geometric Shapes
+        0x2600, 0x26FF, // Misc Symbols (⚠)
+        0x2700, 0x27BF, // Dingbats
+        0x2B00, 0x2BFF, // Misc Symbols and Arrows
+        0xFE00, 0xFE0F, // Variation Selectors
+        0,
+    };
+    const char* kSymbolCandidates[] = {
+        "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSansSymbols-Regular.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+#if defined(_WIN32)
+        "C:\\Windows\\Fonts\\seguisym.ttf",
+#elif defined(__APPLE__)
+        "/System/Library/Fonts/Apple Symbols.ttf",
+        "/System/Library/Fonts/Supplemental/Apple Symbols.ttf",
+#endif
+        nullptr,
+    };
+    bool merged_symbols = false;
+    for (int i = 0; kSymbolCandidates[i]; ++i) {
+        if (merge_font_if_present(kSymbolCandidates[i], kSymbolRanges, false)) {
+            merged_symbols = true;
+            break;
+        }
+    }
+#ifdef IMGUI_USE_WCHAR32
+    static const ImWchar kEmojiRanges[] = {
+        0x2600, 0x26FF,   // Misc Symbols (color ⚠ when available)
+        0x2700, 0x27BF,   // Dingbats
+        0x1F300, 0x1F5FF, // Misc Symbols and Pictographs
+        0x1F600, 0x1F64F, // Emoticons
+        0x1F680, 0x1F6FF, // Transport and Map
+        0x1F900, 0x1F9FF, // Supplemental Symbols and Pictographs
+        0,
+    };
+    const char* kColorEmojiCandidates[] = {
+#if defined(IMGUI_ENABLE_FREETYPE)
+        "/usr/share/fonts/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+        "/usr/share/fonts/google-noto-color-emoji/NotoColorEmoji.ttf",
+#if defined(_WIN32)
+        "C:\\Windows\\Fonts\\seguiemj.ttf",
+#elif defined(__APPLE__)
+        "/System/Library/Fonts/Apple Color Emoji.ttc",
+#endif
+#endif
+        nullptr,
+    };
+    const char* kOutlineEmojiCandidates[] = {
+        "/usr/share/fonts/noto/NotoEmoji-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoEmoji-Regular.ttf",
+#if defined(_WIN32)
+        "C:\\Windows\\Fonts\\seguiemj.ttf",
+#endif
+        nullptr,
+    };
+    bool merged_emoji = false;
+    for (int i = 0; kColorEmojiCandidates[i]; ++i) {
+        if (merge_font_if_present(kColorEmojiCandidates[i], kEmojiRanges, true)) {
+            merged_emoji = true;
+            break;
+        }
+    }
+    if (!merged_emoji) {
+        for (int i = 0; kOutlineEmojiCandidates[i]; ++i) {
+            if (merge_font_if_present(kOutlineEmojiCandidates[i], kEmojiRanges, false)) {
+                merged_emoji = true;
+                break;
+            }
+        }
+    }
+    if (!merged_emoji) {
+#if defined(IMGUI_ENABLE_FREETYPE)
+        std::fprintf(stderr, "retcomm-hub: no color/outline emoji font found\n");
+#else
+        std::fprintf(stderr,
+                     "retcomm-hub: no outline emoji font found (rebuild with FreeType for "
+                     "color emoji)\n");
+#endif
+    }
+#endif
+    if (!merged_symbols) {
+        std::fprintf(stderr,
+                     "retcomm-hub: no symbol fallback font found (⚠ may not render)\n");
+    }
+
     io.FontGlobalScale = 1.0f;
 }
 
@@ -620,7 +746,8 @@ void draw_marquee(HubModel& hub, const Theme& th, float width) {
     // Top-right: Add/Scan Files + Check for Updates + Menu, or Back when editing settings.
     constexpr float kMenuH = 36.f;
     constexpr float kBtnGap = 8.f;
-    const bool in_settings = hub.show_settings || hub.show_romm_settings;
+    const bool in_settings =
+        hub.show_settings || hub.show_romm_settings || hub.show_psx_settings;
     const char* btn_label = in_settings ? "Back to Library" : "Menu";
     const char* library_label = "Add/Scan Files";
     const char* updates_label = "Check for Updates";
@@ -648,8 +775,11 @@ void draw_marquee(HubModel& hub, const Theme& th, float width) {
         if (in_settings) {
             hub.show_settings = false;
             hub.show_romm_settings = false;
+            hub.show_psx_settings = false;
             hub.settings.dirty = false;
             hub.romm_settings.dirty = false;
+            hub.psx_settings.dirty = false;
+            hub.psx_settings.capturing_hotkey = -1;
         } else {
             hub.pending_open_menu = true;
         }
@@ -697,6 +827,58 @@ void draw_ellipsized_centered(const char* text, float max_w, const ImVec4& col) 
     ImGui::PushStyleColor(ImGuiCol_Text, col);
     ImGui::TextUnformatted(shown.c_str());
     ImGui::PopStyleColor();
+}
+
+// Slightly smaller title under cover art: up to two centered lines, then ellipsis.
+// Returns pixel height used (always reserves room for two lines when drawing).
+float draw_wrapped_title_centered(const char* text, float max_w, const ImVec4& col,
+                                  float font_scale = 0.84f) {
+    ImGui::SetWindowFontScale(font_scale);
+    const float line_h = ImGui::GetTextLineHeight();
+    const float block_h = line_h * 2.f;
+    if (!text || !text[0] || max_w <= 4.f) {
+        ImGui::SetWindowFontScale(1.f);
+        return block_h;
+    }
+
+    ImFont* font = ImGui::GetFont();
+    const float font_size = ImGui::GetFontSize();
+    const float scale = (font && font->FontSize > 0.f) ? (font_size / font->FontSize) : 1.f;
+    const char* end = text + std::strlen(text);
+    const char* mid =
+        font ? font->CalcWordWrapPositionA(scale, text, end, max_w) : end;
+
+    std::string l1(text, mid);
+    while (!l1.empty() && (l1.back() == ' ' || l1.back() == '\t')) l1.pop_back();
+
+    std::string l2;
+    if (mid < end) {
+        while (mid < end && (*mid == ' ' || *mid == '\t')) ++mid;
+        l2.assign(mid, end);
+        if (ImGui::CalcTextSize(l2.c_str()).x > max_w) {
+            const char* ell = "...";
+            while (l2.size() > 1 && ImGui::CalcTextSize((l2 + ell).c_str()).x > max_w)
+                l2.pop_back();
+            l2 += ell;
+        }
+    }
+
+    const ImVec2 base = ImGui::GetCursorScreenPos();
+    // Vertically center one-line titles inside the reserved two-line block.
+    const float used_h = l2.empty() ? line_h : (line_h * 2.f);
+    const float y0 = base.y + std::max(0.f, (block_h - used_h) * 0.5f);
+    ImGui::PushStyleColor(ImGuiCol_Text, col);
+    auto draw_line = [&](const std::string& s, float y) {
+        if (s.empty()) return;
+        const ImVec2 sz = ImGui::CalcTextSize(s.c_str());
+        ImGui::SetCursorScreenPos(ImVec2(base.x + std::max(0.f, (max_w - sz.x) * 0.5f), y));
+        ImGui::TextUnformatted(s.c_str());
+    };
+    draw_line(l1, y0);
+    if (!l2.empty()) draw_line(l2, y0 + line_h);
+    ImGui::PopStyleColor();
+    ImGui::SetWindowFontScale(1.f);
+    return block_h;
 }
 
 // Portrait/platform grid tile: art on top (aspect preserved), labels below.
@@ -751,10 +933,17 @@ float draw_grid_tile(const ImVec2& tile_min, float tile_w, bool selected, const 
                      bool queued_overlay = false) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     constexpr float kArtPad = 8.f;
-    constexpr float kLabelGap = 4.f;
+    constexpr float kLabelGap = 6.f;
     constexpr float kFrameInset = 2.f; // keep art/badge inside the border stroke
+    constexpr float kTitleScale = 0.84f;
+    ImGui::SetWindowFontScale(kTitleScale);
+    const float title_line_h = ImGui::GetTextLineHeight();
+    ImGui::SetWindowFontScale(1.f);
     const float line_h = ImGui::GetTextLineHeight();
-    const float label_h = line_h + (subtitle && subtitle[0] ? line_h + 2.f : 0.f) + 6.f;
+    // Always reserve two title lines so long names wrap instead of ellipsizing early.
+    const float title_block_h = title_line_h * 2.f + 2.f;
+    const float label_h =
+        title_block_h + (subtitle && subtitle[0] ? line_h + 2.f : 0.f) + 8.f;
 
     // Art frame height follows platform/boxart aspect (width fixed by grid column).
     const float art_box_w = tile_w;
@@ -820,10 +1009,10 @@ float draw_grid_tile(const ImVec2& tile_min, float tile_w, bool selected, const 
     }
 
     ImGui::SetCursorScreenPos(ImVec2(tile_min.x + 4.f, tile_min.y + art_box_h + kLabelGap));
-    draw_ellipsized_centered(title, tile_w - 8.f, th.text);
+    draw_wrapped_title_centered(title, tile_w - 8.f, th.text, kTitleScale);
     if (subtitle && subtitle[0]) {
         ImGui::SetCursorScreenPos(
-            ImVec2(tile_min.x + 4.f, tile_min.y + art_box_h + kLabelGap + line_h + 2.f));
+            ImVec2(tile_min.x + 4.f, tile_min.y + art_box_h + kLabelGap + title_block_h));
         draw_ellipsized_centered(subtitle, tile_w - 8.f, th.text_muted);
     }
 
@@ -907,9 +1096,26 @@ void draw_library(HubModel& hub, BoxartCache& boxart, const Theme& th) {
         ImGui::SetWindowFontScale(1.f);
 
         if (show_back) {
+            const bool show_configure =
+                retcomm::is_psx_platform(hub.library_platform);
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(kBackPadX, kBackPadY));
+            float right_x = content_right - back_w;
+            if (show_configure) {
+                const ImVec2 cfg_txt = ImGui::CalcTextSize("Configure");
+                const float cfg_w = cfg_txt.x + kBackPadX * 2.f;
+                constexpr float kCfgGap = 8.f;
+                ImGui::SetCursorScreenPos(
+                    ImVec2(right_x - kCfgGap - cfg_w, row0.y + (row_h - back_h) * 0.5f));
+                if (ImGui::Button("Configure", ImVec2(cfg_w, back_h)))
+                    hub.open_psx_settings();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                    ImGui::SetTooltip(
+                        "Global PlayStation settings (Display, Audio, Input, Hotkeys).\n"
+                        "Applied to titles on install, update, and launch unless excluded.");
+                }
+            }
             ImGui::SetCursorScreenPos(
-                ImVec2(content_right - back_w, row0.y + (row_h - back_h) * 0.5f));
+                ImVec2(right_x, row0.y + (row_h - back_h) * 0.5f));
             if (ImGui::Button("Back", ImVec2(back_w, back_h))) {
                 hub.library_nav = retcomm::hub::LibraryNav::Platforms;
                 hub.library_platform.clear();
@@ -1417,6 +1623,46 @@ void draw_detail_manage_game_popup(HubModel& hub, const TitleRow& row, const The
         if (!retcomm::open_path_in_file_manager(open_dir, &err))
             hub.append_log("Open Folder failed: " + err);
     }
+    if (can_open) {
+        const auto roots = retcomm::effective_install_roots(hub.cfg, hub.paths);
+        const bool can_move = roots.size() > 1;
+        ImGui::BeginDisabled(!can_move);
+        if (ImGui::Button("Move Installation Dir", ImVec2(-1, 0))) {
+            hub.begin_move_install(row.id);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal |
+                                 ImGuiHoveredFlags_AllowWhenDisabled)) {
+            if (can_move) {
+                ImGui::SetTooltip(
+                    "Move this title's install folder (releases, build data, preserved "
+                    "saves/config) to another configured install location.");
+            } else {
+                ImGui::SetTooltip(
+                    "Add another install location in Library Settings to enable Move.");
+            }
+        }
+    }
+
+    if (retcomm::is_psx_platform(row.platform)) {
+        ImGui::Dummy(ImVec2(0, 6));
+        bool exclude = retcomm::title_excludes_platform_config(hub.app_state, row.id);
+        if (ImGui::Checkbox("Exclude from platform config", &exclude)) {
+            std::string err;
+            if (!hub.set_title_exclude_platform_config(row.id, exclude, &err)) {
+                hub.append_log("Exclude toggle failed: " + err);
+            } else {
+                hub.app_state = retcomm::load_app_state(hub.paths.state_path);
+            }
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "When checked, RetComM will not overwrite this title's settings.toml / "
+                "config.ini from global PlayStation Configure on install, update, or "
+                "launch.\nExisting files are left as-is.");
+        }
+    }
 
     const bool can_uninstall =
         row.installed || row.install_dir_present || row.has_preserved_state;
@@ -1443,21 +1689,8 @@ void draw_detail_manage_game_popup(HubModel& hub, const TitleRow& row, const The
                     "Library ROMs and managed saves_root files are not deleted.");
             }
         } else {
-            static bool keep_saves = true;
-            static std::string keep_saves_for_id;
-            if (keep_saves_for_id != row.id) {
-                keep_saves_for_id = row.id;
-                keep_saves = true;
-            }
-            ImGui::Checkbox("Keep save data", &keep_saves);
-            ImGui::Dummy(ImVec2(0, 4));
-            if (ImGui::Button("Uninstall", ImVec2(-1, 0))) {
-                hub.start_job(keep_saves ? HubJob::Uninstall : HubJob::UninstallPurge, row.id);
-                ImGui::CloseCurrentPopup();
-            }
             if (row.supports_local_build &&
                 (row.installed || row.install_dir_present || row.install_method == "build")) {
-                ImGui::Dummy(ImVec2(0, 4));
                 ImGui::BeginDisabled(!row.has_cmake_build_data);
                 if (ImGui::Button("Delete Build Data", ImVec2(-1, 0))) {
                     hub.start_job(HubJob::DeleteBuildData, row.id);
@@ -1477,7 +1710,20 @@ void draw_detail_manage_game_popup(HubModel& hub, const TitleRow& row, const The
                         ImGui::SetTooltip("No cmake build data on disk.");
                     }
                 }
+                ImGui::Dummy(ImVec2(0, 4));
             }
+            static bool keep_saves = true;
+            static std::string keep_saves_for_id;
+            if (keep_saves_for_id != row.id) {
+                keep_saves_for_id = row.id;
+                keep_saves = true;
+            }
+            if (ImGui::Button("Uninstall", ImVec2(-1, 0))) {
+                hub.start_job(keep_saves ? HubJob::Uninstall : HubJob::UninstallPurge, row.id);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::Dummy(ImVec2(0, 4));
+            ImGui::Checkbox("Keep save data", &keep_saves);
         }
     } else {
         ImGui::TextColored(th.text_muted, "No install folder or preserved data yet.");
@@ -1551,7 +1797,7 @@ void draw_menu_popup(HubModel& hub, const Theme& th, SDL_Window* /*window*/) {
         hub.open_settings();
         ImGui::CloseCurrentPopup();
     }
-    if (ImGui::Button("RomM Sync Settings", ImVec2(-1, 0))) {
+    if (romm_button("RomM Sync Settings", th, ImVec2(-1, 0))) {
         hub.open_romm_settings();
         ImGui::CloseCurrentPopup();
     }
@@ -1569,11 +1815,16 @@ void draw_menu_popup(HubModel& hub, const Theme& th, SDL_Window* /*window*/) {
             if (tc_line.empty() && !hub.toolchain_current_version.empty())
                 tc_line = "Toolchain " + hub.toolchain_current_version;
         }
+        ImGui::PushTextWrapPos(0.0f);
         ImGui::TextColored(th.text_muted, "Launcher %s", ver.c_str());
         if (install.self_update_supported && !install.channel_id.empty())
             ImGui::TextColored(th.text_muted, "Channel %s", install.channel_id.c_str());
-        if (!tc_line.empty())
-            ImGui::TextColored(tc_upd ? th.warn : th.text_muted, "%s", tc_line.c_str());
+        if (!tc_line.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, tc_upd ? th.warn : th.text_muted);
+            ImGui::TextWrapped("%s", tc_line.c_str());
+            ImGui::PopStyleColor();
+        }
+        ImGui::PopTextWrapPos();
     }
     ImGui::Dummy(ImVec2(0, 10));
     if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
@@ -1680,10 +1931,23 @@ void draw_library_popup(HubModel& hub, const Theme& th, SDL_Window* window) {
         "For files you already placed in your folders, or to drop deleted entries.");
     ImGui::PopStyleColor();
     {
-        const char* scope_preview = hub.scans_platform_filter.empty()
-                                        ? "All Platforms"
-                                        : platform_display_name(hub.scans_platform_filter);
-        ImGui::BeginDisabled(busy || file_busy);
+        const std::string& filt = hub.scans_platform_filter;
+        const char* scope_preview = filt.empty() ? "All Platforms" : platform_display_name(filt);
+        const bool any_scan_queued = hub.has_queued_scan();
+        auto scan_active = [&](HubJob j) -> bool {
+            return busy && hub.job == j && hub.job_platform_filter == filt;
+        };
+        auto scan_btn_label = [&](HubJob j, const char* idle, const char* active_lbl,
+                                  const char* queue_lbl) -> const char* {
+            if (scan_active(j)) return active_lbl;
+            if (hub.is_job_queued(j, {}, filt)) return "Queued";
+            // Another scan already waiting — keep idle label; button is disabled.
+            if (any_scan_queued) return idle;
+            if (busy) return queue_lbl;
+            return idle;
+        };
+
+        ImGui::BeginDisabled(file_busy);
         if (ImGui::BeginCombo("##library_advanced_scope", scope_preview)) {
             if (ImGui::Selectable("All Platforms", hub.scans_platform_filter.empty()))
                 hub.scans_platform_filter.clear();
@@ -1695,16 +1959,34 @@ void draw_library_popup(HubModel& hub, const Theme& th, SDL_Window* window) {
             }
             ImGui::EndCombo();
         }
-        if (ImGui::Button("Scan new files", ImVec2(-1, 0))) {
+        ImGui::EndDisabled();
+
+        // One queued library scan max (any type) — avoid spamming the backlog.
+        ImGui::BeginDisabled(file_busy || scan_active(HubJob::ScanRoms) || any_scan_queued);
+        if (ImGui::Button(scan_btn_label(HubJob::ScanRoms, "Scan new files", "Scanning…",
+                                         "Queue Scan new files"),
+                          ImVec2(-1, 0))) {
             hub.pending_scan_missing_rom_id.clear();
             hub.start_job(HubJob::ScanRoms);
             ImGui::CloseCurrentPopup();
         }
-        if (ImGui::Button("Clean missing files", ImVec2(-1, 0))) {
+        ImGui::EndDisabled();
+
+        ImGui::BeginDisabled(file_busy || scan_active(HubJob::PurgeMissingFiles) ||
+                             any_scan_queued);
+        if (ImGui::Button(scan_btn_label(HubJob::PurgeMissingFiles, "Clean missing files",
+                                         "Cleaning…", "Queue Clean missing files"),
+                          ImVec2(-1, 0))) {
             hub.start_job(HubJob::PurgeMissingFiles);
             ImGui::CloseCurrentPopup();
         }
-        if (ImGui::Button("Full rebuild index…", ImVec2(-1, 0)))
+        ImGui::EndDisabled();
+
+        // Always open the confirmation modal (including when queueing).
+        ImGui::BeginDisabled(file_busy || scan_active(HubJob::FullScanRoms) || any_scan_queued);
+        if (ImGui::Button(scan_btn_label(HubJob::FullScanRoms, "Full rebuild index…", "Scanning…",
+                                         "Queue Full rebuild index…"),
+                          ImVec2(-1, 0)))
             ImGui::OpenPopup("Full rebuild###confirm_full_rescan");
         ImGui::EndDisabled();
     }
@@ -1717,21 +1999,35 @@ void draw_library_popup(HubModel& hub, const Theme& th, SDL_Window* window) {
         ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 360.f);
         if (hub.scans_platform_filter.empty()) {
             ImGui::TextWrapped(
-                "Re-hash every ROM and BIOS candidate and rebuild the indexes. On a large "
-                "collection this can take a long time.");
+                "Re-hash every ROM and BIOS candidate and rebuild the indexes from scratch. "
+                "On a large collection this often takes many minutes and will keep the "
+                "worker busy until it finishes.");
         } else {
             ImGui::TextWrapped(
-                "Re-hash every ROM and BIOS candidate for %s. Other platforms in the index "
-                "are left alone.",
+                "Re-hash every ROM and BIOS candidate for %s and rebuild that platform's "
+                "index from scratch. Other platforms are left alone. On a large collection "
+                "this often takes many minutes.",
                 platform_display_name(hub.scans_platform_filter));
         }
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0, 8));
-        if (accent_button("Rebuild", th, ImVec2(120, 0))) {
+        const bool full_busy = hub.job_running.load();
+        const bool any_scan_queued = hub.has_queued_scan();
+        const bool this_active = full_busy && hub.job == HubJob::FullScanRoms &&
+                                 hub.job_platform_filter == hub.scans_platform_filter;
+        const bool this_queued =
+            hub.is_job_queued(HubJob::FullScanRoms, {}, hub.scans_platform_filter);
+        const char* rebuild_lbl = this_active  ? "Scanning…"
+                                  : this_queued ? "Queued"
+                                  : full_busy   ? "Queue Rebuild"
+                                                : "Rebuild";
+        ImGui::BeginDisabled(this_active || this_queued || any_scan_queued);
+        if (accent_button(rebuild_lbl, th, ImVec2(120, 0))) {
             hub.pending_scan_missing_rom_id.clear();
             hub.start_job(HubJob::FullScanRoms);
             ImGui::CloseCurrentPopup();
         }
+        ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
         close_modal_on_outside_click();
@@ -2044,17 +2340,18 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
         ImGui::Text("%s", row.author.c_str());
     else
         ImGui::TextColored(th.text_muted, "(unknown)");
+    if (!row.author_notes.empty()) {
+        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::TextColored(th.text_muted, "Author's Notes");
+        ImGui::TextWrapped("%s", row.author_notes.c_str());
+    }
     if (!row.github_url.empty()) {
+        ImGui::Dummy(ImVec2(0, 6));
         if (ImGui::Button("GitHub Source", ImVec2(-1, 0))) {
             std::string err;
             if (!retcomm::open_url_in_browser(row.github_url, &err))
                 hub.append_log("Open URL failed: " + err);
         }
-    }
-    if (!row.author_notes.empty()) {
-        ImGui::Dummy(ImVec2(0, 6));
-        ImGui::TextColored(th.text_muted, "Author's Notes");
-        ImGui::TextWrapped("%s", row.author_notes.c_str());
     }
 
     ImGui::Dummy(ImVec2(0, 10));
@@ -2305,7 +2602,7 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
         {
             const bool busy = hub.job_running.load();
             ImGui::BeginDisabled(busy);
-            if (ImGui::Button("Clean All Cmake Build Directories", ImVec2(280, 0)))
+            if (ImGui::Button("Clean all cmake build dirs", ImVec2(-1, 0)))
                 hub.start_job(HubJob::CleanupCmakeBuildDirs);
             ImGui::EndDisabled();
         }
@@ -2315,6 +2612,90 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
             "(Play binary, saves, and generated C are kept). The next Update or Generate & "
             "Rebuild will reconfigure from scratch.");
         ImGui::PopStyleColor();
+
+        ImGui::Dummy(ImVec2(0, 10));
+        ImGui::Separator();
+        // Use U+26A0 only (no U+FE0F) — variation selectors render as "?" without emoji fonts.
+        {
+            const bool busy = hub.job_running.load();
+            ImGui::BeginDisabled(busy);
+            if (danger_button("\xE2\x9A\xA0 Delete All Apps & Save Data \xE2\x9A\xA0", th,
+                              ImVec2(-1, 0)))
+                ImGui::OpenPopup("Delete everything?###delete_all_apps");
+            ImGui::EndDisabled();
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Permanently removes every installed game under your install locations, managed "
+            "saves under the Game saves root, in-install saves/config, and global platform "
+            "Configure prefs. Library ROMs and BIOS dumps are kept.");
+        ImGui::PopStyleColor();
+
+        ImGui::Dummy(ImVec2(0, 8));
+        {
+            const bool busy = hub.job_running.load();
+            ImGui::BeginDisabled(busy);
+            if (danger_button("\xE2\x9A\xA0 Hard Reset Library Settings \xE2\x9A\xA0", th,
+                              ImVec2(-1, 0)))
+                ImGui::OpenPopup("Hard reset?###hard_reset_library");
+            ImGui::EndDisabled();
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Wipes library paths, scan databases, and RomM sync settings from config, then "
+            "restarts RetComM into the first-time setup wizard. Installed games, ROM files, "
+            "and BIOS dumps are not deleted.");
+        ImGui::PopStyleColor();
+
+        if (ImGui::BeginPopupModal("Delete everything?###delete_all_apps", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 420.f);
+            ImGui::TextColored(th.warn, "This cannot be undone.");
+            ImGui::TextWrapped(
+                "Delete all app installations and clean up save/config data?\n\n"
+                "• Every title under configured install locations\n"
+                "• Managed files under your Game saves root\n"
+                "• Preserved install saves/config and platform Configure prefs\n\n"
+                "ROM library and BIOS folders are not deleted.");
+            ImGui::PopTextWrapPos();
+            ImGui::Dummy(ImVec2(0, 10));
+            const bool busy = hub.job_running.load();
+            ImGui::BeginDisabled(busy);
+            if (danger_button("Yes, delete everything", th, ImVec2(220, 0))) {
+                hub.start_job(HubJob::DeleteAllAppsAndSaves);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+            close_modal_on_outside_click();
+            ImGui::EndPopup();
+        }
+
+        if (ImGui::BeginPopupModal("Hard reset?###hard_reset_library", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 420.f);
+            ImGui::TextColored(th.warn, "RetComM will restart into first-time setup.");
+            ImGui::TextWrapped(
+                "Hard reset library settings?\n\n"
+                "• Deletes config.json (library / BIOS / saves roots, RomM sync)\n"
+                "• Clears library-index, bios-index, and RomM ROM index databases\n"
+                "• Clears the setup-completed marker\n\n"
+                "Installed apps, ROM library files, and BIOS dumps stay on disk.");
+            ImGui::PopTextWrapPos();
+            ImGui::Dummy(ImVec2(0, 10));
+            const bool busy = hub.job_running.load();
+            ImGui::BeginDisabled(busy);
+            if (danger_button("Yes, hard reset & restart", th, ImVec2(240, 0))) {
+                hub.start_job(HubJob::HardResetLibrarySettings);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+            close_modal_on_outside_click();
+            ImGui::EndPopup();
+        }
     }
 
     ImGui::Dummy(ImVec2(0, 10));
@@ -2362,6 +2743,8 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
         if (!hub.save_settings(&err)) {
             hub.append_log("settings save failed: " + err);
             hub.set_status("Save failed");
+        } else {
+            hub.show_toast("Saved!");
         }
     }
     ImGui::SameLine();
@@ -2371,9 +2754,11 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     }
     if (hub.settings.dirty) {
         ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
         ImGui::TextColored(th.warn, "unsaved changes");
     }
-    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
     ImGui::TextColored(th.text_muted, "%s", hub.paths.config_path.string().c_str());
     ImGui::EndChild();
 }
@@ -2826,6 +3211,8 @@ void draw_romm_settings_panel(HubModel& hub, const Theme& th) {
         if (!hub.save_romm_settings(&err)) {
             hub.append_log("RomM settings save failed: " + err);
             hub.set_status("Save failed");
+        } else {
+            hub.show_toast("Saved!");
         }
     }
     ImGui::SameLine();
@@ -2835,13 +3222,1208 @@ void draw_romm_settings_panel(HubModel& hub, const Theme& th) {
     }
     if (hub.romm_settings.dirty) {
         ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
         ImGui::TextColored(th.warn, "unsaved changes");
     }
-    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
     ImGui::TextColored(th.text_muted, "%s", hub.paths.config_path.string().c_str());
     ImGui::EndChild();
 }
 
+void psx_settings_row_label(const char* text, const Theme& th, float col_w = 180.f) {
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(th.text_muted, "%s", text);
+    ImGui::SameLine(col_w);
+}
+
+void poll_psx_hotkey_capture(HubModel& hub) {
+    auto& draft = hub.psx_settings;
+    if (draft.capturing_hotkey < 0 ||
+        draft.capturing_hotkey >= retcomm::PsxPlatformSettings::kHotkeyCount)
+        return;
+    // Escape cancels.
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        draft.capturing_hotkey = -1;
+        return;
+    }
+    for (ImGuiKey key = ImGuiKey_NamedKey_BEGIN; key < ImGuiKey_NamedKey_END;
+         key = (ImGuiKey)(key + 1)) {
+        if (key == ImGuiKey_LeftCtrl || key == ImGuiKey_RightCtrl || key == ImGuiKey_LeftShift ||
+            key == ImGuiKey_RightShift || key == ImGuiKey_LeftAlt || key == ImGuiKey_RightAlt ||
+            key == ImGuiKey_LeftSuper || key == ImGuiKey_RightSuper || key == ImGuiKey_Escape)
+            continue;
+        if (!ImGui::IsKeyPressed(key, false)) continue;
+        std::string name;
+        if (ImGui::GetIO().KeyCtrl) name += "Ctrl+";
+        if (ImGui::GetIO().KeyAlt) name += "Alt+";
+        if (ImGui::GetIO().KeyShift) name += "Shift+";
+        const char* kn = ImGui::GetKeyName(key);
+        if (!kn || !kn[0]) continue;
+        // Match recomp-ui / host_keymap vocabulary for common keys.
+        if (std::strcmp(kn, "Enter") == 0) name += "Return";
+        else if (std::strcmp(kn, "KeypadEnter") == 0) name += "Keypad Enter";
+        else if (std::strncmp(kn, "Keypad", 6) == 0) {
+            name += "Keypad ";
+            name += (kn + 6);
+        } else {
+            name += kn;
+        }
+        draft.settings.hotkeys[static_cast<size_t>(draft.capturing_hotkey)] = name;
+        draft.dirty = true;
+        draft.capturing_hotkey = -1;
+        return;
+    }
+}
+
+struct HubGamepadOpt {
+    char guid[40]{};
+    char name[64]{};
+    bool live = false;
+    SDL_JoystickID id = 0;
+};
+
+// SDL3 only emits GAMEPAD_* events for pads that stay open. Keep a small table
+// of open handles (same idea as recomp-ui launcher_input_poll).
+constexpr int kMaxOpenHubPads = 16;
+struct OpenHubPad {
+    SDL_JoystickID id = 0;
+    SDL_Gamepad* handle = nullptr;
+    char guid[64]{};
+};
+OpenHubPad g_open_pads[kMaxOpenHubPads]{};
+
+bool guid_eq_ci(const char* a, const char* b) {
+    if (!a || !b) return false;
+    while (*a && *b) {
+        const unsigned char ca = static_cast<unsigned char>(*a++);
+        const unsigned char cb = static_cast<unsigned char>(*b++);
+        if (std::tolower(ca) != std::tolower(cb)) return false;
+    }
+    return *a == *b;
+}
+
+void hub_close_all_gamepads() {
+    for (int i = 0; i < kMaxOpenHubPads; ++i) {
+        if (g_open_pads[i].handle) SDL_CloseGamepad(g_open_pads[i].handle);
+        g_open_pads[i] = {};
+    }
+}
+
+// Open newly connected pads; close disconnected ones. Call once per frame.
+void hub_sync_open_gamepads() {
+    bool keep[kMaxOpenHubPads]{};
+    int count = 0;
+    SDL_JoystickID* ids = SDL_GetGamepads(&count);
+    if (ids) {
+        for (int i = 0; i < count; ++i) {
+            const SDL_JoystickID id = ids[i];
+            int slot = -1;
+            for (int j = 0; j < kMaxOpenHubPads; ++j) {
+                if (g_open_pads[j].handle && g_open_pads[j].id == id) {
+                    slot = j;
+                    break;
+                }
+            }
+            if (slot < 0) {
+                for (int j = 0; j < kMaxOpenHubPads; ++j) {
+                    if (g_open_pads[j].handle) continue;
+                    SDL_Gamepad* gp = SDL_OpenGamepad(id);
+                    if (!gp) break;
+                    g_open_pads[j].handle = gp;
+                    g_open_pads[j].id = id;
+                    SDL_GUIDToString(SDL_GetGamepadGUIDForID(id), g_open_pads[j].guid,
+                                     static_cast<int>(sizeof(g_open_pads[j].guid)));
+                    slot = j;
+                    break;
+                }
+            }
+            if (slot >= 0) keep[slot] = true;
+        }
+        SDL_free(ids);
+    }
+    for (int j = 0; j < kMaxOpenHubPads; ++j) {
+        if (!g_open_pads[j].handle || keep[j]) continue;
+        SDL_CloseGamepad(g_open_pads[j].handle);
+        g_open_pads[j] = {};
+    }
+}
+
+void cancel_psx_bind_capture(HubModel& hub) {
+    hub.psx_settings.capturing_bind = -1;
+    hub.psx_settings.map_all_active = false;
+    hub.psx_settings.map_all_wait_release = false;
+    hub.psx_settings.map_all_step = 0;
+}
+
+void begin_psx_bind_capture(HubModel& hub, int button, bool is_pad) {
+    hub.psx_settings.capturing_bind = button;
+    hub.psx_settings.capture_is_pad = is_pad;
+    if (!hub.psx_settings.map_all_active) hub.psx_settings.map_all_wait_release = false;
+}
+
+void begin_psx_map_all(HubModel& hub, bool is_pad) {
+    hub.psx_settings.map_all_active = true;
+    hub.psx_settings.map_all_wait_release = false;
+    hub.psx_settings.map_all_step = 0;
+    begin_psx_bind_capture(hub, retcomm::psx_pad_map_all_order()[0], is_pad);
+}
+
+void advance_psx_map_all(HubModel& hub) {
+    auto& d = hub.psx_settings;
+    if (!d.map_all_active) return;
+    d.map_all_step++;
+    if (d.map_all_step >= retcomm::kPsxPadButtonCount) {
+        cancel_psx_bind_capture(hub);
+        return;
+    }
+    // Gamepads need a release/rest gate so one press doesn't fill every slot.
+    d.map_all_wait_release = d.capture_is_pad;
+    begin_psx_bind_capture(hub, retcomm::psx_pad_map_all_order()[d.map_all_step], d.capture_is_pad);
+}
+
+SDL_JoystickID find_live_pad_id(const char* guid) {
+    if (!guid || !guid[0]) return 0;
+    for (int i = 0; i < kMaxOpenHubPads; ++i) {
+        if (g_open_pads[i].handle && guid_eq_ci(g_open_pads[i].guid, guid))
+            return g_open_pads[i].id;
+    }
+    // Fallback if sync hasn't run yet this frame.
+    int n = 0;
+    SDL_JoystickID* ids = SDL_GetGamepads(&n);
+    if (!ids) return 0;
+    SDL_JoystickID hit = 0;
+    for (int i = 0; i < n; ++i) {
+        char g[64]{};
+        SDL_GUIDToString(SDL_GetGamepadGUIDForID(ids[i]), g, static_cast<int>(sizeof(g)));
+        if (guid_eq_ci(g, guid)) {
+            hit = ids[i];
+            break;
+        }
+    }
+    SDL_free(ids);
+    return hit;
+}
+
+bool gamepad_at_rest(SDL_JoystickID id) {
+    if (!id) return true;
+    SDL_Gamepad* pad = SDL_GetGamepadFromID(id);
+    if (!pad) {
+        for (int i = 0; i < kMaxOpenHubPads; ++i) {
+            if (g_open_pads[i].id == id && g_open_pads[i].handle) {
+                pad = g_open_pads[i].handle;
+                break;
+            }
+        }
+    }
+    if (!pad) return true;
+    for (int b = 0; b < static_cast<int>(SDL_GAMEPAD_BUTTON_COUNT); ++b) {
+        if (SDL_GetGamepadButton(pad, static_cast<SDL_GamepadButton>(b))) return false;
+    }
+    for (int a = 0; a < static_cast<int>(SDL_GAMEPAD_AXIS_COUNT); ++a) {
+        const Sint16 v = SDL_GetGamepadAxis(pad, static_cast<SDL_GamepadAxis>(a));
+        if (v > 8000 || v < -8000) return false;
+    }
+    return true;
+}
+
+// Live pads + remembered GUID profiles (input.ini) + currently assigned slots.
+void collect_hub_gamepads(HubModel& hub, std::vector<HubGamepadOpt>& out) {
+    out.clear();
+    const auto& s = hub.psx_settings.settings;
+    auto already = [&](const char* guid) {
+        if (!guid || !guid[0]) return true;
+        for (const auto& o : out)
+            if (std::strcmp(o.guid, guid) == 0) return true;
+        return false;
+    };
+    auto push = [&](const char* guid, const char* name, bool live, SDL_JoystickID id) {
+        if (!guid || !guid[0] || already(guid)) return;
+        HubGamepadOpt o;
+        std::snprintf(o.guid, sizeof(o.guid), "%s", guid);
+        const char* nm = (name && name[0] && std::strcmp(name, "Gamepad") != 0) ? name : "Controller";
+        std::snprintf(o.name, sizeof(o.name), "%s", nm);
+        o.live = live;
+        o.id = id;
+        out.push_back(o);
+    };
+
+    const int known = retcomm::psx_pad_binds_known_count(hub.paths);
+    for (int i = 0; i < known; ++i) {
+        char guid[40]{}, name[64]{};
+        if (!retcomm::psx_pad_binds_known_at(hub.paths, i, guid, sizeof(guid), name, sizeof(name)))
+            continue;
+        push(guid, name, false, 0);
+    }
+
+    int n = 0;
+    SDL_JoystickID* ids = SDL_GetGamepads(&n);
+    if (ids) {
+        for (int i = 0; i < n; ++i) {
+            const SDL_JoystickID id = ids[i];
+            char guid_str[64]{};
+            SDL_GUIDToString(SDL_GetGamepadGUIDForID(id), guid_str, static_cast<int>(sizeof(guid_str)));
+            const char* name = SDL_GetGamepadNameForID(id);
+            // Refresh live entry / prefer custom registry name.
+            bool found = false;
+            for (auto& o : out) {
+                if (std::strcmp(o.guid, guid_str) != 0) continue;
+                o.live = true;
+                o.id = id;
+                if (!retcomm::psx_pad_binds_name_is_custom(hub.paths, guid_str) && name && name[0] &&
+                    std::strcmp(name, "Gamepad") != 0)
+                    std::snprintf(o.name, sizeof(o.name), "%s", name);
+                found = true;
+                break;
+            }
+            if (!found) push(guid_str, name, true, id);
+        }
+        SDL_free(ids);
+    }
+    for (int p = 0; p < retcomm::PsxPlatformSettings::kMaxPlayers; ++p) {
+        if (s.player_src[static_cast<size_t>(p)] != 2) continue;
+        const std::string& g = s.player_guid[static_cast<size_t>(p)];
+        if (g.empty()) continue;
+        char nm[64]{};
+        retcomm::psx_pad_binds_name(hub.paths, g, nm, sizeof(nm));
+        push(g.c_str(), nm[0] ? nm : "Controller", false, 0);
+    }
+}
+
+const char* psx_player_src_preview(const retcomm::PsxPlatformSettings& s, int p,
+                                   const std::vector<HubGamepadOpt>& pads) {
+    const int src = std::clamp(s.player_src[static_cast<size_t>(p)], 0, 2);
+    if (src == 0) return "None";
+    if (src == 1) return "Keyboard";
+    const std::string& guid = s.player_guid[static_cast<size_t>(p)];
+    if (guid.empty()) return "Gamepad";
+    for (const auto& pad : pads) {
+        if (guid == pad.guid) return pad.name;
+    }
+    return guid.c_str();
+}
+
+void assign_psx_player_source(HubModel& hub, int p, int src, const char* guid, const char* name,
+                              bool* dirty) {
+    auto& s = hub.psx_settings.settings;
+    s.player_src[static_cast<size_t>(p)] = src;
+    if (src == 1) {
+        s.player_guid[static_cast<size_t>(p)].clear();
+        s.player_mode[static_cast<size_t>(p)] = 2; // digital default for keyboard
+    } else if (src == 2 && guid && guid[0]) {
+        s.player_guid[static_cast<size_t>(p)] = guid;
+        retcomm::psx_pad_binds_remember(hub.paths, guid, name ? name : "Controller", -1);
+        const int dz = retcomm::psx_pad_binds_deadzone(hub.paths, guid);
+        s.player_deadzone[static_cast<size_t>(p)] =
+            std::clamp((dz * 32767 + 50) / 100, 0, 32767);
+        if (s.player_mode[static_cast<size_t>(p)] != 1 && s.player_mode[static_cast<size_t>(p)] != 2)
+            s.player_mode[static_cast<size_t>(p)] = 1;
+    } else {
+        s.player_guid[static_cast<size_t>(p)].clear();
+    }
+    *dirty = true;
+}
+
+void draw_psx_player_source_combo(HubModel& hub, int p, const std::vector<HubGamepadOpt>& pads,
+                                  bool* dirty) {
+    auto& s = hub.psx_settings.settings;
+    const char* preview = psx_player_src_preview(s, p, pads);
+    ImGui::SetNextItemWidth(-1.f);
+    if (!ImGui::BeginCombo("##src", preview)) return;
+
+    if (ImGui::Selectable("None", s.player_src[static_cast<size_t>(p)] == 0))
+        assign_psx_player_source(hub, p, 0, nullptr, nullptr, dirty);
+    if (ImGui::Selectable("Keyboard", s.player_src[static_cast<size_t>(p)] == 1))
+        assign_psx_player_source(hub, p, 1, nullptr, nullptr, dirty);
+
+    if (pads.empty()) {
+        ImGui::BeginDisabled();
+        ImGui::Selectable("(no gamepad connected)");
+        ImGui::EndDisabled();
+    } else {
+        for (const auto& pad : pads) {
+            bool claimed = false;
+            for (int o = 0; o < retcomm::PsxPlatformSettings::kMaxPlayers; ++o) {
+                if (o == p) continue;
+                if (s.player_src[static_cast<size_t>(o)] == 2 &&
+                    s.player_guid[static_cast<size_t>(o)] == pad.guid) {
+                    claimed = true;
+                    break;
+                }
+            }
+            char label[96];
+            if (pad.live)
+                std::snprintf(label, sizeof(label), "%s", pad.name);
+            else
+                std::snprintf(label, sizeof(label), "%s (disconnected)", pad.name);
+            const bool sel = s.player_src[static_cast<size_t>(p)] == 2 &&
+                             s.player_guid[static_cast<size_t>(p)] == pad.guid;
+            if (claimed) ImGui::BeginDisabled();
+            if (ImGui::Selectable(label, sel) && !claimed)
+                assign_psx_player_source(hub, p, 2, pad.guid, pad.name, dirty);
+            if (claimed) ImGui::EndDisabled();
+        }
+    }
+    ImGui::EndCombo();
+}
+
+// Overlay chips — normalized centers on the stylized PS1 pad art
+// (assets/controllers/pad_analog.png / pad_digital.png).
+struct PsxPadHit {
+    int button;
+    float nx, ny;
+};
+
+// Short labels drawn on chips (binding string goes in the tooltip).
+const char* psx_pad_chip_label(int b) {
+    static const char* k[] = {
+        "U",    "D",    "L",    "R",     // d-pad
+        "Tri",  "Cir",  "Cro",  "Sq",    // face
+        "L1",   "L2",   "R1",   "R2",    // shoulders
+        "L3",   "R3",   "Start", "Select",
+        "LS^",  "LSv",  "LS<",  "LS>",   // left stick
+        "RS^",  "RSv",  "RS<",  "RS>",   // right stick
+    };
+    if (b < 0 || b >= retcomm::kPsxPadButtonCount) return "?";
+    return k[b];
+}
+
+const PsxPadHit* psx_pad_hits(int* count) {
+    // Exact centers from the procedural flat-retro pad art (720x400).
+    // D-pad / stick dirs are pushed out from the art centers so chips don't overlap
+    // after the UV crop zoom (chips are wider than the physical buttons).
+    static const PsxPadHit kHits[] = {
+        {9, 0.274f, 0.257f},  // L2
+        {8, 0.268f, 0.302f},  // L1
+        {11, 0.726f, 0.257f}, // R2
+        {10, 0.733f, 0.302f}, // R1
+        {0, 0.311f, 0.438f},  // Up
+        {1, 0.311f, 0.572f},  // Down
+        {2, 0.2665f, 0.505f},  // Left
+        {3, 0.355f, 0.505f},  // Right
+        {4, 0.689f, 0.421f},  // Triangle
+        {5, 0.736f, 0.505f},  // Circle
+        {6, 0.689f, 0.589f},  // Cross
+        {7, 0.642f, 0.505f},  // Square
+        {15, 0.447f, 0.520f}, // Select
+        {14, 0.553f, 0.520f}, // Start
+        {16, 0.409f, 0.610f}, // LS Up
+        {17, 0.409f, 0.740f}, // LS Down
+        {18, 0.350f, 0.675f}, // LS Left
+        {19, 0.468f, 0.675f}, // LS Right
+        {12, 0.409f, 0.675f}, // L3
+        {20, 0.591f, 0.610f}, // RS Up
+        {21, 0.591f, 0.740f}, // RS Down
+        {22, 0.532f, 0.675f}, // RS Left
+        {23, 0.650f, 0.675f}, // RS Right
+        {13, 0.591f, 0.675f}, // R3
+    };
+    *count = static_cast<int>(sizeof(kHits) / sizeof(kHits[0]));
+    return kHits;
+}
+
+bool poll_psx_bind_capture(HubModel& hub, const SDL_Event& e) {
+    auto& d = hub.psx_settings;
+    if (d.configuring_player < 0) return false;
+    if (d.capturing_bind < 0 && !d.map_all_active) return false;
+
+    if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_ESCAPE) {
+        cancel_psx_bind_capture(hub);
+        return true;
+    }
+
+    const int p = d.configuring_player;
+    const auto& s = d.settings;
+    const bool is_pad = d.capture_is_pad;
+
+    if (!is_pad) {
+        if (e.type != SDL_EVENT_KEY_DOWN || e.key.repeat) return true;
+        if (d.capturing_bind < 0) return true;
+        retcomm::psx_keybinds_set_scancode(hub.paths, p, d.capturing_bind,
+                                           static_cast<int>(e.key.scancode));
+        d.dirty = true;
+        if (d.map_all_active) advance_psx_map_all(hub);
+        else cancel_psx_bind_capture(hub);
+        return true;
+    }
+
+    const std::string& guid = s.player_guid[static_cast<size_t>(p)];
+    SDL_JoystickID want = find_live_pad_id(guid.c_str());
+    // If GUID lookup failed but exactly one pad is open, accept that device so
+    // mapping still works across GUID string quirks.
+    if (!want) {
+        int live_n = 0;
+        SDL_JoystickID only = 0;
+        for (int i = 0; i < kMaxOpenHubPads; ++i) {
+            if (!g_open_pads[i].handle) continue;
+            ++live_n;
+            only = g_open_pads[i].id;
+        }
+        if (live_n == 1) want = only;
+    }
+    auto from_selected = [&](SDL_JoystickID which) {
+        if (!want) return false;
+        return which == want;
+    };
+
+    auto try_clear_release = [&](SDL_JoystickID which) {
+        if (!d.map_all_wait_release) return;
+        if (!from_selected(which)) return;
+        if (gamepad_at_rest(which)) d.map_all_wait_release = false;
+    };
+
+    auto commit = [&](int kind, int code, int axis_dir) {
+        retcomm::psx_pad_binds_set(hub.paths, guid, d.capturing_bind, kind, code, axis_dir);
+        retcomm::psx_pad_binds_remember(hub.paths, guid, "", -1);
+        d.dirty = true;
+        if (d.map_all_active) advance_psx_map_all(hub);
+        else cancel_psx_bind_capture(hub);
+    };
+
+    if (e.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN) {
+        if (d.map_all_wait_release) {
+            try_clear_release(e.gbutton.which);
+            return true;
+        }
+        if (d.capturing_bind >= 0 && from_selected(e.gbutton.which))
+            commit(1, static_cast<int>(e.gbutton.button), 0);
+        return true;
+    }
+    if (e.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
+        try_clear_release(e.gbutton.which);
+        return true;
+    }
+    if (e.type == SDL_EVENT_GAMEPAD_AXIS_MOTION) {
+        if (!from_selected(e.gaxis.which)) return true;
+        if (d.map_all_wait_release) {
+            try_clear_release(e.gaxis.which);
+            return true;
+        }
+        if (d.capturing_bind < 0) return true;
+        const int val = static_cast<int>(e.gaxis.value);
+        if (val < 20000 && val > -20000) return true;
+        const int axis = static_cast<int>(e.gaxis.axis);
+        const int slot = d.capturing_bind;
+        const bool stick_dir_slot = (slot >= 16 && slot < 24);
+        const bool stick_axis = axis == SDL_GAMEPAD_AXIS_LEFTX || axis == SDL_GAMEPAD_AXIS_LEFTY ||
+                                axis == SDL_GAMEPAD_AXIS_RIGHTX || axis == SDL_GAMEPAD_AXIS_RIGHTY;
+        if (stick_axis && !stick_dir_slot) return true;
+        commit(2, axis, val > 0 ? 1 : -1);
+        return true;
+    }
+    return true; // swallow while capturing
+}
+
+void draw_psx_mapping_panel(HubModel& hub, const Theme& th, int p, bool is_pad,
+                            const std::string& guid, BoxartCache& boxart) {
+    auto& d = hub.psx_settings;
+    const bool digital = hub.psx_settings.settings.player_mode[static_cast<size_t>(p)] == 2;
+    fs::path art = find_hub_asset_file("controllers", digital ? "pad_digital.png" : "pad_analog.png");
+    if (art.empty())
+        art = find_hub_asset_file("controllers", digital ? "pad_digital.tga" : "pad_analog.tga");
+    const BoxartTexture* tex =
+        art.empty() ? nullptr
+                    : boxart.get(digital ? "psx:pad_digital" : "psx:pad_analog", art);
+
+    ImGui::BeginChild("psx_map_panel", ImVec2(0, 0), ImGuiChildFlags_Borders);
+    ImGui::TextColored(th.text_muted, is_pad ? "GAMEPAD BINDINGS" : "KEYBOARD BINDINGS");
+    ImGui::Separator();
+
+    // Footer inside the panel: status only — action buttons live on the modal bar.
+    const float status_reserve = (d.capturing_bind >= 0) ? 28.f : 8.f;
+    const float avail_w = ImGui::GetContentRegionAvail().x;
+    const float avail_h = std::max(260.f, ImGui::GetContentRegionAvail().y - status_reserve);
+
+    // pad_*.png is 720x400 with large empty margins around the silhouette. Zoom the
+    // UV rect to the controller content so the panel isn't mostly letterbox.
+    // Hit coords (psx_pad_hits) are normalized in the full 720x400 canvas.
+    constexpr float kCropU0 = 0.105f;
+    constexpr float kCropV0 = 0.175f;
+    constexpr float kCropU1 = 0.895f;
+    constexpr float kCropV1 = 0.865f;
+    const float crop_w = kCropU1 - kCropU0;
+    const float crop_h = kCropV1 - kCropV0;
+    const float full_aspect = (tex && tex->width > 0 && tex->height > 0)
+                                  ? (static_cast<float>(tex->width) / static_cast<float>(tex->height))
+                                  : (720.f / 400.f);
+    const float aspect = full_aspect * (crop_w / std::max(0.01f, crop_h));
+
+    // Fill the panel — thin edge pad, then center any leftover on the short axis.
+    constexpr float kEdgePad = 4.f;
+    float img_w = std::max(1.f, avail_w - kEdgePad * 2.f);
+    float img_h = img_w / aspect;
+    if (img_h > avail_h - kEdgePad * 2.f) {
+        img_h = std::max(1.f, avail_h - kEdgePad * 2.f);
+        img_w = img_h * aspect;
+    }
+    const float ox = (avail_w - img_w) * 0.5f;
+    const float oy = (avail_h - img_h) * 0.5f;
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    const float img_x = origin.x + ox;
+    const float img_y = origin.y + oy;
+
+    // Reserve the full available area so the child layout matches the painted art.
+    ImGui::Dummy(ImVec2(avail_w, avail_h));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    if (tex && tex->gl_id) {
+        dl->AddImage((ImTextureID)(intptr_t)tex->gl_id, ImVec2(img_x, img_y),
+                     ImVec2(img_x + img_w, img_y + img_h), ImVec2(kCropU0, kCropV0),
+                     ImVec2(kCropU1, kCropV1));
+    } else {
+        dl->AddRectFilled(ImVec2(img_x, img_y), ImVec2(img_x + img_w, img_y + img_h),
+                          ImGui::ColorConvertFloat4ToU32(th.control));
+        dl->AddText(ImVec2(img_x + 12.f, img_y + 12.f),
+                    ImGui::ColorConvertFloat4ToU32(th.warn),
+                    art.empty() ? "pad art missing (assets/controllers)" : "pad art failed to load");
+    }
+
+    int hit_n = 0;
+    const PsxPadHit* hits = psx_pad_hits(&hit_n);
+    // Scale chips with the on-screen pad (cropped reference width ~570px at 720 source).
+    const float ui_scale = std::clamp(img_w / 570.f, 0.95f, 2.1f);
+    const float chip_w = 44.f * ui_scale;
+    const float chip_h = 16.f * ui_scale;
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.f * ui_scale, 0.f));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.f * ui_scale);
+    ImGui::SetWindowFontScale(0.78f * ui_scale);
+    for (int i = 0; i < hit_n; ++i) {
+        const int b = hits[i].button;
+        if (digital && b >= 16) continue;
+        char bound[48]{};
+        if (is_pad)
+            retcomm::psx_pad_binds_label(hub.paths, guid, b, bound, sizeof(bound));
+        else
+            retcomm::psx_keybinds_label(hub.paths, p, b, bound, sizeof(bound));
+
+        const float cx = img_x + ((hits[i].nx - kCropU0) / crop_w) * img_w;
+        const float cy = img_y + ((hits[i].ny - kCropV0) / crop_h) * img_h;
+        ImGui::SetCursorScreenPos(ImVec2(cx - chip_w * 0.5f, cy - chip_h * 0.5f));
+        ImGui::PushID(b);
+        const bool capturing = d.capturing_bind == b;
+        char btn[64];
+        if (capturing && d.map_all_wait_release)
+            std::snprintf(btn, sizeof(btn), "…");
+        else if (capturing)
+            std::snprintf(btn, sizeof(btn), "[%s]", psx_pad_chip_label(b));
+        else
+            std::snprintf(btn, sizeof(btn), "%s", psx_pad_chip_label(b));
+
+        if (capturing) ImGui::PushStyleColor(ImGuiCol_Button, th.accent);
+        else
+            ImGui::PushStyleColor(ImGuiCol_Button,
+                                 ImVec4(th.control.x, th.control.y, th.control.z, 0.88f));
+        if (ImGui::Button(btn, ImVec2(chip_w, chip_h))) {
+            d.map_all_active = false;
+            d.map_all_wait_release = false;
+            begin_psx_bind_capture(hub, b, is_pad);
+        }
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip("%s\nBound: %s", retcomm::psx_pad_button_label(b),
+                              bound[0] ? bound : "(unbound)");
+        }
+        ImGui::PopID();
+    }
+    ImGui::SetWindowFontScale(1.f);
+    ImGui::PopStyleVar(2);
+
+    ImGui::SetCursorScreenPos(ImVec2(origin.x, img_y + img_h + 6.f));
+    ImGui::Dummy(ImVec2(avail_w, 0));
+    if (d.capturing_bind >= 0) {
+        if (d.map_all_wait_release)
+            ImGui::TextColored(th.warn, "Release controls… (Esc cancels%s)",
+                               d.map_all_active ? " — Auto Map" : "");
+        else
+            ImGui::TextColored(th.warn, "Map an input to %s (Esc cancels%s)",
+                               retcomm::psx_pad_button_label(d.capturing_bind),
+                               d.map_all_active ? " — Auto Map" : "");
+    }
+    ImGui::EndChild();
+}
+
+void draw_psx_configure_modal(HubModel& hub, const Theme& th, const std::vector<HubGamepadOpt>& pads,
+                              BoxartCache& boxart) {
+    auto& draft = hub.psx_settings;
+    if (draft.configuring_player < 0 ||
+        draft.configuring_player >= retcomm::PsxPlatformSettings::kMaxPlayers)
+        return;
+    const int p = draft.configuring_player;
+    auto& s = draft.settings;
+    bool dirty = false;
+
+    char title[48];
+    std::snprintf(title, sizeof(title), "CONTROLLER - PLAYER %d", p + 1);
+    ImGui::OpenPopup("##psx_pad_cfg");
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowSize(ImVec2(std::min(1100.f, vp->WorkSize.x * 0.96f),
+                                    std::min(860.f, vp->WorkSize.y * 0.94f)),
+                             ImGuiCond_Appearing);
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("##psx_pad_cfg", nullptr, ImGuiWindowFlags_None)) {
+        ImGui::TextColored(th.accent, "%s", title);
+        ImGui::SameLine();
+        {
+            const float close_w = 80.f;
+            ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - close_w);
+            if (ImGui::Button("Close", ImVec2(close_w, 0))) {
+                cancel_psx_bind_capture(hub);
+                draft.configuring_player = -1;
+                draft.rename_open = false;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        ImGui::Separator();
+        ImGui::PushID(p);
+
+        const bool is_pad =
+            s.player_src[static_cast<size_t>(p)] == 2 && !s.player_guid[static_cast<size_t>(p)].empty();
+        const bool is_kb = s.player_src[static_cast<size_t>(p)] == 1;
+        if (is_kb) s.player_mode[static_cast<size_t>(p)] = 2;
+
+        // Two-row table keeps labels and controls on the same baselines across columns.
+        if (ImGui::BeginTable("psx_cfg_top", 3,
+                              ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_NoSavedSettings)) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextColored(th.text_muted, "Input source");
+            ImGui::TableNextColumn();
+            ImGui::TextColored(th.text_muted, "Pad mode");
+            ImGui::TableNextColumn();
+            ImGui::TextColored(th.text_muted, "Deadzone");
+
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            draw_psx_player_source_combo(hub, p, pads, &dirty);
+
+            ImGui::TableNextColumn();
+            {
+                const bool dig = s.player_mode[static_cast<size_t>(p)] == 2;
+                const char* mode_lab = dig ? "Digital (D-Pad)" : "Analog (DualShock)";
+                if (is_kb) ImGui::BeginDisabled();
+                if (ImGui::Button(mode_lab, ImVec2(-1.f, 0))) {
+                    s.player_mode[static_cast<size_t>(p)] = dig ? 1 : 2;
+                    dirty = true;
+                }
+                if (is_kb) {
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+                        ImGui::SetTooltip("Keyboard seats use digital mode.");
+                    ImGui::EndDisabled();
+                }
+            }
+
+            ImGui::TableNextColumn();
+            {
+                int pct = 0;
+                if (is_pad)
+                    pct = retcomm::psx_pad_binds_deadzone(hub.paths,
+                                                         s.player_guid[static_cast<size_t>(p)]);
+                else
+                    pct = (s.player_deadzone[static_cast<size_t>(p)] * 100 + 32767 / 2) / 32767;
+                pct = std::clamp(pct, 0, 100);
+                ImGui::SetNextItemWidth(-1.f);
+                if (ImGui::SliderInt("##dz", &pct, 0, 50, "%d%%")) {
+                    s.player_deadzone[static_cast<size_t>(p)] =
+                        std::clamp((pct * 32767 + 50) / 100, 0, 32767);
+                    if (is_pad)
+                        retcomm::psx_pad_binds_set_deadzone(
+                            hub.paths, s.player_guid[static_cast<size_t>(p)], pct);
+                    dirty = true;
+                }
+            }
+            ImGui::EndTable();
+        }
+        ImGui::Dummy(ImVec2(0, 6));
+
+        if (draft.rename_open) ImGui::OpenPopup("Rename Profile");
+        if (ImGui::BeginPopupModal("Rename Profile", &draft.rename_open,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::TextUnformatted("Display name for this gamepad profile:");
+            ImGui::SetNextItemWidth(320.f);
+            const bool enter = ImGui::InputText("##rename_pad", draft.rename_buf,
+                                                sizeof(draft.rename_buf),
+                                                ImGuiInputTextFlags_EnterReturnsTrue);
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                draft.rename_open = false;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::SameLine();
+            const bool ok = draft.rename_buf[0] != '\0';
+            ImGui::BeginDisabled(!ok);
+            if ((ImGui::Button("OK", ImVec2(120, 0)) || enter) && ok) {
+                retcomm::psx_pad_binds_rename(hub.paths, s.player_guid[static_cast<size_t>(p)],
+                                             draft.rename_buf);
+                draft.rename_open = false;
+                dirty = true;
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            ImGui::EndPopup();
+        }
+
+        // Bindings fill remaining height above the bottom action bar.
+        const float footer_h = ImGui::GetFrameHeightWithSpacing() + 8.f;
+        const float body_h = std::max(200.f, ImGui::GetContentRegionAvail().y - footer_h);
+        ImGui::BeginChild("psx_cfg_body", ImVec2(0, body_h), ImGuiChildFlags_None);
+        if (s.player_src[static_cast<size_t>(p)] == 0) {
+            ImGui::BeginChild("psx_map_empty", ImVec2(0, 0), ImGuiChildFlags_Borders);
+            ImGui::TextColored(th.text_muted, "Assign an input source to edit mappings.");
+            ImGui::EndChild();
+        } else {
+            draw_psx_mapping_panel(hub, th, p, is_pad, s.player_guid[static_cast<size_t>(p)],
+                                   boxart);
+        }
+        ImGui::EndChild();
+
+        // Bottom bar: profile + map actions + Save (saves platform prefs and closes).
+        // Shared width so Rename/Delete/Auto Map/Reset read as one even strip.
+        const char* kFooterBtns[] = {"Rename", "Delete", "Auto Map", "Reset"};
+        float footer_btn_w = 0.f;
+        for (const char* lab : kFooterBtns)
+            footer_btn_w = std::max(footer_btn_w, ImGui::CalcTextSize(lab).x);
+        footer_btn_w += ImGui::GetStyle().FramePadding.x * 2.f + 16.f;
+        const ImVec2 footer_btn_sz(footer_btn_w, 0);
+
+        if (!is_pad) ImGui::BeginDisabled();
+        if (ImGui::Button("Rename", footer_btn_sz)) {
+            char nm[64]{};
+            retcomm::psx_pad_binds_name(hub.paths, s.player_guid[static_cast<size_t>(p)], nm,
+                                        sizeof(nm));
+            if (!nm[0]) {
+                for (const auto& pad : pads)
+                    if (pad.guid == s.player_guid[static_cast<size_t>(p)]) {
+                        std::snprintf(nm, sizeof(nm), "%s", pad.name);
+                        break;
+                    }
+            }
+            std::snprintf(draft.rename_buf, sizeof(draft.rename_buf), "%s", nm);
+            draft.rename_open = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Delete", footer_btn_sz)) {
+            const std::string g = s.player_guid[static_cast<size_t>(p)];
+            retcomm::psx_pad_binds_delete(hub.paths, g);
+            for (int o = 0; o < retcomm::PsxPlatformSettings::kMaxPlayers; ++o) {
+                if (s.player_src[static_cast<size_t>(o)] == 2 &&
+                    s.player_guid[static_cast<size_t>(o)] == g)
+                    assign_psx_player_source(hub, o, 1, nullptr, nullptr, &dirty);
+            }
+            cancel_psx_bind_capture(hub);
+        }
+        if (!is_pad) ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        if (accent_button("Auto Map", th, footer_btn_sz)) {
+            if (s.player_src[static_cast<size_t>(p)] != 0) begin_psx_map_all(hub, is_pad);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset", footer_btn_sz)) {
+            if (is_pad && !s.player_guid[static_cast<size_t>(p)].empty())
+                retcomm::psx_pad_binds_reset(hub.paths, s.player_guid[static_cast<size_t>(p)]);
+            else if (is_kb)
+                retcomm::psx_keybinds_reset_player(hub.paths, p);
+            cancel_psx_bind_capture(hub);
+            dirty = true;
+        }
+
+        {
+            const float save_w = 120.f;
+            ImGui::SameLine();
+            ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX() + 8.f,
+                                          ImGui::GetWindowContentRegionMax().x - save_w));
+            if (accent_button("Save", th, ImVec2(save_w, 0))) {
+                if (dirty) draft.dirty = true;
+                // Persist profile name/deadzone/maps already written live; also
+                // flush settings.toml player seats + close the modal.
+                if (is_pad && !s.player_guid[static_cast<size_t>(p)].empty()) {
+                    char nm[64]{};
+                    retcomm::psx_pad_binds_name(hub.paths, s.player_guid[static_cast<size_t>(p)], nm,
+                                                sizeof(nm));
+                    const int dz = retcomm::psx_pad_binds_deadzone(
+                        hub.paths, s.player_guid[static_cast<size_t>(p)]);
+                    retcomm::psx_pad_binds_save_profile(
+                        hub.paths, s.player_guid[static_cast<size_t>(p)], nm[0] ? nm : "Controller",
+                        retcomm::psx_pad_binds_name_is_custom(hub.paths,
+                                                              s.player_guid[static_cast<size_t>(p)]),
+                        dz);
+                }
+                std::string err;
+                if (!hub.save_psx_settings(&err)) {
+                    hub.append_log("PlayStation settings save failed: " + err);
+                } else {
+                    hub.show_toast("Saved!");
+                }
+                cancel_psx_bind_capture(hub);
+                draft.configuring_player = -1;
+                draft.rename_open = false;
+                ImGui::CloseCurrentPopup();
+            }
+        }
+
+        ImGui::PopID();
+        ImGui::EndPopup();
+    }
+    if (dirty) draft.dirty = true;
+}
+
+void draw_psx_gamepads_panel(HubModel& hub, const Theme& th, float panel_h, BoxartCache& boxart) {
+    auto& s = hub.psx_settings.settings;
+    bool dirty = false;
+    std::vector<HubGamepadOpt> pads;
+    collect_hub_gamepads(hub, pads);
+
+    ImGui::BeginChild("psx_gamepads", ImVec2(0, panel_h), ImGuiChildFlags_Borders);
+    ImGui::TextColored(th.text_muted, "CONTROLLERS");
+    ImGui::Separator();
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextWrapped(
+        "Slots 1–8 for titles that support multitap / high player counts. Assignments "
+        "write pN_device / pN_mode / pN_deadzone into the global PlayStation settings.toml "
+        "and are applied to games on install, update, and launch.");
+    ImGui::PopStyleColor();
+    ImGui::Dummy(ImVec2(0, 8));
+
+    constexpr int kN = retcomm::PsxPlatformSettings::kMaxPlayers;
+    const float gap = th.spacing_md;
+    const float availw = ImGui::GetContentRegionAvail().x;
+    const float pref = 280.f;
+    int cols = static_cast<int>((availw + gap) / (pref + gap));
+    if (cols < 1) cols = 1;
+    if (cols > 4) cols = 4;
+    float cardw = (availw - gap * static_cast<float>(cols - 1)) / static_cast<float>(cols);
+    if (cardw < 1.f) cardw = availw;
+
+    for (int p = 0; p < kN; ++p) {
+        if (p % cols) ImGui::SameLine(0, gap);
+        else if (p) ImGui::Dummy(ImVec2(0, gap));
+
+        ImGui::PushID(p);
+        ImGui::BeginChild("pcard", ImVec2(cardw, 0),
+                          ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
+        {
+            char eb[24];
+            std::snprintf(eb, sizeof(eb), "PLAYER %d", p + 1);
+            ImGui::TextColored(th.text_muted, "%s", eb);
+            ImGui::Dummy(ImVec2(0, 4));
+            draw_psx_player_source_combo(hub, p, pads, &dirty);
+            ImGui::Dummy(ImVec2(0, 4));
+            const float cw = ImGui::GetContentRegionAvail().x;
+            const float half = (cw - th.spacing_sm) * 0.5f;
+            const float btnh = 32.f;
+            if (ImGui::Button("Configure", ImVec2(half, btnh))) {
+                cancel_psx_bind_capture(hub);
+                hub.psx_settings.configuring_player = p;
+                if (s.player_src[static_cast<size_t>(p)] == 1)
+                    s.player_mode[static_cast<size_t>(p)] = 2;
+                else if (s.player_src[static_cast<size_t>(p)] == 2 &&
+                         !s.player_guid[static_cast<size_t>(p)].empty()) {
+                    const char* nm = "Controller";
+                    for (const auto& pad : pads)
+                        if (pad.guid == s.player_guid[static_cast<size_t>(p)]) {
+                            nm = pad.name;
+                            break;
+                        }
+                    retcomm::psx_pad_binds_remember(hub.paths, s.player_guid[static_cast<size_t>(p)],
+                                                   nm, -1);
+                }
+            }
+            ImGui::SameLine(0, th.spacing_sm);
+            const bool on = s.player_src[static_cast<size_t>(p)] != 0;
+            const char* st = on ? "connected" : "not assigned";
+            const float sw = 10.f + 8.f + ImGui::CalcTextSize(st).x;
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.f, (half - sw) * 0.5f));
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() +
+                                 (btnh - ImGui::GetTextLineHeight()) * 0.5f);
+            const ImVec2 dot_c = ImGui::GetCursorScreenPos();
+            const float r = 4.f;
+            ImGui::GetWindowDrawList()->AddCircleFilled(
+                ImVec2(dot_c.x + r, dot_c.y + ImGui::GetTextLineHeight() * 0.5f), r,
+                ImGui::ColorConvertFloat4ToU32(on ? th.good : th.text_muted));
+            ImGui::Dummy(ImVec2(r * 2.f + 6.f, 0));
+            ImGui::SameLine(0, 0);
+            ImGui::TextColored(on ? th.good : th.text_muted, "%s", st);
+        }
+        ImGui::EndChild();
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+
+    if (dirty) hub.psx_settings.dirty = true;
+    draw_psx_configure_modal(hub, th, pads, boxart);
+}
+
+void draw_psx_settings_panel(HubModel& hub, const Theme& th, BoxartCache& boxart) {
+    poll_psx_hotkey_capture(hub);
+    auto& s = hub.psx_settings.settings;
+    auto mark = [&] { hub.psx_settings.dirty = true; };
+    const bool gamepads = hub.psx_settings.gamepads_tab;
+
+    ImGui::BeginChild("psx_settings", ImVec2(0, 0), ImGuiChildFlags_Borders,
+                      ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextUnformatted("PLAYSTATION SETTINGS");
+    ImGui::PopStyleColor();
+
+    constexpr float kTabW = 110.f;
+    const float right = ImGui::GetWindowContentRegionMax().x;
+    const float wrap_x = ImGui::GetCursorPosX() + (right - ImGui::GetCursorPosX()) - kTabW - 12.f;
+    const float desc_y = ImGui::GetCursorPosY();
+    ImGui::PushTextWrapPos(wrap_x);
+    ImGui::TextWrapped(
+        "%s",
+        gamepads
+            ? "Global controller slots for PlayStation titles. Saved prefs are written into "
+              "each game's settings.toml on install, update, and launch (unless excluded in "
+              "Manage Game Data)."
+            : "Global Display, Audio, Input, and Hotkeys for PlayStation titles. Saved prefs "
+              "are written into each game's settings.toml / config.ini on install, update, and "
+              "launch (unless excluded in Manage Game Data).");
+    ImGui::PopTextWrapPos();
+    ImGui::SameLine();
+    ImGui::SetCursorPosY(desc_y);
+    ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), right - kTabW));
+    if (gamepads) {
+        if (ImGui::Button("System", ImVec2(kTabW, 0))) {
+            hub.psx_settings.gamepads_tab = false;
+            cancel_psx_bind_capture(hub);
+            hub.psx_settings.configuring_player = -1;
+        }
+    } else {
+        if (ImGui::Button("Gamepads", ImVec2(kTabW, 0))) hub.psx_settings.gamepads_tab = true;
+    }
+    ImGui::Separator();
+
+    constexpr float kCol = 200.f;
+    auto cycle_btn = [&](const char* id, const char* label, float w = 160.f) -> bool {
+        ImGui::PushID(id);
+        const bool hit = ImGui::Button(label, ImVec2(w, 0));
+        ImGui::PopID();
+        return hit;
+    };
+
+    // Reserve gap + Save/Cancel row so panes don't crowd the footer.
+    const float footer_h = ImGui::GetFrameHeight() + 24.f;
+    const float gap = 12.f;
+    const float avail_x = ImGui::GetContentRegionAvail().x;
+    const float col_w = std::max(240.f, (avail_x - gap) * 0.5f);
+    const float panel_h = std::max(120.f, ImGui::GetContentRegionAvail().y - footer_h);
+
+    if (gamepads) {
+        draw_psx_gamepads_panel(hub, th, panel_h, boxart);
+    } else {
+    ImGui::BeginChild("psx_display_audio", ImVec2(col_w, panel_h), ImGuiChildFlags_Borders);
+    ImGui::TextColored(th.text_muted, "DISPLAY & AUDIO");
+    ImGui::Separator();
+    {
+        static const int kWidths[] = {960, 1280, 1600, 1920};
+        psx_settings_row_label("Window size", th, kCol);
+        char lbl[32];
+        std::snprintf(lbl, sizeof(lbl), "%d px", s.window_width);
+        if (cycle_btn("ww", lbl, 120.f)) {
+            int idx = 0;
+            for (int i = 0; i < 4; ++i)
+                if (kWidths[i] == s.window_width) {
+                    idx = i;
+                    break;
+                }
+            s.window_width = kWidths[(idx + 1) % 4];
+            mark();
+        }
+
+        psx_settings_row_label("Renderer", th, kCol);
+        const char* rlab =
+            s.renderer == 0 ? "Software" : (s.renderer == 2 ? "Vulkan" : "OpenGL");
+        if (cycle_btn("ren", rlab, 160.f)) {
+            s.renderer = (s.renderer + 1) % 3;
+            mark();
+        }
+
+        psx_settings_row_label("Supersampling", th, kCol);
+        char ssl[16];
+        std::snprintf(ssl, sizeof(ssl), "%dx", s.supersampling);
+        if (cycle_btn("ss", ssl, 80.f)) {
+            s.supersampling = s.supersampling >= 4 ? 1 : s.supersampling + 1;
+            mark();
+        }
+
+        psx_settings_row_label("Fullscreen", th, kCol);
+        static const char* kFs[] = {"Off", "Borderless", "Exclusive"};
+        if (cycle_btn("fs", kFs[std::clamp(s.fullscreen, 0, 2)], 140.f)) {
+            s.fullscreen = (std::clamp(s.fullscreen, 0, 2) + 1) % 3;
+            mark();
+        }
+
+        psx_settings_row_label("View mode", th, kCol);
+        static const char* kView[] = {"4:3 (Native)", "16:9 (Widescreen)", "21:9 (Ultrawide)",
+                                      "Adaptive"};
+        if (cycle_btn("view", kView[std::clamp(s.view_mode, 0, 3)], 180.f)) {
+            s.view_mode = (std::clamp(s.view_mode, 0, 3) + 1) % 4;
+            mark();
+        }
+        if (s.view_mode != 0) {
+            ImGui::SameLine();
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(th.warn, "⚠️ Experimental ⚠️");
+        }
+
+        psx_settings_row_label("Texture filtering", th, kCol);
+        if (cycle_btn("tf", s.texture_filter_bilinear ? "Bilinear" : "Nearest", 120.f)) {
+            s.texture_filter_bilinear = !s.texture_filter_bilinear;
+            mark();
+        }
+
+        psx_settings_row_label("Antialiasing", th, kCol);
+        if (cycle_btn("aa", s.antialiasing ? "On" : "Off", 80.f)) {
+            s.antialiasing = !s.antialiasing;
+            mark();
+        }
+
+        psx_settings_row_label("Perspective textures", th, kCol);
+        if (ImGui::Checkbox("##persp", &s.perspective_texturing)) mark();
+
+        psx_settings_row_label("Screen model", th, kCol);
+        static const char* kScreen[] = {"Raw", "CRT", "Composite", "Trinitron"};
+        if (cycle_btn("scr", kScreen[std::clamp(s.screen_kind, 0, 3)], 140.f)) {
+            s.screen_kind = (std::clamp(s.screen_kind, 0, 3) + 1) % 4;
+            mark();
+        }
+
+        if (s.renderer != 0) {
+            psx_settings_row_label("Frame interpolation", th, kCol);
+            if (ImGui::Checkbox("##fi", &s.frame_interpolation)) mark();
+            if (s.frame_interpolation) {
+                psx_settings_row_label("Presentation target", th, kCol);
+                char fl[32];
+                if (s.frame_interpolation_fps <= 0)
+                    std::snprintf(fl, sizeof(fl), "Display");
+                else
+                    std::snprintf(fl, sizeof(fl), "%d fps", s.frame_interpolation_fps);
+                if (cycle_btn("fifps", fl, 120.f)) {
+                    static const int kFps[] = {0, 120, 144, 165, 240};
+                    int idx = 0;
+                    for (int i = 0; i < 5; ++i)
+                        if (kFps[i] == s.frame_interpolation_fps) {
+                            idx = i;
+                            break;
+                        }
+                    s.frame_interpolation_fps = kFps[(idx + 1) % 5];
+                    mark();
+                }
+            }
+        }
+
+        psx_settings_row_label("Skip FMVs", th, kCol);
+        if (ImGui::Checkbox("##skipfmv", &s.auto_skip_fmv)) mark();
+
+        psx_settings_row_label("Low-latency input", th, kCol);
+        if (ImGui::Checkbox("##lli", &s.low_latency_input)) mark();
+
+        psx_settings_row_label("VSync", th, kCol);
+        const char* vlab = s.vsync == 0 ? "Immediate" : (s.vsync < 0 ? "Adaptive" : "On");
+        if (cycle_btn("vs", vlab, 120.f)) {
+            if (s.vsync == 1) s.vsync = 0;
+            else if (s.vsync == 0) s.vsync = -1;
+            else s.vsync = 1;
+            mark();
+        }
+
+        ImGui::Dummy(ImVec2(0, 8));
+        ImGui::Separator();
+        ImGui::TextColored(th.text_muted, "AUDIO");
+        psx_settings_row_label("High-quality SPU", th, kCol);
+        if (ImGui::Checkbox("##spuhq", &s.spu_hq)) mark();
+    }
+    ImGui::EndChild();
+
+    ImGui::SameLine(0.f, gap);
+    ImGui::BeginChild("psx_input_hotkeys", ImVec2(0, panel_h), ImGuiChildFlags_Borders);
+    ImGui::TextColored(th.text_muted, "INPUT & HOTKEYS");
+    ImGui::Separator();
+    {
+        if (ImGui::Checkbox("Multitap", &s.multitap_enabled)) mark();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "Enable SCPH-1070 multitap for 3+ player seats. Off limits local play "
+                "to two native controller ports.");
+        }
+        if (ImGui::Checkbox("Multitap analog (hack)", &s.multitap_analog)) mark();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "Allow DualShock sticks on multitap tap seats (not faithful). Not applied "
+                "to titles with digital pad locked in game.toml.");
+        }
+
+        ImGui::Dummy(ImVec2(0, 10));
+        ImGui::Separator();
+        ImGui::TextColored(th.text_muted, "HOTKEYS");
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped("Click a binding, then press a key (Esc cancels).");
+        ImGui::PopStyleColor();
+
+        float label_w = 0.f;
+        for (int i = 0; i < retcomm::PsxPlatformSettings::kHotkeyCount; ++i) {
+            label_w = std::max(
+                label_w, ImGui::CalcTextSize(retcomm::PsxPlatformSettings::hotkey_label(i)).x);
+        }
+        label_w += 16.f;
+        if (ImGui::BeginTable("psx_hk", 1, ImGuiTableFlags_SizingStretchProp)) {
+            for (int i = 0; i < retcomm::PsxPlatformSettings::kHotkeyCount; ++i) {
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                ImGui::PushID(i);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextColored(th.text_muted, "%s",
+                                   retcomm::PsxPlatformSettings::hotkey_label(i));
+                ImGui::SameLine(0.f, label_w - ImGui::CalcTextSize(
+                                                  retcomm::PsxPlatformSettings::hotkey_label(i))
+                                                  .x);
+                const bool cap = hub.psx_settings.capturing_hotkey == i;
+                const std::string& cur = s.hotkeys[static_cast<size_t>(i)];
+                const char* bl =
+                    cap ? "[ press... ]"
+                        : (cur.empty() ? retcomm::PsxPlatformSettings::hotkey_default(i)
+                                       : cur.c_str());
+                if (cap) ImGui::PushStyleColor(ImGuiCol_Button, th.accent);
+                if (ImGui::Button(bl, ImVec2(140.f, 0)))
+                    hub.psx_settings.capturing_hotkey = i;
+                if (cap) ImGui::PopStyleColor();
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+    }
+    ImGui::EndChild();
+    } // system tab
+
+    ImGui::Dummy(ImVec2(0, 12));
+    if (accent_button("Save", th, ImVec2(160, 0))) {
+        std::string err;
+        if (!hub.save_psx_settings(&err)) {
+            hub.append_log("PlayStation settings save failed: " + err);
+            hub.set_status("Save failed");
+        } else {
+            hub.show_toast("Saved!");
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+        hub.show_psx_settings = false;
+        hub.psx_settings.dirty = false;
+        hub.psx_settings.capturing_hotkey = -1;
+        cancel_psx_bind_capture(hub);
+        hub.psx_settings.configuring_player = -1;
+        hub.psx_settings.gamepads_tab = false;
+    }
+    if (hub.psx_settings.dirty) {
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(th.warn, "unsaved changes");
+    }
+    ImGui::SameLine();
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(th.text_muted, "%s",
+                       retcomm::psx_platform_settings_dir(hub.paths).string().c_str());
+    ImGui::EndChild();
+}
 
 void draw_log_collapsed_bar(HubModel& hub, const Theme& th) {
     constexpr float kBarH = 40.f;
@@ -3091,9 +4673,18 @@ int main(int argc, char** argv) {
     retcomm::hub::BoxartCache boxart;
     bool running = true;
     while (running) {
+        // Keep gamepads open so SDL3 delivers GAMEPAD_BUTTON / AXIS events.
+        hub_sync_open_gamepads();
+
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
-            ImGui_ImplSDL3_ProcessEvent(&e);
+            if (poll_psx_bind_capture(hub, e)) {
+                // Still feed ImGui so the modal stays responsive, but skip
+                // duplicate key handling for capture commits.
+                ImGui_ImplSDL3_ProcessEvent(&e);
+            } else {
+                ImGui_ImplSDL3_ProcessEvent(&e);
+            }
             if (e.type == SDL_EVENT_QUIT) running = false;
             if (e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED &&
                 e.window.windowID == SDL_GetWindowID(window))
@@ -3168,6 +4759,10 @@ int main(int argc, char** argv) {
             ImGui::BeginChild("romm_settings_host", ImVec2(0, 0), ImGuiChildFlags_None);
             draw_romm_settings_panel(hub, th);
             ImGui::EndChild();
+        } else if (hub.show_psx_settings) {
+            ImGui::BeginChild("psx_settings_host", ImVec2(0, 0), ImGuiChildFlags_None);
+            draw_psx_settings_panel(hub, th, boxart);
+            ImGui::EndChild();
         } else {
             // Extra width goes to the library; detail is flexible but capped at the
             // default (~1280) panel width so maximize doesn't stretch the right column.
@@ -3217,7 +4812,8 @@ int main(int argc, char** argv) {
                 const ImVec2 ts = ImGui::CalcTextSize(toast_text.c_str(), nullptr, false, 420.f);
                 const float pad = 14.f;
                 const ImVec2 sz(std::min(440.f, ts.x + pad * 2.f), ts.y + pad * 2.f);
-                const ImVec2 pos(tvp->WorkPos.x + (tvp->WorkSize.x - sz.x) * 0.5f,
+                // Bottom-right, above the collapsed Activity bar.
+                const ImVec2 pos(tvp->WorkPos.x + tvp->WorkSize.x - sz.x - 16.f,
                                  tvp->WorkPos.y + tvp->WorkSize.y - sz.y - 48.f);
                 ImGui::SetNextWindowPos(pos);
                 ImGui::SetNextWindowSize(sz);
@@ -3255,10 +4851,36 @@ int main(int argc, char** argv) {
                 }
             }
             const auto roots = retcomm::effective_install_roots(hub.cfg, hub.paths);
+            const bool move_only = hub.install_root_prompt_move;
+            const fs::path& from_apps = hub.install_root_prompt_from_apps;
+            const int current_idx = retcomm::find_install_root_index(roots, from_apps);
             ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 420.f);
             ImGui::TextWrapped("%s", prow ? prow->name.c_str() : tid.c_str());
             ImGui::Dummy(ImVec2(0, 6));
-            ImGui::TextWrapped("Choose where to install this game.");
+            if (move_only) {
+                ImGui::TextWrapped(
+                    "Choose where to move this game's install data (releases, build files, "
+                    "and preserved saves/config).");
+                if (!from_apps.empty()) {
+                    ImGui::Dummy(ImVec2(0, 4));
+                    ImGui::TextColored(th.text_muted, "Currently installed in:");
+                    if (current_idx >= 0) {
+                        const auto& cur = roots[static_cast<size_t>(current_idx)];
+                        ImGui::TextWrapped("%s — %s",
+                                           cur.label.empty() ? "Install" : cur.label.c_str(),
+                                           cur.path.string().c_str());
+                    } else {
+                        ImGui::TextWrapped("%s", from_apps.string().c_str());
+                    }
+                }
+            } else if (prow && (prow->installed || prow->install_dir_present ||
+                                prow->has_preserved_state)) {
+                ImGui::TextWrapped(
+                    "Choose where to install this game. Picking a different location moves "
+                    "existing install / preserved data there first.");
+            } else {
+                ImGui::TextWrapped("Choose where to install this game.");
+            }
             ImGui::PopTextWrapPos();
             ImGui::Dummy(ImVec2(0, 8));
             if (roots.empty()) {
@@ -3267,10 +4889,13 @@ int main(int argc, char** argv) {
                 for (int i = 0; i < static_cast<int>(roots.size()); ++i) {
                     ImGui::PushID(i);
                     const auto& e = roots[static_cast<size_t>(i)];
+                    const bool is_current =
+                        current_idx == i ||
+                        retcomm::same_install_root_path(e.path, from_apps);
                     char label[1152];
-                    std::snprintf(label, sizeof(label), "%s\n%s",
+                    std::snprintf(label, sizeof(label), "%s%s\n%s",
                                   e.label.empty() ? "Install" : e.label.c_str(),
-                                  e.path.string().c_str());
+                                  is_current ? "  (current)" : "", e.path.string().c_str());
                     if (ImGui::RadioButton(label, &hub.install_root_prompt_index, i)) {
                         // index updated by RadioButton
                     }
@@ -3278,15 +4903,38 @@ int main(int argc, char** argv) {
                 }
             }
             ImGui::Dummy(ImVec2(0, 10));
-            const bool busy = hub.job_running.load() || tid.empty() || roots.empty();
-            ImGui::BeginDisabled(busy);
-            if (good_button("Confirm", th, ImVec2(-1, 0))) {
+            const bool can_confirm = !tid.empty() && !roots.empty();
+            const bool job_busy = hub.job_running.load();
+            const HubJob confirm_job = move_only ? HubJob::MoveInstall : HubJob::Install;
+            const bool already_queued = hub.is_job_queued(confirm_job, tid);
+            const bool job_active =
+                job_busy && hub.job == confirm_job && hub.job_title_id == tid;
+            const bool same_as_current =
+                move_only && can_confirm && hub.install_root_prompt_index >= 0 &&
+                hub.install_root_prompt_index < static_cast<int>(roots.size()) &&
+                retcomm::same_install_root_path(
+                    roots[static_cast<size_t>(hub.install_root_prompt_index)].path, from_apps);
+            const char* confirm_lbl =
+                job_active      ? (move_only ? "Moving…" : "Installing…")
+                : already_queued ? "Queued"
+                : same_as_current ? "Already here"
+                : job_busy ? (move_only ? "Queue Move" : "Queue Install")
+                           : "Confirm";
+            ImGui::BeginDisabled(!can_confirm || job_active || already_queued ||
+                                 same_as_current);
+            if (good_button(confirm_lbl, th, ImVec2(-1, 0))) {
                 hub.confirm_install_root_and_continue();
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndDisabled();
+            if (same_as_current && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled |
+                                                        ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip("Pick a different location to move this install.");
+            }
             if (ImGui::Button("Cancel", ImVec2(-1, 0))) {
                 hub.install_root_prompt_id.clear();
+                hub.install_root_prompt_move = false;
+                hub.install_root_prompt_from_apps.clear();
                 hub.job_apps_dir.clear();
                 ImGui::CloseCurrentPopup();
             }
@@ -3327,10 +4975,23 @@ int main(int argc, char** argv) {
             }
             ImGui::PopTextWrapPos();
             ImGui::Dummy(ImVec2(0, 10));
-            const bool busy = hub.job_running.load() || tid.empty();
-            ImGui::BeginDisabled(busy || plat.empty());
+            const bool job_busy = hub.job_running.load();
+            const bool any_scan_queued = hub.has_queued_scan();
+            const bool scan_active = job_busy && hub.job == HubJob::ScanRoms &&
+                                     hub.job_platform_filter == plat;
+            const bool scan_queued = hub.is_job_queued(HubJob::ScanRoms, {}, plat);
             char scan_label[128];
-            std::snprintf(scan_label, sizeof(scan_label), "Rescan %s Library", plat_label);
+            if (scan_active)
+                std::snprintf(scan_label, sizeof(scan_label), "Scanning…");
+            else if (scan_queued)
+                std::snprintf(scan_label, sizeof(scan_label), "Queued");
+            else if (job_busy && !any_scan_queued)
+                std::snprintf(scan_label, sizeof(scan_label), "Queue Rescan %s Library",
+                              plat_label);
+            else
+                std::snprintf(scan_label, sizeof(scan_label), "Rescan %s Library", plat_label);
+            ImGui::BeginDisabled(tid.empty() || plat.empty() || scan_active || scan_queued ||
+                                 any_scan_queued);
             if (good_button(scan_label, th, ImVec2(-1, 0))) {
                 hub.scans_platform_filter = plat;
                 hub.pending_scan_missing_rom_id = tid;
@@ -3338,8 +4999,15 @@ int main(int argc, char** argv) {
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndDisabled();
-            ImGui::BeginDisabled(busy || !romm_ok);
-            if (romm_button("Download from RomM", th, ImVec2(-1, 0))) {
+            const bool inst_active =
+                job_busy && hub.job == HubJob::Install && hub.job_title_id == tid;
+            const bool inst_queued = hub.is_job_queued(HubJob::Install, tid);
+            const char* romm_lbl = inst_active  ? "Installing…"
+                                   : inst_queued ? "Queued"
+                                   : job_busy    ? "Queue Download from RomM"
+                                                 : "Download from RomM";
+            ImGui::BeginDisabled(!romm_ok || inst_active || inst_queued);
+            if (romm_button(romm_lbl, th, ImVec2(-1, 0))) {
                 hub.start_job(HubJob::Install, tid, false, true);
                 ImGui::CloseCurrentPopup();
             }
@@ -3641,6 +5309,7 @@ int main(int argc, char** argv) {
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
+    hub_close_all_gamepads();
     SDL_GL_DestroyContext(gl);
     SDL_DestroyWindow(window);
     SDL_Quit();

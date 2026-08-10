@@ -119,6 +119,10 @@ std::vector<InstallRootEntry> effective_install_roots(const AppConfig& cfg, cons
 std::vector<InstallRootEntry> scan_install_roots(const AppConfig& cfg, const Paths& paths);
 // Preferred new-install root (default_install_root, else first effective).
 fs::path resolve_default_install_root(const AppConfig& cfg, const Paths& paths);
+// True when a and b refer to the same directory (equivalent / weakly_canonical).
+bool same_install_root_path(const fs::path& a, const fs::path& b);
+// Index of apps_dir in roots, or -1 when not found (relaxed path compare).
+int find_install_root_index(const std::vector<InstallRootEntry>& roots, const fs::path& apps_dir);
 // Copy of paths with apps_dir overridden (empty override → unchanged).
 Paths with_apps_dir(Paths paths, const fs::path& apps_dir);
 

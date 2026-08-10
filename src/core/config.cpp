@@ -155,10 +155,31 @@ fs::path resolve_default_install_root(const AppConfig& cfg, const Paths& paths) 
     const auto roots = effective_install_roots(cfg, paths);
     if (!cfg.default_install_root.empty()) {
         for (const auto& e : roots) {
-            if (e.path == cfg.default_install_root) return e.path;
+            if (same_install_root_path(e.path, cfg.default_install_root)) return e.path;
         }
     }
     return roots.empty() ? builtin_apps_dir(paths) : roots.front().path;
+}
+
+bool same_install_root_path(const fs::path& a, const fs::path& b) {
+    if (a.empty() || b.empty()) return false;
+    std::error_code ec;
+    if (fs::equivalent(a, b, ec)) return true;
+    ec.clear();
+    const fs::path ca = fs::weakly_canonical(a, ec);
+    if (ec || ca.empty()) return a == b;
+    ec.clear();
+    const fs::path cb = fs::weakly_canonical(b, ec);
+    if (ec || cb.empty()) return a == b;
+    return ca == cb;
+}
+
+int find_install_root_index(const std::vector<InstallRootEntry>& roots, const fs::path& apps_dir) {
+    if (apps_dir.empty()) return -1;
+    for (size_t i = 0; i < roots.size(); ++i) {
+        if (same_install_root_path(roots[i].path, apps_dir)) return static_cast<int>(i);
+    }
+    return -1;
 }
 
 Paths with_apps_dir(Paths paths, const fs::path& apps_dir) {

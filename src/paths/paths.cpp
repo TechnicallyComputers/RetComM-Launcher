@@ -294,4 +294,24 @@ bool mark_hub_setup_completed(const Paths& paths, const fs::path& exe_dir, std::
     return false;
 }
 
+bool clear_hub_setup_completed(const Paths& paths, const fs::path& exe_dir, std::string* error) {
+    std::error_code ec;
+    bool ok = true;
+    std::string err;
+    auto wipe = [&](const fs::path& marker) {
+        if (marker.empty() || !fs::exists(marker, ec)) return;
+        ec.clear();
+        fs::remove(marker, ec);
+        if (ec) {
+            ok = false;
+            if (!err.empty()) err += "; ";
+            err += "cannot remove " + marker.string() + ": " + ec.message();
+        }
+    };
+    wipe(hub_setup_marker_data(paths));
+    wipe(hub_setup_marker_exe(exe_dir));
+    if (!ok && error) *error = err;
+    return ok;
+}
+
 } // namespace retcomm

@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace retcomm {
 
@@ -23,6 +24,8 @@ struct AppState {
     std::unordered_map<std::string, std::string> preferred_save_card2;
     // title_id → absolute BIOS dump path, or kOpenBiosChoice for OpenBIOS.
     std::unordered_map<std::string, std::string> preferred_bios;
+    // Titles that skip global platform Configure merge on install/update/launch.
+    std::unordered_set<std::string> exclude_platform_config;
 };
 
 AppState load_app_state(const fs::path& path);
@@ -38,5 +41,9 @@ void set_preferred_save_card2(AppState& state, const std::string& title_id,
 std::string preferred_bios_for(const AppState& state, const std::string& title_id);
 void set_preferred_bios(AppState& state, const std::string& title_id,
                         const std::string& bios_choice);
+
+bool title_excludes_platform_config(const AppState& state, const std::string& title_id);
+void set_title_excludes_platform_config(AppState& state, const std::string& title_id,
+                                        bool exclude);
 
 } // namespace retcomm

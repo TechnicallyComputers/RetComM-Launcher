@@ -566,7 +566,86 @@ SelfUpdateResult fail(SelfUpdateResult r, std::string msg) {
     return r;
 }
 
+bool schedule_retcomm_relaunch_impl(std::string* error) {
+    fs::path launch = running_appimage_path();
+#if defined(__APPLE__)
+    if (launch.empty()) {
+        const fs::path app = macos_app_bundle_path();
+        if (!app.empty()) launch = app / "Contents" / "MacOS" / "retcomm-hub";
+    }
+#endif
+    if (launch.empty()) launch = current_executable_path();
+    if (launch.empty()) {
+        if (error) *error = "cannot resolve RetComM executable path for relaunch";
+        return false;
+    }
+
+    // Prefer a writable temp dir — AppImage mount points are often read-only.
+    fs::path script_dir;
+#if defined(_WIN32)
+    char tmp[MAX_PATH]{};
+    const DWORD n = GetTempPathA(MAX_PATH, tmp);
+    if (n > 0 && n < MAX_PATH) script_dir = fs::path(tmp);
+#else
+    if (const char* t = std::getenv("TMPDIR"); t && *t) script_dir = t;
+    else if (const char* t = std::getenv("XDG_RUNTIME_DIR"); t && *t) script_dir = t;
+    else script_dir = "/tmp";
+#endif
+    if (script_dir.empty()) script_dir = launch.parent_path();
+
+#if defined(_WIN32)
+    const DWORD pid = GetCurrentProcessId();
+    const fs::path script = script_dir / "retcomm_relaunch.bat";
+    {
+        std::ofstream out(script);
+        if (!out) {
+            if (error) *error = "cannot write relaunch script";
+            return false;
+        }
+        out << "@echo off\r\n"
+            << "setlocal EnableExtensions EnableDelayedExpansion\r\n"
+            << "set PID=" << pid << "\r\n"
+            << "set W=0\r\n"
+            << ":wait\r\n"
+            << "tasklist /FI \"PID eq !PID!\" 2>NUL | findstr /I /C:\"No tasks\" >NUL\r\n"
+            << "if errorlevel 1 (\r\n"
+            << "  set /a W+=1\r\n"
+            << "  if !W! GTR 120 exit /b 1\r\n"
+            << "  timeout /t 1 /nobreak >NUL\r\n"
+            << "  goto wait\r\n"
+            << ")\r\n"
+            << "start \"\" \"" << launch.string() << "\"\r\n";
+    }
+    return schedule_bat(script, error);
+#else
+    const pid_t pid = ::getpid();
+    const fs::path script = script_dir / ("retcomm_relaunch_" + std::to_string(pid) + ".sh");
+    {
+        std::ofstream out(script);
+        if (!out) {
+            if (error) *error = "cannot write relaunch script";
+            return false;
+        }
+        out << "#!/usr/bin/env bash\n"
+            << "set -euo pipefail\n"
+            << "pid=" << pid << "\n"
+            << "dest=" << launch.string() << "\n"
+            << "self=\"$0\"\n"
+            << "while kill -0 \"$pid\" 2>/dev/null; do sleep 0.2; done\n"
+            << "sleep 0.3\n"
+            << "chmod +x \"$dest\" 2>/dev/null || true\n"
+            << "rm -f \"$self\"\n"
+            << "exec \"$dest\"\n";
+    }
+    return schedule_shell(script, error);
+#endif
+}
+
 } // namespace
+
+bool schedule_retcomm_relaunch(std::string* error) {
+    return schedule_retcomm_relaunch_impl(error);
+}
 
 std::string retcomm_app_version() { return RETCOMM_VERSION; }
 

@@ -2,6 +2,8 @@
 #include "hub/hub_boxart.hpp"
 
 #include "retcomm/build.hpp"
+#include "retcomm/psx_platform_settings.hpp"
+#include "retcomm/psx_input_profiles.hpp"
 #include "retcomm/romm_fetch.hpp"
 #include "retcomm/romm_saves.hpp"
 #include "retcomm/romscan.hpp"
@@ -714,10 +716,24 @@ std::size_t HubModel::queued_job_count() const {
     return job_queue.size();
 }
 
-bool HubModel::is_job_queued(HubJob j, const std::string& title_id) const {
+bool HubModel::is_job_queued(HubJob j, const std::string& title_id,
+                             const std::string& platform_filter) const {
     std::lock_guard<std::mutex> lock(mu);
     for (const auto& q : job_queue) {
-        if (q.job == j && q.title_id == title_id) return true;
+        if (q.job != j) continue;
+        if (hub_job_is_scan(j)) {
+            if (q.platform_filter == platform_filter) return true;
+        } else if (q.title_id == title_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool HubModel::has_queued_scan() const {
+    std::lock_guard<std::mutex> lock(mu);
+    for (const auto& q : job_queue) {
+        if (hub_job_is_scan(q.job)) return true;
     }
     return false;
 }
@@ -731,26 +747,97 @@ bool HubModel::is_title_queued(const std::string& title_id) const {
     return false;
 }
 
-static bool enqueue_hub_job(HubModel* hub, HubJob j, const std::string& title_id,
-                            bool force_boxart, bool fetch_romm_first) {
-    if (!hub || !hub_job_is_queueable(j) || title_id.empty()) return false;
+static const char* queued_hub_job_kind(HubJob j) {
+    switch (j) {
+    case HubJob::Update:
+        return "Update";
+    case HubJob::GenerateRebuild:
+        return "Rebuild";
+    case HubJob::MoveInstall:
+        return "Move install";
+    case HubJob::ScanRoms:
+        return "Scan";
+    case HubJob::FullScanRoms:
+        return "Full scan";
+    case HubJob::ScanBios:
+        return "BIOS scan";
+    case HubJob::FullScanBios:
+        return "Full BIOS scan";
+    case HubJob::PurgeMissingFiles:
+        return "Clean missing";
+    default:
+        return "Install";
+    }
+}
+
+static bool enqueue_hub_job(HubModel* hub, QueuedHubJob item) {
+    if (!hub || !hub_job_is_queueable(item.job)) return false;
+    const bool is_scan = hub_job_is_scan(item.job);
+    if (!is_scan && item.title_id.empty()) return false;
     std::string note;
     {
         std::lock_guard<std::mutex> lock(hub->mu);
-        if (hub->job_running.load() && hub->job == j && hub->job_title_id == title_id)
-            return true;
-        for (const auto& q : hub->job_queue) {
-            if (q.job == j && q.title_id == title_id) return true;
+        if (!is_scan) {
+            if (item.apps_dir.empty() && !hub->job_apps_dir.empty())
+                item.apps_dir = std::move(hub->job_apps_dir);
+            hub->job_apps_dir.clear();
+        } else if (item.prefetch_catalog) {
+            hub->job_prefetch_catalog = false;
         }
-        hub->job_queue.push_back(QueuedHubJob{j, title_id, force_boxart, fetch_romm_first});
-        const char* kind = (j == HubJob::Update)             ? "Update"
-                           : (j == HubJob::GenerateRebuild) ? "Rebuild"
-                                                             : "Install";
-        note = std::string("Queued ") + kind + ": " + title_id + " (" +
-               std::to_string(hub->job_queue.size()) + " in queue)";
+
+        if (hub->job_running.load() && hub->job == item.job) {
+            if (is_scan) {
+                if (hub->job_platform_filter == item.platform_filter) return true;
+            } else if (hub->job_title_id == item.title_id) {
+                return true;
+            }
+        }
+        // At most one library scan/purge waiting — avoid spam-filling the queue.
+        if (is_scan) {
+            for (const auto& q : hub->job_queue) {
+                if (!hub_job_is_scan(q.job)) continue;
+                if (q.job == item.job && q.platform_filter == item.platform_filter)
+                    return true;
+                return false;
+            }
+        } else {
+            for (const auto& q : hub->job_queue) {
+                if (q.job == item.job && q.title_id == item.title_id) return true;
+            }
+        }
+        hub->job_queue.push_back(std::move(item));
+        const QueuedHubJob& back = hub->job_queue.back();
+        note = std::string("Queued ") + queued_hub_job_kind(back.job);
+        if (is_scan) {
+            note += back.platform_filter.empty()
+                        ? ": all platforms"
+                        : (": " + back.platform_filter);
+        } else {
+            note += ": " + back.title_id;
+        }
+        note += " (" + std::to_string(hub->job_queue.size()) + " in queue)";
     }
     if (!note.empty()) hub->append_log(note);
     return true;
+}
+
+static bool enqueue_hub_job(HubModel* hub, HubJob j, const std::string& title_id,
+                            bool force_boxart, bool fetch_romm_first) {
+    QueuedHubJob item;
+    item.job = j;
+    item.title_id = title_id;
+    item.force_boxart = force_boxart;
+    item.fetch_romm_first = fetch_romm_first;
+    if (hub) {
+        std::lock_guard<std::mutex> lock(hub->mu);
+        if (!hub_job_is_scan(j))
+            item.apps_dir = hub->job_apps_dir;
+        else {
+            item.platform_filter = hub->scans_platform_filter;
+            item.prefetch_catalog = hub->job_prefetch_catalog;
+        }
+    }
+    return enqueue_hub_job(hub, std::move(item));
 }
 
 int HubModel::queue_all_updates() {
@@ -778,6 +865,12 @@ bool HubModel::start_next_queued_job() {
         if (job_queue.empty()) return false;
         next = job_queue.front();
         job_queue.pop_front();
+        // Restore per-job options so start_job / the worker see them.
+        job_apps_dir = next.apps_dir;
+        if (hub_job_is_scan(next.job)) {
+            scans_platform_filter = next.platform_filter;
+            job_prefetch_catalog = next.prefetch_catalog;
+        }
     }
     // start_job will claim the worker; if a race loses the slot, re-queue.
     if (start_job(next.job, next.title_id, next.force_boxart, next.fetch_romm_first))
@@ -917,7 +1010,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
         return false;
     }
     if (job_running.exchange(true)) {
-        // Lost the race to another starter — queue Install/Update instead of failing.
+        // Lost the race to another starter — queue instead of failing.
         if (hub_job_is_queueable(j))
             return enqueue_hub_job(this, j, title_id, force_boxart, fetch_romm_first);
         return false;
@@ -925,6 +1018,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
     if (worker.joinable()) worker.join();
     job = j;
     job_title_id = title_id;
+    job_platform_filter = hub_job_is_scan(j) ? scans_platform_filter : std::string{};
     job_force_boxart = force_boxart;
     job_fetch_romm_first = fetch_romm_first;
 
@@ -1079,6 +1173,28 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                         apps = resolve_default_install_root(cfg, paths);
                     opts.apps_dir = std::move(apps);
                 }
+                // Existing install/preserved under another apps root → migrate first.
+                {
+                    const InstallPlan elsewhere = inspect_install_any(paths, cfg, *t);
+                    if ((elsewhere.installed || elsewhere.install_dir_present ||
+                         elsewhere.has_preserved_state) &&
+                        !elsewhere.install_root.empty()) {
+                        std::error_code eq_ec;
+                        const bool same_root =
+                            fs::equivalent(elsewhere.install_root.parent_path(), opts.apps_dir,
+                                           eq_ec) ||
+                            elsewhere.install_root.parent_path() == opts.apps_dir;
+                        if (!same_root) {
+                            set_status("Moving install data for " + title_id + "…");
+                            auto mr = move_title_install(paths, cfg, *t, opts.apps_dir);
+                            append_log(mr.message);
+                            if (!mr.ok) {
+                                set_status("Install failed: could not move existing data");
+                                break;
+                            }
+                        }
+                    }
+                }
                 BuildOptions bopts;
                 bopts.rom_path = library.preferred_rom(title_id);
                 bopts.apps_dir = opts.apps_dir;
@@ -1131,6 +1247,12 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     auto ensured = ensure_canonical_save(paths, cfg, *t, rom, true);
                     if (!ensured.message.empty()) append_log(ensured.message);
                     app_state = load_app_state(paths.state_path);
+                    if (is_psx_platform(t->platform)) {
+                        const fs::path cwd = resolve_current_release_dir(r.plan.install_root);
+                        const fs::path apply_cwd = cwd.empty() ? r.plan.install_root : cwd;
+                        auto ar = apply_psx_platform_defaults(paths, app_state, *t, apply_cwd);
+                        if (!ar.message.empty()) append_log(ar.message);
+                    }
                 }
                 set_status(r.ok ? ("Installed " + title_id) : ("Install failed: " + title_id));
                 break;
@@ -1175,6 +1297,13 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                         cache.note_latest_tag(t->release.github, t->release.allow_prerelease,
                                               noted);
                         cache.save_if_dirty();
+                    }
+                    if (is_psx_platform(t->platform)) {
+                        app_state = load_app_state(paths.state_path);
+                        const fs::path cwd = resolve_current_release_dir(r.plan.install_root);
+                        const fs::path apply_cwd = cwd.empty() ? r.plan.install_root : cwd;
+                        auto ar = apply_psx_platform_defaults(paths, app_state, *t, apply_cwd);
+                        if (!ar.message.empty()) append_log(ar.message);
                     }
                 }
                 set_status(r.ok ? (r.skipped ? ("Up to date: " + title_id)
@@ -1221,6 +1350,14 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                            " (+ OpenBIOS regen)");
                 auto r = build_title(paths, *t, bopts);
                 append_log(r.message);
+                if (r.ok && is_psx_platform(t->platform)) {
+                    app_state = load_app_state(paths.state_path);
+                    const InstallPlan plan = inspect_install_any(paths, cfg, *t);
+                    const fs::path cwd = resolve_current_release_dir(plan.install_root);
+                    const fs::path apply_cwd = cwd.empty() ? plan.install_root : cwd;
+                    auto ar = apply_psx_platform_defaults(paths, app_state, *t, apply_cwd);
+                    if (!ar.message.empty()) append_log(ar.message);
+                }
                 set_status(r.ok ? ("Reinstalled with BIOS: " + title_id)
                                 : ("Reinstall w BIOS failed: " + title_id));
                 break;
@@ -1238,6 +1375,29 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 auto r = uninstall_title(paths, *t, opts);
                 append_log(r.message);
                 set_status(r.ok ? ("Uninstalled " + title_id) : ("Uninstall failed: " + title_id));
+                break;
+            }
+            case HubJob::MoveInstall: {
+                set_status("Moving install for " + title_id + "…");
+                const auto* t = find_title();
+                if (!t) {
+                    append_log("unknown title: " + title_id);
+                    break;
+                }
+                fs::path apps;
+                {
+                    std::lock_guard<std::mutex> lock(mu);
+                    apps = std::move(job_apps_dir);
+                    job_apps_dir.clear();
+                }
+                if (apps.empty()) {
+                    append_log("move install: no destination apps root");
+                    set_status("Move failed: " + title_id);
+                    break;
+                }
+                auto mr = move_title_install(paths, cfg, *t, apps);
+                append_log(mr.message);
+                set_status(mr.ok ? ("Moved " + title_id) : ("Move failed: " + title_id));
                 break;
             }
             case HubJob::DeleteBuildData: {
@@ -1953,6 +2113,167 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 set_status(oss.str());
                 break;
             }
+            case HubJob::DeleteAllAppsAndSaves: {
+                set_status("Deleting all apps and save data…");
+                int removed = 0;
+                int failed = 0;
+                std::error_code ec;
+                auto same_path = [](const fs::path& a, const fs::path& b) {
+                    if (a.empty() || b.empty()) return false;
+                    std::error_code lec;
+                    if (fs::equivalent(a, b, lec)) return true;
+                    lec.clear();
+                    const fs::path ca = fs::weakly_canonical(a, lec);
+                    const fs::path cb = fs::weakly_canonical(b, lec);
+                    if (!lec && !ca.empty() && !cb.empty()) return ca == cb;
+                    return a == b;
+                };
+
+                UninstallOptions uopts;
+                uopts.keep_saves = false;
+                for (const auto& root : scan_install_roots(cfg, paths)) {
+                    if (root.path.empty() || !fs::is_directory(root.path, ec)) continue;
+                    std::vector<fs::path> children;
+                    for (auto it = fs::directory_iterator(root.path, ec);
+                         !ec && it != fs::directory_iterator(); it.increment(ec)) {
+                        if (it->is_directory(ec)) children.push_back(it->path());
+                    }
+                    for (const auto& install_root : children) {
+                        auto ur = uninstall_install_root(paths, install_root, uopts,
+                                                         install_root.filename().string());
+                        append_log(ur.message);
+                        if (ur.ok && !ur.skipped) ++removed;
+                        else if (!ur.ok) ++failed;
+                    }
+                }
+
+                // Managed saves root (…/<platform>/<title>/). Never wipe library/BIOS roots.
+                if (!cfg.saves_root.empty() && fs::is_directory(cfg.saves_root, ec) &&
+                    !same_path(cfg.saves_root, cfg.library_root) &&
+                    !same_path(cfg.saves_root, cfg.bios_root)) {
+                    int wiped = 0;
+                    for (auto it = fs::directory_iterator(cfg.saves_root, ec);
+                         !ec && it != fs::directory_iterator(); it.increment(ec)) {
+                        ec.clear();
+                        fs::remove_all(it->path(), ec);
+                        if (!ec) {
+                            ++wiped;
+                            append_log("Removed " + it->path().string());
+                        } else {
+                            ++failed;
+                            append_log("Failed to remove " + it->path().string() + ": " +
+                                       ec.message());
+                        }
+                    }
+                    append_log("Cleared saves_root (" + std::to_string(wiped) + " entries): " +
+                               cfg.saves_root.string());
+                } else if (!cfg.saves_root.empty()) {
+                    append_log("Skipped saves_root cleanup (missing or unsafe path): " +
+                               cfg.saves_root.string());
+                }
+
+                // Global platform Configure prefs (settings.toml / config.ini).
+                {
+                    const fs::path platform_dir = paths.data_dir / "platform";
+                    if (fs::is_directory(platform_dir, ec)) {
+                        ec.clear();
+                        fs::remove_all(platform_dir, ec);
+                        if (!ec) append_log("Removed " + platform_dir.string());
+                        else {
+                            ++failed;
+                            append_log("Failed to remove " + platform_dir.string() + ": " +
+                                       ec.message());
+                        }
+                    }
+                }
+
+                // Drop per-title save/config prefs from state.json (keep BIOS choices).
+                {
+                    AppState st = load_app_state(paths.state_path);
+                    st.preferred_save.clear();
+                    st.preferred_save_card2.clear();
+                    st.exclude_platform_config.clear();
+                    std::string err;
+                    if (!save_app_state(paths.state_path, st, &err)) {
+                        ++failed;
+                        append_log("Failed to update state.json: " + err);
+                    } else {
+                        append_log("Cleared preferred save / platform-config exclusions");
+                    }
+                    app_state = std::move(st);
+                }
+
+                refresh_orphan_installs();
+                std::ostringstream oss;
+                oss << "Deleted " << removed << " install(s)";
+                if (failed > 0) oss << " (" << failed << " error(s))";
+                append_log(oss.str());
+                set_status(oss.str());
+                show_toast(failed == 0 ? "Deleted all apps & save data"
+                                       : "Delete finished with errors — see Activity");
+                break;
+            }
+            case HubJob::HardResetLibrarySettings: {
+                set_status("Hard-resetting library settings…");
+                int failed = 0;
+                std::error_code ec;
+                auto wipe_file = [&](const fs::path& p, const char* label) {
+                    if (p.empty() || !fs::exists(p, ec)) return;
+                    ec.clear();
+                    fs::remove(p, ec);
+                    if (!ec) {
+                        append_log(std::string("Removed ") + label + ": " + p.string());
+                    } else {
+                        ++failed;
+                        append_log(std::string("Failed to remove ") + label + ": " + p.string() +
+                                   " (" + ec.message() + ")");
+                    }
+                };
+
+                // Library + RomM config, scan databases, and RomM availability cache.
+                wipe_file(paths.config_path, "config");
+                wipe_file(paths.library_index_path, "library index");
+                wipe_file(paths.bios_index_path, "BIOS index");
+                wipe_file(paths.romm_rom_index_path, "RomM ROM index");
+
+                std::string marker_err;
+                if (!clear_hub_setup_completed(paths, exe_dir, &marker_err)) {
+                    ++failed;
+                    append_log("Failed to clear setup marker: " + marker_err);
+                } else {
+                    append_log("Cleared first-run setup marker");
+                }
+
+                {
+                    std::lock_guard<std::mutex> lock(mu);
+                    cfg = AppConfig{};
+                    library = LibraryIndex{};
+                    bios = BiosIndex{};
+                    romm_roms = RommRomIndex{};
+                    show_settings = false;
+                    show_romm_settings = false;
+                    show_psx_settings = false;
+                    settings.dirty = false;
+                    romm_settings.dirty = false;
+                }
+
+                std::string relaunch_err;
+                if (!schedule_retcomm_relaunch(&relaunch_err)) {
+                    ++failed;
+                    append_log("Relaunch failed: " + relaunch_err);
+                    set_status("Hard reset incomplete — relaunch failed (see Activity)");
+                    break;
+                }
+
+                append_log(failed == 0 ? "Hard reset complete — restarting into setup…"
+                                       : "Hard reset finished with errors — restarting…");
+                set_status("Restarting into first-time setup…");
+                discard_followup_update_prompts();
+                request_exit.store(true);
+                job_running = false;
+                job = HubJob::None;
+                return;
+            }
             case HubJob::None:
                 break;
             }
@@ -2209,6 +2530,7 @@ void HubModel::open_settings() {
     seed_setup_platform_folders();
     settings.dirty = false;
     show_romm_settings = false;
+    show_psx_settings = false;
     show_setup = false;
     show_settings = true;
 }
@@ -2496,38 +2818,80 @@ bool HubModel::begin_install(const std::string& title_id) {
         job_apps_dir.clear();
         show_install_root_prompt = false;
         install_root_prompt_id.clear();
+        install_root_prompt_move = false;
+        install_root_prompt_from_apps.clear();
     }
     cfg = load_app_config(paths.config_path);
     const auto existing = inspect_install_any(paths, cfg, *t);
-    // Already installed / leftover → reuse that root (no chooser).
-    if (existing.installed || existing.install_dir_present || existing.has_preserved_state) {
-        job_apps_dir = existing.install_root.parent_path();
-        if (t->supports_local_build() && !t->supports_prebuilt_install()) {
-            if (prepare_build_rom_or_prompt(title_id)) return true; // ROM prompt
-        }
-        return start_job(HubJob::Install, title_id);
-    }
-
     const auto roots = effective_install_roots(cfg, paths);
+
     if (roots.size() <= 1) {
-        job_apps_dir = resolve_default_install_root(cfg, paths);
+        if (existing.installed || existing.install_dir_present || existing.has_preserved_state)
+            job_apps_dir = existing.install_root.parent_path();
+        else
+            job_apps_dir = resolve_default_install_root(cfg, paths);
         if (t->supports_local_build() && !t->supports_prebuilt_install()) {
             if (prepare_build_rom_or_prompt(title_id)) return true;
         }
         return start_job(HubJob::Install, title_id);
     }
 
-    const fs::path def = resolve_default_install_root(cfg, paths);
-    install_root_prompt_index = 0;
-    for (size_t i = 0; i < roots.size(); ++i) {
-        if (roots[i].path == def) {
-            install_root_prompt_index = static_cast<int>(i);
-            break;
-        }
+    // Multi-root: always let the user pick (including when preserved/leftover/installed
+    // already exists — choosing another root migrates that tree first).
+    fs::path prefer = resolve_default_install_root(cfg, paths);
+    if (existing.installed || existing.install_dir_present || existing.has_preserved_state) {
+        prefer = existing.install_root.parent_path();
+        install_root_prompt_from_apps = prefer;
     }
+    install_root_prompt_index = 0;
+    if (const int cur = find_install_root_index(roots, prefer); cur >= 0)
+        install_root_prompt_index = cur;
     install_root_prompt_id = title_id;
+    install_root_prompt_move = false;
     show_install_root_prompt = true;
     set_status("Choose install location for " + title_id);
+    return true;
+}
+
+bool HubModel::begin_move_install(const std::string& title_id) {
+    const Title* t = catalog.find(title_id);
+    if (!t) {
+        append_log("unknown title: " + title_id);
+        set_status("Unknown title");
+        return false;
+    }
+    cfg = load_app_config(paths.config_path);
+    const auto existing = inspect_install_any(paths, cfg, *t);
+    if (!existing.installed && !existing.install_dir_present && !existing.has_preserved_state) {
+        append_log("move install: nothing to move for " + title_id);
+        set_status("Nothing to move");
+        return false;
+    }
+    const auto roots = effective_install_roots(cfg, paths);
+    if (roots.size() <= 1) {
+        append_log("move install: add another install location in Library Settings first");
+        set_status("Add another install location first");
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        job_apps_dir.clear();
+    }
+    // Detect the live apps root (Home / Raid / …) and preselect it so the chooser
+    // shows where the title is now before picking a destination.
+    const fs::path current_apps = existing.install_root.parent_path();
+    install_root_prompt_from_apps = current_apps;
+    install_root_prompt_index = 0;
+    if (const int cur = find_install_root_index(roots, current_apps); cur >= 0) {
+        install_root_prompt_index = cur;
+    } else {
+        append_log("move install: current location not in configured roots: " +
+                   current_apps.string());
+    }
+    install_root_prompt_id = title_id;
+    install_root_prompt_move = true;
+    show_install_root_prompt = true;
+    set_status("Choose new location for " + title_id);
     return true;
 }
 
@@ -2535,13 +2899,22 @@ void HubModel::confirm_install_root_and_continue() {
     cfg = load_app_config(paths.config_path);
     const auto roots = effective_install_roots(cfg, paths);
     const std::string title_id = install_root_prompt_id;
+    const bool move_only = install_root_prompt_move;
     show_install_root_prompt = false;
     install_root_prompt_id.clear();
+    install_root_prompt_move = false;
+    install_root_prompt_from_apps.clear();
     if (title_id.empty() || roots.empty()) return;
     int idx = install_root_prompt_index;
     if (idx < 0 || idx >= static_cast<int>(roots.size())) idx = 0;
     job_apps_dir = roots[static_cast<size_t>(idx)].path;
-    append_log("Install location: " + job_apps_dir.string());
+    append_log(std::string(move_only ? "Move" : "Install") +
+               " location: " + job_apps_dir.string());
+
+    if (move_only) {
+        start_job(HubJob::MoveInstall, title_id);
+        return;
+    }
 
     const Title* t = catalog.find(title_id);
     if (!t) {
@@ -2637,7 +3010,61 @@ void HubModel::open_romm_settings() {
     romm_settings.sync_boxart = cfg.romm.sync_boxart;
     romm_settings.dirty = false;
     show_settings = false;
+    show_psx_settings = false;
     show_romm_settings = true;
+}
+
+void HubModel::open_psx_settings() {
+    psx_settings.settings = load_psx_platform_settings(paths);
+    psx_settings.settings.apply_hotkey_defaults_if_empty();
+    psx_settings.settings.apply_controller_defaults_if_unset();
+    psx_pad_binds_init(paths);
+    psx_keybinds_init(paths);
+    psx_settings.dirty = false;
+    psx_settings.capturing_hotkey = -1;
+    psx_settings.gamepads_tab = false;
+    psx_settings.configuring_player = -1;
+    psx_settings.capturing_bind = -1;
+    psx_settings.map_all_active = false;
+    psx_settings.map_all_wait_release = false;
+    psx_settings.map_all_step = 0;
+    psx_settings.rename_open = false;
+    show_settings = false;
+    show_romm_settings = false;
+    show_setup = false;
+    show_psx_settings = true;
+}
+
+bool HubModel::save_psx_settings(std::string* error) {
+    psx_settings.settings.apply_hotkey_defaults_if_empty();
+    psx_settings.settings.apply_controller_defaults_if_unset();
+    if (!save_psx_platform_settings(paths, psx_settings.settings, error)) return false;
+    // Ensure input.ini / keybinds.ini exist next to settings.toml.
+    psx_pad_binds_init(paths);
+    psx_keybinds_init(paths);
+    psx_settings.dirty = false;
+    psx_settings.capturing_hotkey = -1;
+    psx_settings.configuring_player = -1;
+    psx_settings.capturing_bind = -1;
+    psx_settings.map_all_active = false;
+    set_status("Saved PlayStation settings");
+    append_log("Wrote PlayStation platform settings to " +
+               psx_platform_settings_dir(paths).string());
+    return true;
+}
+
+bool HubModel::set_title_exclude_platform_config(const std::string& title_id, bool exclude,
+                                                 std::string* error) {
+    if (title_id.empty()) {
+        if (error) *error = "empty title id";
+        return false;
+    }
+    app_state = load_app_state(paths.state_path);
+    set_title_excludes_platform_config(app_state, title_id, exclude);
+    if (!save_app_state(paths.state_path, app_state, error)) return false;
+    append_log(std::string(exclude ? "Excluded " : "Included ") + title_id +
+               " from platform config");
+    return true;
 }
 
 bool HubModel::save_romm_settings(std::string* error, bool refresh_boxart) {

@@ -50,5 +50,8 @@ bool open_url_in_browser(const std::string& url, std::string* error = nullptr);
 bool hub_setup_completed(const Paths& paths, const fs::path& exe_dir);
 bool mark_hub_setup_completed(const Paths& paths, const fs::path& exe_dir,
                               std::string* error = nullptr);
+// Remove data-dir + exe-dir markers so the next launch can show first-run setup.
+bool clear_hub_setup_completed(const Paths& paths, const fs::path& exe_dir,
+                               std::string* error = nullptr);
 
 } // namespace retcomm

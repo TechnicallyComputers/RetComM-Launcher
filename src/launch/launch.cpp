@@ -1,8 +1,10 @@
 #include "retcomm/launch.hpp"
+#include "retcomm/app_state.hpp"
 #include "retcomm/config.hpp"
 #include "retcomm/install.hpp"
 #include "retcomm/library_index.hpp"
 #include "retcomm/process_env.hpp"
+#include "retcomm/psx_platform_settings.hpp"
 #include "retcomm/romm_saves.hpp"
 
 #include <algorithm>
@@ -857,6 +859,18 @@ LaunchResult launch_title(const Paths& paths, const Title& title, const LaunchOp
                 return result;
             }
             result.plan.message += "  warning: " + err + "\n";
+        }
+    }
+
+    // Global PlayStation Configure prefs → install settings.toml / config.ini.
+    if (is_psx_platform(title.platform) && !result.plan.cwd.empty()) {
+        const AppState st = load_app_state(paths.state_path);
+        auto applied = apply_psx_platform_defaults(paths, st, title, result.plan.cwd);
+        if (!applied.message.empty()) {
+            if (applied.ok && !applied.skipped)
+                result.plan.message += "  platform: " + applied.message + "\n";
+            else if (!applied.ok)
+                result.plan.message += "  warning: " + applied.message + "\n";
         }
     }
 

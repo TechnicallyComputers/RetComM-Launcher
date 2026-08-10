@@ -44,6 +44,8 @@ set(RETCOMM_CORE_SOURCES
     src/build/build.cpp
     src/update/self_update.cpp
     src/launch/launch.cpp
+    src/platform/psx_platform_settings.cpp
+    src/platform/psx_input_profiles.cpp
     src/romm/romm.cpp
     src/romm/romm_fetch.cpp
     src/romm/romm_saves.cpp
@@ -147,7 +149,25 @@ elseif(RETCOMM_HAVE_SDL3)
 endif()
 
 if(RETCOMM_HAVE_SDL3 AND RETCOMM_IMGUI_READY)
-    add_library(retcomm_imgui STATIC
+    # FreeType enables CBDT/CBLC color emoji (Noto Color Emoji) via LoadColor.
+    set(RETCOMM_IMGUI_FREETYPE FALSE)
+    set(RETCOMM_IMGUI_FREETYPE_TARGET "")
+    find_package(Freetype QUIET)
+    if(TARGET Freetype::Freetype)
+        set(RETCOMM_IMGUI_FREETYPE TRUE)
+        set(RETCOMM_IMGUI_FREETYPE_TARGET Freetype::Freetype)
+    else()
+        find_package(PkgConfig QUIET)
+        if(PkgConfig_FOUND)
+            pkg_check_modules(RETCOMM_FT2 IMPORTED_TARGET freetype2)
+            if(TARGET PkgConfig::RETCOMM_FT2)
+                set(RETCOMM_IMGUI_FREETYPE TRUE)
+                set(RETCOMM_IMGUI_FREETYPE_TARGET PkgConfig::RETCOMM_FT2)
+            endif()
+        endif()
+    endif()
+
+    set(RETCOMM_IMGUI_SOURCES
         ${RETCOMM_IMGUI_DIR}/imgui.cpp
         ${RETCOMM_IMGUI_DIR}/imgui_draw.cpp
         ${RETCOMM_IMGUI_DIR}/imgui_tables.cpp
@@ -155,11 +175,33 @@ if(RETCOMM_HAVE_SDL3 AND RETCOMM_IMGUI_READY)
         ${RETCOMM_IMGUI_DIR}/backends/imgui_impl_sdl3.cpp
         ${RETCOMM_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
     )
+    # Layout matches upstream imgui: "misc/freetype/imgui_freetype.h" (see imgui_draw.cpp).
+    set(RETCOMM_IMGUI_FREETYPE_SRC
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/misc/freetype/imgui_freetype.cpp")
+    if(RETCOMM_IMGUI_FREETYPE AND EXISTS "${RETCOMM_IMGUI_FREETYPE_SRC}")
+        list(APPEND RETCOMM_IMGUI_SOURCES ${RETCOMM_IMGUI_FREETYPE_SRC})
+    else()
+        set(RETCOMM_IMGUI_FREETYPE FALSE)
+    endif()
+
+    add_library(retcomm_imgui STATIC ${RETCOMM_IMGUI_SOURCES})
     target_include_directories(retcomm_imgui PUBLIC
         ${RETCOMM_IMGUI_DIR}
         ${RETCOMM_IMGUI_DIR}/backends
     )
     target_link_libraries(retcomm_imgui PUBLIC ${RETCOMM_HUB_SDL_TARGET} OpenGL::GL)
+    if(RETCOMM_IMGUI_FREETYPE)
+        # Prefer our vendored misc/ over a trimmed imgui tree that lacks it.
+        # third_party → "misc/freetype/…"; misc/freetype → "imgui_freetype.h" in .cpp.
+        target_include_directories(retcomm_imgui PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+            ${CMAKE_CURRENT_SOURCE_DIR}/third_party/misc/freetype)
+        target_compile_definitions(retcomm_imgui PUBLIC IMGUI_ENABLE_FREETYPE)
+        target_link_libraries(retcomm_imgui PUBLIC ${RETCOMM_IMGUI_FREETYPE_TARGET})
+        message(STATUS "retcomm-hub: ImGui FreeType color-emoji support enabled")
+    else()
+        message(STATUS "retcomm-hub: ImGui FreeType not found — color emoji disabled")
+    endif()
 
     # WIN32 → /SUBSYSTEM:WINDOWS so the hub has no console window on Windows.
     # CLI stays console (retcomm.exe). Portable stub is already WIN32.
@@ -227,6 +269,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/platforms/psx.png")
     install(DIRECTORY assets/platforms/
             DESTINATION share/retcomm/platforms
             FILES_MATCHING PATTERN "*.png")
+endif()
+# PSX DualShock art for the Gamepads configure mapper.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/controllers/pad_analog.png")
+    install(DIRECTORY assets/controllers/
+            DESTINATION share/retcomm/controllers
+            FILES_MATCHING PATTERN "*.png" PATTERN "*.tga")
 endif()
 # First-run setup path cards (Easy / Advanced).
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/setup/setup_easy_rocket.png")

@@ -31,6 +31,13 @@ AppState load_app_state(const fs::path& path) {
         load_string_map(j, "preferred_save", st.preferred_save);
         load_string_map(j, "preferred_save_card2", st.preferred_save_card2);
         load_string_map(j, "preferred_bios", st.preferred_bios);
+        if (j.contains("exclude_platform_config") && j.at("exclude_platform_config").is_object()) {
+            for (auto it = j.at("exclude_platform_config").begin();
+                 it != j.at("exclude_platform_config").end(); ++it) {
+                if (it.value().is_boolean() && it.value().get<bool>())
+                    st.exclude_platform_config.insert(it.key());
+            }
+        }
         // Alternate nested form: titles.<id>.preferred_save / preferred_save_card2
         if (j.contains("titles") && j.at("titles").is_object()) {
             for (auto it = j.at("titles").begin(); it != j.at("titles").end(); ++it) {
@@ -49,6 +56,11 @@ AppState load_app_state(const fs::path& path) {
                 if (tj.contains("preferred_bios") && tj.at("preferred_bios").is_string()) {
                     if (!st.preferred_bios.count(it.key()))
                         st.preferred_bios[it.key()] = tj.at("preferred_bios").get<std::string>();
+                }
+                if (tj.contains("exclude_platform_config") &&
+                    tj.at("exclude_platform_config").is_boolean() &&
+                    tj.at("exclude_platform_config").get<bool>()) {
+                    st.exclude_platform_config.insert(it.key());
                 }
             }
         }
@@ -75,6 +87,10 @@ bool save_app_state(const fs::path& path, const AppState& state, std::string* er
     j["preferred_bios"] = json::object();
     for (const auto& [id, bios] : state.preferred_bios) {
         if (!id.empty() && !bios.empty()) j["preferred_bios"][id] = bios;
+    }
+    j["exclude_platform_config"] = json::object();
+    for (const auto& id : state.exclude_platform_config) {
+        if (!id.empty()) j["exclude_platform_config"][id] = true;
     }
 
     const fs::path tmp = path.string() + ".tmp";
@@ -136,6 +152,20 @@ void set_preferred_bios(AppState& state, const std::string& title_id,
         state.preferred_bios.erase(title_id);
     else
         state.preferred_bios[title_id] = bios_choice;
+}
+
+bool title_excludes_platform_config(const AppState& state, const std::string& title_id) {
+    if (title_id.empty()) return false;
+    return state.exclude_platform_config.count(title_id) > 0;
+}
+
+void set_title_excludes_platform_config(AppState& state, const std::string& title_id,
+                                        bool exclude) {
+    if (title_id.empty()) return;
+    if (exclude)
+        state.exclude_platform_config.insert(title_id);
+    else
+        state.exclude_platform_config.erase(title_id);
 }
 
 } // namespace retcomm

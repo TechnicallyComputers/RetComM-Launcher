@@ -76,4 +76,7 @@ struct SelfUpdateCheckInfo {
 SelfUpdateCheckInfo check_retcomm_update(const Paths& paths,
                                          const SelfUpdateOptions& opts = {});
 
+// Relaunch the current hub/AppImage after this process exits (hard-reset, etc.).
+bool schedule_retcomm_relaunch(std::string* error = nullptr);
+
 } // namespace retcomm

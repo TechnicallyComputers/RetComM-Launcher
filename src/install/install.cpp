@@ -2345,6 +2345,97 @@ UninstallResult uninstall_title(const Paths& paths_in, const Title& title,
                                   save_globs_for_title(title));
 }
 
+static bool same_path_relaxed(const fs::path& a, const fs::path& b) {
+    if (a.empty() || b.empty()) return false;
+    std::error_code ec;
+    if (fs::equivalent(a, b, ec)) return true;
+    ec.clear();
+    const fs::path ca = fs::weakly_canonical(a, ec);
+    const fs::path cb = fs::weakly_canonical(b, ec);
+    if (!ec && !ca.empty() && !cb.empty()) return ca == cb;
+    return a == b;
+}
+
+MoveInstallResult move_title_install(const Paths& paths, const AppConfig& cfg, const Title& title,
+                                     const fs::path& dest_apps_dir) {
+    MoveInstallResult result;
+    if (title.install_dir_name.empty()) {
+        result.message = "move install: title has no install_dir_name";
+        return result;
+    }
+    if (dest_apps_dir.empty()) {
+        result.message = "move install: destination apps root is empty";
+        return result;
+    }
+
+    const InstallPlan src = inspect_install_any(paths, cfg, title);
+    if (!src.installed && !src.install_dir_present && !src.has_preserved_state) {
+        result.message = "move install: nothing to move for " + title.id;
+        return result;
+    }
+    result.from_root = src.install_root;
+    result.to_root = dest_apps_dir / title.install_dir_name;
+
+    if (same_path_relaxed(result.from_root, result.to_root) ||
+        same_path_relaxed(result.from_root.parent_path(), dest_apps_dir)) {
+        result.ok = true;
+        result.skipped = true;
+        result.to_root = result.from_root;
+        result.message = "Already at " + result.from_root.string();
+        return result;
+    }
+
+    std::error_code ec;
+    if (!fs::exists(result.from_root, ec)) {
+        result.message = "move install: source missing: " + result.from_root.string();
+        return result;
+    }
+    if (fs::exists(result.to_root, ec)) {
+        const bool empty = fs::is_directory(result.to_root, ec) && fs::is_empty(result.to_root, ec);
+        if (!empty) {
+            result.message = "move install: destination already exists: " + result.to_root.string();
+            return result;
+        }
+        fs::remove_all(result.to_root, ec);
+    }
+
+    fs::create_directories(dest_apps_dir, ec);
+    if (ec) {
+        result.message = "move install: could not create " + dest_apps_dir.string() + ": " +
+                         ec.message();
+        return result;
+    }
+
+    ec.clear();
+    fs::rename(result.from_root, result.to_root, ec);
+    if (ec) {
+        // Cross-device (or other rename failure): copy then remove source.
+        std::error_code copy_ec;
+        fs::copy(result.from_root, result.to_root,
+                 fs::copy_options::recursive | fs::copy_options::copy_symlinks, copy_ec);
+        if (copy_ec) {
+            std::error_code rm_ec;
+            fs::remove_all(result.to_root, rm_ec);
+            result.message = "move install: copy failed (" + copy_ec.message() +
+                             "); rename also failed (" + ec.message() + ")";
+            return result;
+        }
+        std::error_code rm_ec;
+        fs::remove_all(result.from_root, rm_ec);
+        if (rm_ec) {
+            result.ok = true;
+            result.message = "Moved " + title.id + " → " + result.to_root.string() +
+                             " (source cleanup warning: " + rm_ec.message() + ")";
+            return result;
+        }
+    }
+
+    result.ok = true;
+    result.message = "Moved " + title.id + "\n  from: " + result.from_root.string() +
+                     "\n  to:   " + result.to_root.string();
+    return result;
+}
+
 std::vector<OrphanInstall> list_orphan_installs(const Paths& paths, const Catalog& catalog) {
     // Apps live under install_dir_name only (defaults to title id in the catalog).
     std::unordered_set<std::string> claimed;

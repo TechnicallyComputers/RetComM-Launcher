@@ -127,6 +127,20 @@ struct UninstallResult {
 UninstallResult uninstall_title(const Paths& paths, const Title& title,
                                 const UninstallOptions& opts = {});
 
+struct MoveInstallResult {
+    bool ok = false;
+    bool skipped = false; // already at dest_apps_dir
+    fs::path from_root;
+    fs::path to_root;
+    std::string message;
+};
+
+// Move apps/<install_dir_name> (full install, partial leftovers, or preserved/)
+// from its current root into dest_apps_dir/<install_dir_name>. Uses rename when
+// possible; falls back to recursive copy + delete across devices.
+MoveInstallResult move_title_install(const Paths& paths, const AppConfig& cfg,
+                                     const Title& title, const fs::path& dest_apps_dir);
+
 // Path-based uninstall (orphans / renamed install dirs). When save_globs is
 // empty, uses the default saves/states/config patterns.
 UninstallResult uninstall_install_root(const Paths& paths, const fs::path& install_root,
