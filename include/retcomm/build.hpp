@@ -80,13 +80,14 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
 // Local generate + cmake + stage into releases/build-<ref>/ + install.json.
 InstallResult build_title(const Paths& paths, const Title& title, const BuildOptions& opts = {});
 
-// Prefer build_title when the catalog recipe is enabled; otherwise zip install.
+// Prefer prebuilt zip when host release assets exist; else local build when
+// the catalog recipe allows. prefer_prebuilt / Wine skips the build fallback.
 InstallResult install_title_auto(const Paths& paths, const Title& title,
                                  const InstallOptions& install_opts = {},
                                  const BuildOptions& build_opts = {});
 
-// Prefer prebuilt zip when release assets exist; otherwise rebuild when
-// method=build or catalog build is enabled. Generate & Rebuild still forces build.
+// Same prefer-zip-then-build policy as install_title_auto for updates.
+// Generate & Rebuild still forces a local build.
 InstallResult update_title_auto(const Paths& paths, const Title& title,
                                 const InstallOptions& install_opts = {},
                                 const BuildOptions& build_opts = {});

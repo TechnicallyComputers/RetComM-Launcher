@@ -1673,7 +1673,9 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
         }
         ImGui::EndDisabled();
     } else if (row.supports_local_build) {
-        if (!row.has_rom) {
+        // Prefer prebuilt zip when available — ROM only required for build-only titles.
+        const bool zip_first = row.can_prebuilt_install;
+        if (!row.has_rom && !zip_first) {
             ImGui::PushStyleColor(ImGuiCol_Text, th.warn);
             if (row.has_rom_identity) {
                 ImGui::TextWrapped(
@@ -1687,12 +1689,16 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
             }
             ImGui::PopStyleColor();
         }
-        ImGui::BeginDisabled(block_title_mutate || (!row.has_rom && !row.has_rom_identity));
+        ImGui::BeginDisabled(block_title_mutate ||
+                             (!zip_first && !row.has_rom && !row.has_rom_identity));
         if (good_button(row.install_dir_present ? "Reinstall" : "Install", th, ImVec2(-1, 0))) {
-            // Purges stale DB paths when the matched dump is gone, then prompts
-            // for Quick Scan / RomM (same chooser as a never-matched title).
-            if (!hub.prepare_build_rom_or_prompt(row.id))
+            if (zip_first) {
                 hub.start_job(HubJob::Install, row.id);
+            } else if (!hub.prepare_build_rom_or_prompt(row.id)) {
+                // Purges stale DB paths when the matched dump is gone, then prompts
+                // for Quick Scan / RomM (same chooser as a never-matched title).
+                hub.start_job(HubJob::Install, row.id);
+            }
         }
         // Wine only when there is no native release path for this OS.
         if (row.can_wine_install && !has_native_install) {

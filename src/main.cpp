@@ -494,6 +494,14 @@ int cmd_install(const retcomm::Paths& paths, const retcomm::Catalog& cat,
     opts.use_wine = use_wine;
     opts.prefer_prebuilt = prefer_prebuilt || use_wine;
     if (dry_run) {
+        if (t->supports_prebuilt_install()) {
+            auto plan = retcomm::plan_install(paths, *t, opts);
+            std::cout << "would prefer prebuilt zip install\n" << plan.message;
+            if (!opts.prefer_prebuilt && t->supports_local_build())
+                std::cout << "(local build fallback available from " << t->build.source.ref
+                          << ")\n";
+            return 0;
+        }
         if (!opts.prefer_prebuilt && t->supports_local_build()) {
             std::cout << "would build " << t->id << " from " << t->build.source.ref
                       << " (sdk=" << t->build.sdk.id << ", toolchain=" << t->build.toolchain.id

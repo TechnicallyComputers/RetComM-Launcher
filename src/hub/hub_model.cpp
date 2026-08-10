@@ -819,17 +819,22 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
             case HubJob::InstallWine: {
                 const bool wine = (j == HubJob::InstallWine);
                 const bool prebuilt = (j == HubJob::InstallPrebuilt) || wine;
-                set_status(std::string(wine         ? "Installing (Wine) "
-                                       : prebuilt   ? "Installing prebuilt "
-                                       : "Building ") +
-                           title_id + "…");
                 const auto* t = find_title();
                 if (!t) {
                     append_log("unknown title: " + title_id);
                     break;
                 }
+                // Zip-first when host release assets exist; ROM only required for
+                // build-only titles (or build fallback after a failed zip).
+                const bool can_zip = t->supports_prebuilt_install();
+                const bool build_only =
+                    !prebuilt && t->supports_local_build() && !can_zip;
+                set_status(std::string(wine ? "Installing (Wine) "
+                                       : (prebuilt || can_zip) ? "Installing "
+                                                               : "Building ") +
+                           title_id + "…");
                 // Local builds need a verified ROM; hub confirm sets fetch_romm_first.
-                if (!prebuilt && t->build.enabled) {
+                if (build_only || (!prebuilt && t->build.enabled && fetch_romm_first)) {
                     library = load_library_index(paths.library_index_path);
                     std::error_code rom_ec;
                     fs::path rom = library.preferred_rom(title_id);
@@ -883,9 +888,9 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                         }
                         opts.force = true;
                         bopts.force = true;
-                        set_status(std::string(wine       ? "Reinstalling (Wine) "
-                                               : prebuilt ? "Reinstalling prebuilt "
-                                                          : "Rebuilding ") +
+                        set_status(std::string(wine ? "Reinstalling (Wine) "
+                                               : (prebuilt || can_zip) ? "Reinstalling "
+                                                                       : "Rebuilding ") +
                                    title_id + "…");
                     }
                 }
@@ -894,6 +899,20 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 wire_build_activity(this, bopts);
                 auto r = install_title_auto(paths, *t, opts, bopts);
                 append_log(r.message);
+                // Zip failed → build fallback needs a ROM: offer the missing-ROM chooser.
+                if (!r.ok && !prebuilt && t->supports_local_build() && can_zip) {
+                    library = load_library_index(paths.library_index_path);
+                    std::error_code rom_ec;
+                    const fs::path rom = library.preferred_rom(title_id);
+                    const bool no_rom = rom.empty() || !fs::is_regular_file(rom, rom_ec);
+                    if (no_rom && r.message.find("fell back to local build") != std::string::npos) {
+                        std::lock_guard<std::mutex> lock(mu);
+                        missing_rom_prompt_id = title_id;
+                        show_missing_rom_prompt = true;
+                        set_status("Prebuilt install failed — add a ROM to build locally");
+                        break;
+                    }
+                }
                 if (r.ok) {
                     // Assign title-named memcard/SRAM to slot 1; leave memcard 2 blank.
                     const fs::path rom = library.preferred_rom(title_id);
@@ -901,8 +920,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     if (!ensured.message.empty()) append_log(ensured.message);
                     app_state = load_app_state(paths.state_path);
                 }
-                set_status(r.ok ? ((prebuilt ? "Installed " : "Built ") + title_id)
-                                : ("Install failed: " + title_id));
+                set_status(r.ok ? ("Installed " + title_id) : ("Install failed: " + title_id));
                 break;
             }
             case HubJob::Update: {

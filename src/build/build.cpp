@@ -2728,7 +2728,10 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
 InstallResult install_title_auto(const Paths& paths, const Title& title,
                                  const InstallOptions& install_opts,
                                  const BuildOptions& build_opts) {
-    if (!install_opts.prefer_prebuilt && title.supports_local_build()) {
+    const bool can_zip = title.supports_prebuilt_install();
+    const bool can_build = !install_opts.prefer_prebuilt && title.supports_local_build();
+
+    auto run_build = [&]() -> InstallResult {
         BuildOptions b = build_opts;
         if (b.rom_path.empty()) {
             const auto idx = load_library_index(paths.library_index_path);
@@ -2736,7 +2739,26 @@ InstallResult install_title_auto(const Paths& paths, const Title& title,
         }
         b.force = install_opts.force || b.force;
         return build_title(paths, title, b);
+    };
+
+    // Prefer published release zips (download + extract). Local generate+cmake
+    // is the fallback when zip is unavailable/fails and a build recipe exists.
+    if (can_zip) {
+        auto zip = install_title(paths, title, install_opts);
+        if (zip.ok || zip.skipped) return zip;
+        if (!can_build) return zip;
+
+        auto built = run_build();
+        std::string zip_err = zip.message;
+        while (!zip_err.empty() && (zip_err.back() == '\n' || zip_err.back() == ' '))
+            zip_err.pop_back();
+        if (zip_err.empty()) zip_err = "unknown error";
+        built.message = "prebuilt install failed (" + zip_err +
+                        ") — fell back to local build:\n" + built.message;
+        return built;
     }
+
+    if (can_build) return run_build();
     return install_title(paths, title, install_opts);
 }
 
