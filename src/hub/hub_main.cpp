@@ -156,6 +156,7 @@ void load_hub_fonts() {
 using retcomm::hub::BoxartCache;
 using retcomm::hub::BoxartTexture;
 using retcomm::hub::FolderPickTarget;
+using retcomm::hub::SetupPath;
 using retcomm::hub::HubJob;
 using retcomm::hub::HubModel;
 using retcomm::hub::Theme;
@@ -202,6 +203,7 @@ void SDLCALL on_file_dialog(void* userdata, const char* const* filelist, int /*f
     if (!filelist || !filelist[0]) {
         hub->file_pick_kind = retcomm::hub::FilePickKind::None;
         hub->file_pick_platform.clear();
+        hub->file_pick_title_id.clear();
         return;
     }
     for (const char* const* p = filelist; *p; ++p) hub->file_pick_paths.emplace_back(*p);
@@ -272,7 +274,8 @@ std::set<std::string> bios_exts_for_platform(const std::string& platform) {
 
 void begin_file_pick(HubModel& hub, SDL_Window* window, retcomm::hub::FilePickKind kind,
                      const std::string& platform, const std::string& filter_name,
-                     const std::set<std::string>& exts, bool allow_many) {
+                     const std::set<std::string>& exts, bool allow_many,
+                     const std::string& title_id = {}) {
     const std::string pattern = join_ext_pattern(exts);
     if (pattern.empty()) return;
     {
@@ -281,6 +284,7 @@ void begin_file_pick(HubModel& hub, SDL_Window* window, retcomm::hub::FilePickKi
         hub.file_pick_busy = true;
         hub.file_pick_kind = kind;
         hub.file_pick_platform = platform;
+        hub.file_pick_title_id = title_id;
         hub.file_pick_paths.clear();
         hub.file_pick_filter_name = filter_name;
         hub.file_pick_filter_pattern = pattern;
@@ -372,6 +376,41 @@ bool good_button(const char* label, const Theme& th, const ImVec2& size = ImVec2
     return clicked;
 }
 
+// Destructive actions — muted red fill (mirrors good_button contrast).
+bool danger_button(const char* label, const Theme& /*th*/, const ImVec2& size = ImVec2(0, 0)) {
+    const ImVec4 btn(0.561f, 0.165f, 0.200f, 1.f);       // #8F2A33
+    const ImVec4 hovered(0.655f, 0.220f, 0.255f, 1.f);   // #A73841
+    const ImVec4 active(0.455f, 0.130f, 0.165f, 1.f);    // #74212A
+    const ImVec4 text(0.980f, 0.920f, 0.925f, 1.f);      // #FAEBEB
+    ImGui::PushStyleColor(ImGuiCol_Button, btn);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hovered);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, active);
+    ImGui::PushStyleColor(ImGuiCol_Text, text);
+    const bool clicked = ImGui::Button(label, size);
+    ImGui::PopStyleColor(4);
+    return clicked;
+}
+
+// RomM brand purple (docs.romm.app brand guidelines: #553e98 / #371f69).
+// When inside BeginDisabled (e.g. RomM not configured), keep default grey chrome.
+bool romm_button(const char* label, const Theme& /*th*/, const ImVec2& size = ImVec2(0, 0)) {
+    const bool disabled =
+        (GImGui != nullptr) && ((GImGui->CurrentItemFlags & ImGuiItemFlags_Disabled) != 0);
+    if (disabled) return ImGui::Button(label, size);
+
+    const ImVec4 btn(0.333f, 0.243f, 0.596f, 1.f);         // #553E98
+    const ImVec4 hovered(0.420f, 0.322f, 0.690f, 1.f);     // #6B52B0
+    const ImVec4 active(0.216f, 0.122f, 0.412f, 1.f);      // #371F69
+    const ImVec4 text(0.929f, 0.898f, 0.973f, 1.f);        // #EDE5F8
+    ImGui::PushStyleColor(ImGuiCol_Button, btn);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, hovered);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, active);
+    ImGui::PushStyleColor(ImGuiCol_Text, text);
+    const bool clicked = ImGui::Button(label, size);
+    ImGui::PopStyleColor(4);
+    return clicked;
+}
+
 void draw_marquee(HubModel& hub, const Theme& th, float width) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
@@ -398,25 +437,87 @@ void draw_marquee(HubModel& hub, const Theme& th, float width) {
     ImGui::TextUnformatted("Retro Compilation Manager");
     ImGui::PopStyleColor();
 
-    // Top-right: Scans + Updates + Menu, or a one-click Back when editing settings.
+    // Status chip (left of top-right actions).
+    std::string chip = "Ready";
+    ImVec4 chip_col = th.good;
+    {
+        std::string st;
+        bool game_upd = false;
+        {
+            std::lock_guard<std::mutex> lock(hub.mu);
+            st = hub.status;
+            for (const auto& r : hub.rows) {
+                if (r.update_available) {
+                    game_upd = true;
+                    break;
+                }
+            }
+        }
+        if (hub.job_running.load()) {
+            chip = st.empty() ? "Working…" : st;
+            if (chip.size() > 42) chip = chip.substr(0, 39) + "…";
+            chip_col = th.accent;
+        } else if (hub.launch_running.load()) {
+            chip = "Launching…";
+            chip_col = th.accent;
+        } else if (hub.launcher_update_prompt_pending.load() ||
+                   hub.toolchain_prompt_pending.load() || hub.toolchain_update_available ||
+                   game_upd) {
+            chip = "Update available";
+            chip_col = th.warn;
+        } else if (!st.empty() && st != "Ready") {
+            // Keep last notable status briefly as chip when idle.
+            if (st == "Up to date" || st.find("complete") != std::string::npos) {
+                chip = st.size() > 42 ? st.substr(0, 39) + "…" : st;
+                chip_col = th.text_muted;
+            }
+        }
+    }
+    {
+        const ImVec2 chip_sz = ImGui::CalcTextSize(chip.c_str());
+        const float chip_pad_x = 10.f;
+        const float chip_pad_y = 5.f;
+        const float chip_w = chip_sz.x + chip_pad_x * 2.f;
+        const float chip_h = chip_sz.y + chip_pad_y * 2.f;
+        // Clear of both brand lines (title + subtitle), not just "RetComM".
+        const float brand_w =
+            std::max(ImGui::CalcTextSize("RetComM").x,
+                     ImGui::CalcTextSize("Retro Compilation Manager").x);
+        const float chip_x = p0.x + 20.f + brand_w + 28.f;
+        const float chip_y = p0.y + (h - chip_h) * 0.5f;
+        const ImVec2 c0(chip_x, chip_y);
+        const ImVec2 c1(chip_x + chip_w, chip_y + chip_h);
+        dl->AddRectFilled(c0, c1, ImGui::ColorConvertFloat4ToU32(th.background2), 6.f);
+        dl->AddRect(c0, c1, ImGui::ColorConvertFloat4ToU32(chip_col), 6.f, 0, 1.5f);
+        dl->AddText(ImVec2(chip_x + chip_pad_x, chip_y + chip_pad_y),
+                    ImGui::ColorConvertFloat4ToU32(chip_col), chip.c_str());
+    }
+
+    // Top-right: Add/Scan Files + Check for Updates + Menu, or Back when editing settings.
     constexpr float kMenuH = 36.f;
     constexpr float kBtnGap = 8.f;
     const bool in_settings = hub.show_settings || hub.show_romm_settings;
     const char* btn_label = in_settings ? "Back to Library" : "Menu";
+    const char* library_label = "Add/Scan Files";
+    const char* updates_label = "Check for Updates";
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.f, 8.f));
     const float menu_w =
         std::max(88.f, ImGui::CalcTextSize(btn_label).x + ImGui::GetStyle().FramePadding.x * 2.f);
-    const float scans_w =
-        std::max(72.f, ImGui::CalcTextSize("Scans").x + ImGui::GetStyle().FramePadding.x * 2.f);
+    const float library_w =
+        std::max(100.f, ImGui::CalcTextSize(library_label).x + ImGui::GetStyle().FramePadding.x * 2.f);
     const float updates_w =
-        std::max(80.f, ImGui::CalcTextSize("Updates").x + ImGui::GetStyle().FramePadding.x * 2.f);
+        std::max(120.f, ImGui::CalcTextSize(updates_label).x + ImGui::GetStyle().FramePadding.x * 2.f);
     const float btn_y = p0.y + (h - kMenuH) * 0.5f;
     float btn_x = p0.x + width - 16.f - menu_w;
     if (!in_settings) {
-        ImGui::SetCursorScreenPos(ImVec2(btn_x - kBtnGap - updates_w - kBtnGap - scans_w, btn_y));
-        if (ImGui::Button("Scans", ImVec2(scans_w, kMenuH))) hub.pending_open_scans = true;
+        ImGui::SetCursorScreenPos(ImVec2(btn_x - kBtnGap - updates_w - kBtnGap - library_w, btn_y));
+        if (ImGui::Button(library_label, ImVec2(library_w, kMenuH)))
+            hub.pending_open_library = true;
         ImGui::SetCursorScreenPos(ImVec2(btn_x - kBtnGap - updates_w, btn_y));
-        if (ImGui::Button("Updates", ImVec2(updates_w, kMenuH))) hub.pending_open_updates = true;
+        ImGui::BeginDisabled(hub.job_running.load());
+        if (ImGui::Button(updates_label, ImVec2(updates_w, kMenuH)))
+            hub.start_job(HubJob::CheckUpdates);
+        ImGui::EndDisabled();
     }
     ImGui::SetCursorScreenPos(ImVec2(btn_x, btn_y));
     if (ImGui::Button(btn_label, ImVec2(menu_w, kMenuH))) {
@@ -817,165 +918,365 @@ void close_modal_on_outside_click() {
     ImGui::CloseCurrentPopup();
 }
 
-void draw_detail_save_controls(HubModel& hub, const TitleRow& row, const Theme& th) {
-    // Match spacing used below Create Save before Manage Data / RomM Sync.
-    constexpr float kSaveBtnPad = 12.f;
+void draw_detail_save_controls(HubModel& hub, const TitleRow& row, const Theme& th, bool busy,
+                               SDL_Window* window) {
+    struct PickerState {
+        std::string title_id;
+        int slot = 0;   // 0 = cart/save file, 1 = memcard 1, 2 = memcard 2
+        int sel = -2;   // -1 = Empty Card Slot (slot 2 only), >=0 = save index
+        bool renaming = false;
+        char rename_buf[256]{};
+    };
+    static PickerState ps;
 
-    if (row.save_labels.empty()) {
-        ImGui::TextColored(th.text_muted, "Save file");
-        ImGui::TextColored(th.text_muted,
-                           "None yet — Create Save, Play (auto-creates), or RomM Sync");
-        ImGui::Dummy(ImVec2(0, kSaveBtnPad));
-        if (ImGui::Button("Create Save", ImVec2(-1, 0))) {
-            std::string err;
-            if (!hub.create_title_save(row.id, &err))
-                hub.append_log("Create Save failed: " + err);
-        }
-        return;
-    }
+    auto slot_button_label = [](const TitleRow& r, int index, bool is_card2) -> std::string {
+        if (is_card2 && index < 0) return "Empty Card Slot";
+        if (index >= 0 && index < static_cast<int>(r.save_labels.size()))
+            return r.save_labels[static_cast<size_t>(index)];
+        if (!r.save_labels.empty() && !is_card2) return r.save_labels.front();
+        return "None";
+    };
+
+    auto open_picker = [&](int slot) {
+        ps.title_id = row.id;
+        ps.slot = slot;
+        ps.renaming = false;
+        ps.rename_buf[0] = '\0';
+        if (slot == 2)
+            ps.sel = row.preferred_save_card2_index;
+        else if (row.preferred_save_index >= 0)
+            ps.sel = row.preferred_save_index;
+        else
+            ps.sel = row.save_labels.empty() ? -2 : 0;
+        ImGui::OpenPopup("###memcard_picker");
+    };
 
     if (row.dual_memcard) {
-        auto draw_memcard_combo = [&](const char* combo_id, int index, bool is_card2) {
-            const char* preview = "(Blank card)";
-            if (index >= 0 && index < static_cast<int>(row.save_labels.size()))
-                preview = row.save_labels[static_cast<size_t>(index)].c_str();
-            ImGui::SetNextItemWidth(-1);
-            if (ImGui::BeginCombo(combo_id, preview)) {
-                if (is_card2) {
-                    const bool blank_sel = index < 0;
-                    if (ImGui::Selectable("(Blank card)", blank_sel)) {
-                        std::string err;
-                        if (!hub.set_title_preferred_save_card2(row.id, retcomm::kBlankMemcardId,
-                                                                &err))
-                            hub.append_log("Could not save preference: " + err);
-                    }
-                    if (blank_sel) ImGui::SetItemDefaultFocus();
-                }
-                for (size_t i = 0; i < row.save_labels.size(); ++i) {
-                    const bool selected = static_cast<int>(i) == index;
-                    if (ImGui::Selectable(row.save_labels[i].c_str(), selected)) {
-                        std::string err;
-                        const bool ok =
-                            is_card2 ? hub.set_title_preferred_save_card2(row.id, row.save_ids[i],
-                                                                          &err)
-                                     : hub.set_title_preferred_save(row.id, row.save_ids[i], &err);
-                        if (!ok) hub.append_log("Could not save preference: " + err);
-                    }
-                    if (selected) ImGui::SetItemDefaultFocus();
-                }
-                ImGui::EndCombo();
-            }
-        };
-        ImGui::TextColored(th.text_muted, "Memcard 1 & 2");
-        draw_memcard_combo("##memcard1", row.preferred_save_index, false);
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(ImGui::GetStyle().ItemSpacing.x, 2.f));
-        draw_memcard_combo("##memcard2", row.preferred_save_card2_index, true);
-        ImGui::PopStyleVar();
-        ImGui::Dummy(ImVec2(0, kSaveBtnPad));
-        if (ImGui::Button("Create Save", ImVec2(-1, 0))) {
-            std::string err;
-            if (!hub.create_title_save(row.id, &err))
-                hub.append_log("Create Save failed: " + err);
+        ImGui::TextColored(th.text_muted, "Memory card 1 & 2");
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                            ImVec2(ImGui::GetStyle().ItemSpacing.x, 4.f));
+        {
+            const std::string lab =
+                slot_button_label(row, row.preferred_save_index, false) + "##memcard1_btn";
+            if (ImGui::Button(lab.c_str(), ImVec2(-1, 0))) open_picker(1);
         }
+        {
+            const std::string lab =
+                slot_button_label(row, row.preferred_save_card2_index, true) + "##memcard2_btn";
+            if (ImGui::Button(lab.c_str(), ImVec2(-1, 0))) open_picker(2);
+        }
+        ImGui::PopStyleVar();
+    } else {
+        ImGui::TextColored(th.text_muted, "Save file");
+        const std::string lab =
+            slot_button_label(row, row.preferred_save_index, false) + "##save_btn";
+        if (ImGui::Button(lab.c_str(), ImVec2(-1, 0))) open_picker(0);
+    }
+
+    if (!ImGui::IsPopupOpen("###memcard_picker")) return;
+    constexpr float kW = 560.f;
+    constexpr float kH = 720.f;
+    center_modal_next();
+    ImGui::SetNextWindowSizeConstraints(ImVec2(kW, kH), ImVec2(kW, kH));
+    ImGui::SetNextWindowSize(ImVec2(kW, kH), ImGuiCond_Appearing);
+
+    const char* slot_title = "Save file";
+    if (ps.slot == 1) slot_title = "Memory Card 1";
+    else if (ps.slot == 2) slot_title = "Memory Card 2";
+    char picker_title[96];
+    std::snprintf(picker_title, sizeof(picker_title), "%s###memcard_picker", slot_title);
+    if (!ImGui::BeginPopupModal(
+            picker_title, nullptr,
+            ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse))
+        return;
+
+    const TitleRow* live = nullptr;
+    for (const auto& r : hub.rows) {
+        if (r.id == ps.title_id) {
+            live = &r;
+            break;
+        }
+    }
+    if (!live) {
+        ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
         return;
     }
 
-    ImGui::TextColored(th.text_muted, "Save file");
-    const char* preview =
-        (row.preferred_save_index >= 0 &&
-         row.preferred_save_index < static_cast<int>(row.save_labels.size()))
-            ? row.save_labels[static_cast<size_t>(row.preferred_save_index)].c_str()
-            : row.save_labels.front().c_str();
-    ImGui::SetNextItemWidth(-1);
-    if (ImGui::BeginCombo("##save_file", preview)) {
-        for (size_t i = 0; i < row.save_labels.size(); ++i) {
-            const bool selected = static_cast<int>(i) == row.preferred_save_index;
-            if (ImGui::Selectable(row.save_labels[i].c_str(), selected)) {
-                std::string err;
-                if (!hub.set_title_preferred_save(row.id, row.save_ids[i], &err))
-                    hub.append_log("Could not save preference: " + err);
-            }
-            if (selected) ImGui::SetItemDefaultFocus();
-        }
-        ImGui::EndCombo();
-    }
-    ImGui::Dummy(ImVec2(0, kSaveBtnPad));
-    if (ImGui::Button("Create Save", ImVec2(-1, 0))) {
+    ImGui::TextWrapped("%s", live->name.c_str());
+    ImGui::Separator();
+
+    const bool allow_empty = (ps.slot == 2);
+    // Negative height: fill remaining space after the footer (list scrolls; window does not).
+    // Include ItemSpacing after every widget (Dummy / button rows / Close), plus a safety
+    // margin — under-reserving clips Close under NoScrollbar.
+    constexpr float kPadTop = 12.f;
+    constexpr float kPadClose = 14.f;
+    constexpr float kFooterSafety = 12.f;
+    const float fh = ImGui::GetFrameHeight();
+    const float sp = ImGui::GetStyle().ItemSpacing.y;
+    const float footer =
+        ps.renaming
+            // Dummy + InputText + Confirm + Cancel + Dummy + Close (+ spacing each)
+            ? (sp + kPadTop + sp + fh + sp + fh + sp + fh + sp + kPadClose + sp + fh +
+               kFooterSafety)
+            // Dummy + 2 action rows + Dummy + Close (+ spacing each)
+            : (sp + kPadTop + sp + fh + sp + fh + sp + kPadClose + sp + fh + kFooterSafety);
+    ImGui::BeginChild("##memcard_list", ImVec2(-FLT_MIN, -footer), ImGuiChildFlags_Borders);
+
+    auto apply_selection = [&](int sel) {
         std::string err;
-        if (!hub.create_title_save(row.id, &err))
-            hub.append_log("Create Save failed: " + err);
+        bool ok = false;
+        if (ps.slot == 2) {
+            if (sel < 0)
+                ok = hub.set_title_preferred_save_card2(ps.title_id, retcomm::kBlankMemcardId,
+                                                        &err);
+            else if (sel < static_cast<int>(live->save_ids.size()))
+                ok = hub.set_title_preferred_save_card2(ps.title_id, live->save_ids[static_cast<size_t>(sel)],
+                                                        &err);
+        } else if (sel >= 0 && sel < static_cast<int>(live->save_ids.size())) {
+            ok = hub.set_title_preferred_save(ps.title_id, live->save_ids[static_cast<size_t>(sel)],
+                                              &err);
+        }
+        if (!ok && !err.empty()) hub.append_log("Could not save preference: " + err);
+        return ok;
+    };
+
+    // Theme Header matches panel bg, so Selectable selection is invisible without a push.
+    auto selectable_row = [&](const char* label, bool sel) -> bool {
+        if (sel) {
+            ImGui::PushStyleColor(ImGuiCol_Header, th.accent_button);
+            ImGui::PushStyleColor(ImGuiCol_HeaderHovered, th.accent_button_hovered);
+            ImGui::PushStyleColor(ImGuiCol_HeaderActive, th.accent_button_active);
+        }
+        const bool clicked =
+            ImGui::Selectable(label, sel, ImGuiSelectableFlags_AllowDoubleClick);
+        if (sel) {
+            ImGui::PopStyleColor(3);
+            ImGui::SetItemDefaultFocus();
+        }
+        return clicked;
+    };
+
+    if (allow_empty) {
+        const bool sel = (ps.sel == -1);
+        if (selectable_row("Empty Card Slot", sel)) {
+            ps.sel = -1;
+            ps.renaming = false;
+            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                if (apply_selection(-1)) ImGui::CloseCurrentPopup();
+            }
+        }
     }
+
+    for (size_t i = 0; i < live->save_labels.size(); ++i) {
+        const bool sel = (ps.sel == static_cast<int>(i));
+        const std::string item = live->save_labels[i] + "##mc" + std::to_string(i);
+        if (selectable_row(item.c_str(), sel)) {
+            ps.sel = static_cast<int>(i);
+            ps.renaming = false;
+            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                if (apply_selection(ps.sel)) ImGui::CloseCurrentPopup();
+            }
+        }
+    }
+    if (live->save_labels.empty() && !allow_empty) {
+        ImGui::TextColored(th.text_muted, "No save files yet.");
+    }
+    ImGui::EndChild();
+
+    const bool has_file = ps.sel >= 0 && ps.sel < static_cast<int>(live->save_ids.size());
+    const bool can_select = has_file || (allow_empty && ps.sel == -1);
+
+    if (ps.renaming && has_file) {
+        ImGui::Dummy(ImVec2(0, 12));
+        ImGui::SetNextItemWidth(-1);
+        ImGui::InputText("##rename_save", ps.rename_buf, sizeof(ps.rename_buf));
+        if (ImGui::Button("Confirm rename", ImVec2(-1, 0))) {
+            std::string err;
+            const std::string id = live->save_ids[static_cast<size_t>(ps.sel)];
+            if (hub.rename_title_save(ps.title_id, id, ps.rename_buf, &err)) {
+                ps.renaming = false;
+                // Re-resolve selection after refresh.
+                for (const auto& r : hub.rows) {
+                    if (r.id != ps.title_id) continue;
+                    live = &r;
+                    break;
+                }
+                if (live) {
+                    const std::string want = std::string("saves/") + ps.rename_buf;
+                    ps.sel = -2;
+                    for (size_t i = 0; i < live->save_ids.size(); ++i) {
+                        if (live->save_ids[i] == want ||
+                            live->save_labels[i] == ps.rename_buf) {
+                            ps.sel = static_cast<int>(i);
+                            break;
+                        }
+                    }
+                    if (ps.sel < 0) {
+                        // Extension may have been added by rename.
+                        const std::string base = ps.rename_buf;
+                        for (size_t i = 0; i < live->save_labels.size(); ++i) {
+                            if (live->save_labels[i].rfind(base, 0) == 0) {
+                                ps.sel = static_cast<int>(i);
+                                break;
+                            }
+                        }
+                    }
+                }
+            } else {
+                hub.append_log("Rename failed: " + err);
+            }
+        }
+        if (ImGui::Button("Cancel rename", ImVec2(-1, 0))) ps.renaming = false;
+    } else {
+        ImGui::Dummy(ImVec2(0, 12));
+        const float gap = ImGui::GetStyle().ItemSpacing.x;
+        const float third = (ImGui::GetContentRegionAvail().x - gap * 2.f) / 3.f;
+        ImGui::BeginDisabled(!can_select);
+        if (good_button("Select", th, ImVec2(third, 0))) {
+            if (apply_selection(ps.sel)) ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine(0, gap);
+        ImGui::BeginDisabled(!has_file);
+        if (danger_button("Delete", th, ImVec2(third, 0))) {
+            std::string err;
+            const std::string id = live->save_ids[static_cast<size_t>(ps.sel)];
+            if (hub.delete_title_save(ps.title_id, id, &err)) {
+                ps.sel = allow_empty ? -1 : -2;
+                ps.renaming = false;
+            } else {
+                hub.append_log("Delete failed: " + err);
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine(0, gap);
+        ImGui::BeginDisabled(busy);
+        if (ImGui::Button("Create", ImVec2(third, 0))) {
+            std::string err;
+            if (hub.create_title_save(ps.title_id, &err, ps.slot == 2)) {
+                ps.renaming = false;
+                for (const auto& r : hub.rows) {
+                    if (r.id != ps.title_id) continue;
+                    if (ps.slot == 2)
+                        ps.sel = r.preferred_save_card2_index;
+                    else
+                        ps.sel = r.preferred_save_index;
+                    break;
+                }
+            } else {
+                hub.append_log("Create failed: " + err);
+            }
+        }
+        ImGui::EndDisabled();
+
+        bool file_busy = false;
+        {
+            std::lock_guard<std::mutex> lock(hub.file_pick_mu);
+            file_busy = hub.file_pick_busy;
+        }
+        ImGui::BeginDisabled(!has_file);
+        if (ImGui::Button("Rename", ImVec2(third, 0))) {
+            const std::string& lab = live->save_labels[static_cast<size_t>(ps.sel)];
+            std::snprintf(ps.rename_buf, sizeof(ps.rename_buf), "%s", lab.c_str());
+            ps.renaming = true;
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine(0, gap);
+        ImGui::BeginDisabled(busy || file_busy || window == nullptr);
+        if (ImGui::Button("Import Save File", ImVec2(third, 0))) {
+            const auto exts = save_exts_for_platform(hub.catalog, live->platform);
+            begin_file_pick(hub, window, retcomm::hub::FilePickKind::ImportSave, live->platform,
+                            "Save files", exts, /*allow_many=*/false, ps.title_id);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine(0, gap);
+        ImGui::BeginDisabled(busy || !live->romm_ready || !live->installed);
+        if (romm_button("Sync with RomM", th, ImVec2(third, 0))) {
+            hub.start_job(HubJob::SyncRommSaves, ps.title_id);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+    }
+
+    ImGui::Dummy(ImVec2(0, 14));
+    if (ImGui::Button("Close", ImVec2(-1, 0))) {
+        ps.renaming = false;
+        ImGui::CloseCurrentPopup();
+    }
+    close_modal_on_outside_click();
+    ImGui::EndPopup();
 }
 
-void draw_detail_manage_data_popup(HubModel& hub, const TitleRow& row, const Theme& th,
-                                   bool busy) {
+void draw_detail_manage_game_popup(HubModel& hub, const TitleRow& row, const Theme& th, bool busy) {
+    if (!ImGui::IsPopupOpen("Manage Game Data###detail_manage_game")) return;
+    constexpr float kW = 420.f;
     center_modal_next();
-    ImGui::SetNextWindowSize(ImVec2(420.f, 0.f), ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("Manage Data###detail_manage_data", nullptr,
+    ImGui::SetNextWindowSizeConstraints(ImVec2(kW, 0.f), ImVec2(kW, FLT_MAX));
+    ImGui::SetNextWindowSize(ImVec2(kW, 0.f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Manage Game Data###detail_manage_game", nullptr,
                                 ImGuiWindowFlags_AlwaysAutoResize))
         return;
 
-    ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 380.f);
+    ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + kW - 40.f);
     ImGui::TextWrapped("%s", row.name.c_str());
-    ImGui::PopTextWrapPos();
     ImGui::Separator();
     ImGui::BeginDisabled(busy);
 
     const bool can_open =
         row.installed || row.install_dir_present || row.has_preserved_state;
     if (can_open && ImGui::Button("Open Folder", ImVec2(-1, 0))) {
+        fs::path open_dir;
+        if (!row.install_root.empty())
+            open_dir = retcomm::resolve_current_release_dir(row.install_root);
+        if (open_dir.empty() && !row.binary_path.empty()) {
+            fs::path walk = fs::path(row.binary_path).parent_path();
+            while (!walk.empty() && walk.has_parent_path()) {
+                if (walk.parent_path().filename() == "releases") {
+                    open_dir = walk;
+                    break;
+                }
+                const fs::path parent = walk.parent_path();
+                if (parent == walk) break;
+                walk = parent;
+            }
+            if (open_dir.empty()) open_dir = fs::path(row.binary_path).parent_path();
+        }
+        if (open_dir.empty()) open_dir = row.install_root;
         std::string err;
-        if (!retcomm::open_path_in_file_manager(row.install_root, &err))
+        if (!retcomm::open_path_in_file_manager(open_dir, &err))
             hub.append_log("Open Folder failed: " + err);
     }
 
-    if (row.installed) {
-        if (ImGui::Button("Uninstall (keep saves)", ImVec2(-1, 0))) {
-            hub.start_job(HubJob::Uninstall, row.id);
+    const bool can_uninstall =
+        row.installed || row.install_dir_present || row.has_preserved_state;
+    if (can_uninstall) {
+        ImGui::Dummy(ImVec2(0, 6));
+        static bool keep_saves = true;
+        static std::string keep_saves_for_id;
+        if (keep_saves_for_id != row.id) {
+            keep_saves_for_id = row.id;
+            keep_saves = true;
+        }
+        ImGui::Checkbox("Keep save data", &keep_saves);
+        ImGui::Dummy(ImVec2(0, 4));
+        if (ImGui::Button("Uninstall", ImVec2(-1, 0))) {
+            hub.start_job(keep_saves ? HubJob::Uninstall : HubJob::UninstallPurge, row.id);
             ImGui::CloseCurrentPopup();
         }
-        if (ImGui::Button("Uninstall + delete saves", ImVec2(-1, 0))) {
-            hub.start_job(HubJob::UninstallPurge, row.id);
-            ImGui::CloseCurrentPopup();
-        }
-    } else if (row.install_dir_present) {
-        if (ImGui::Button("Clean install folder (keep saves)", ImVec2(-1, 0))) {
-            hub.start_job(HubJob::Uninstall, row.id);
-            ImGui::CloseCurrentPopup();
-        }
-        if (ImGui::Button("Clean install folder + delete saves", ImVec2(-1, 0))) {
-            hub.start_job(HubJob::UninstallPurge, row.id);
-            ImGui::CloseCurrentPopup();
-        }
-    } else if (row.has_preserved_state) {
-        if (ImGui::Button("Delete preserved data", ImVec2(-1, 0))) {
-            hub.start_job(HubJob::UninstallPurge, row.id);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-        ImGui::TextWrapped(
-            "Removes the entire apps folder for this title, including preserved "
-            "saves and config.");
-        ImGui::PopStyleColor();
     } else {
         ImGui::TextColored(th.text_muted, "No install folder or preserved data yet.");
     }
-
-    ImGui::Dummy(ImVec2(0, 8));
-    ImGui::TextColored(th.text_muted, "Paths");
-    if (!row.install_root.empty())
-        ImGui::TextWrapped("install: %s", row.install_root.c_str());
-    if (!row.binary_path.empty())
-        ImGui::TextWrapped("binary:  %s", row.binary_path.c_str());
-    if (row.install_root.empty() && row.binary_path.empty())
-        ImGui::TextColored(th.text_muted, "(no install paths yet)");
 
     ImGui::Dummy(ImVec2(0, 8));
     ImGui::TextColored(th.text_muted, "ROM / disc");
     if (row.has_rom)
         ImGui::TextWrapped("%s", row.rom_path.c_str());
     else if (row.has_romm) {
-        ImGui::TextColored(th.accent, "Available on RomM — use RomM Sync to download");
+        ImGui::TextColored(th.accent, "Available on RomM");
         if (!row.romm_file_name.empty()) ImGui::TextWrapped("%s", row.romm_file_name.c_str());
     } else {
         ImGui::TextColored(th.warn, "No library match");
@@ -985,97 +1286,39 @@ void draw_detail_manage_data_popup(HubModel& hub, const TitleRow& row, const The
         }
     }
 
-    ImGui::EndDisabled();
     ImGui::Dummy(ImVec2(0, 8));
-    if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
-    close_modal_on_outside_click();
-    ImGui::EndPopup();
-}
-
-void draw_detail_romm_sync_popup(HubModel& hub, const TitleRow& row, const Theme& th, bool busy) {
-    center_modal_next();
-    ImGui::SetNextWindowSize(ImVec2(440.f, 0.f), ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("RomM Sync###detail_romm_sync", nullptr,
-                                ImGuiWindowFlags_AlwaysAutoResize))
-        return;
-
-    ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 400.f);
-    ImGui::TextWrapped("%s", row.name.c_str());
-    ImGui::PopTextWrapPos();
-    ImGui::Separator();
-
+    ImGui::TextColored(th.text_muted, "RomM");
     if (!row.romm_ready) {
-        ImGui::TextColored(th.warn, "RomM is not configured.");
-        ImGui::TextColored(th.text_muted, "Open Menu → RomM Sync Settings to add a URL and API key.");
-        if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
-        close_modal_on_outside_click();
-        ImGui::EndPopup();
-        return;
+        ImGui::TextColored(th.text_muted, "Not configured — Menu → RomM Sync Settings.");
+    } else {
+        if (row.has_rom_identity) {
+            const char* rom_label = row.has_rom ? "Re-download ROM" : "Download ROM";
+            if (romm_button(rom_label, th, ImVec2(-1, 0))) {
+                hub.start_job(HubJob::FetchRommRom, row.id);
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        if (row.needs_bios) {
+            const char* bios_label = row.has_bios ? "Re-download BIOS" : "Download BIOS";
+            if (romm_button(bios_label, th, ImVec2(-1, 0))) {
+                hub.start_job(HubJob::FetchRommBios, row.id);
+                ImGui::CloseCurrentPopup();
+            }
+        }
+        if (!row.has_rom_identity && !row.needs_bios) {
+            ImGui::TextColored(th.text_muted, "No RomM download actions for this title.");
+        }
     }
 
-    ImGui::BeginDisabled(busy);
-    if (row.has_rom_identity) {
-        const char* rom_label =
-            row.has_rom ? "Re-download ROM from RomM" : "Download ROM from RomM";
-        if (ImGui::Button(rom_label, ImVec2(-1, 0))) {
-            hub.start_job(HubJob::FetchRommRom, row.id);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-        ImGui::TextWrapped(
-            "Matches catalog hashes against your RomM library, then saves into the "
-            "configured ROM library folder.");
-        ImGui::PopStyleColor();
-        ImGui::Dummy(ImVec2(0, 4));
-    }
-    if (row.needs_bios) {
-        const char* bios_label =
-            row.has_bios ? "Re-download BIOS from RomM" : "Download BIOS from RomM";
-        if (ImGui::Button(bios_label, ImVec2(-1, 0))) {
-            hub.start_job(HubJob::FetchRommBios, row.id);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-        ImGui::TextWrapped(
-            "Matches catalog BIOS identity against RomM firmware and saves into the "
-            "BIOS root.");
-        ImGui::PopStyleColor();
-        ImGui::Dummy(ImVec2(0, 4));
-    }
-    if (row.installed) {
-        if (ImGui::Button("Sync Game Saves", ImVec2(-1, 0))) {
-            hub.start_job(HubJob::SyncRommSaves, row.id);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-        ImGui::TextWrapped(
-            "Promotes install saves into the save library, then bidirectional sync with "
-            "RomM. Newer file wins; identical hashes are skipped.");
-        ImGui::PopStyleColor();
-        ImGui::Dummy(ImVec2(0, 4));
-
-        if (ImGui::Button("Sync Savestates", ImVec2(-1, 0))) {
-            hub.start_job(HubJob::SyncRommStates, row.id);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-        ImGui::TextWrapped(
-            "Bidirectional sync of savestates with RomM. Newer file wins. Recomp and "
-            "emulator savestates are often incompatible — sync does not convert formats.");
-        ImGui::PopStyleColor();
-    }
-    if (!row.has_rom_identity && !row.needs_bios && !row.installed) {
-        ImGui::TextColored(th.text_muted, "No RomM actions available for this title yet.");
-    }
     ImGui::EndDisabled();
-
+    ImGui::PopTextWrapPos();
     ImGui::Dummy(ImVec2(0, 8));
     if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
     close_modal_on_outside_click();
     ImGui::EndPopup();
 }
 
-void draw_menu_popup(HubModel& hub, const Theme& th, SDL_Window* window) {
+void draw_menu_popup(HubModel& hub, const Theme& th, SDL_Window* /*window*/) {
     if (hub.pending_open_menu) {
         ImGui::OpenPopup("Menu###hub_menu_panel");
         hub.pending_open_menu = false;
@@ -1090,77 +1333,8 @@ void draw_menu_popup(HubModel& hub, const Theme& th, SDL_Window* window) {
     if (!ImGui::BeginPopupModal("Menu###hub_menu_panel", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         return;
 
-    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextUnformatted("MENU");
-    ImGui::PopStyleColor();
-
-    ImGui::Dummy(ImVec2(0, 4));
-    ImGui::TextColored(th.text_muted, "Import");
-    {
-        std::vector<std::string> plats;
-        std::unordered_set<std::string> seen;
-        for (const auto& t : hub.catalog.titles) {
-            if (t.platform.empty() || !seen.insert(t.platform).second) continue;
-            plats.push_back(t.platform);
-        }
-        std::sort(plats.begin(), plats.end(), [](const std::string& a, const std::string& b) {
-            return std::string(platform_display_name(a)) < std::string(platform_display_name(b));
-        });
-        if (!hub.menu_import_platform.empty() &&
-            std::find(plats.begin(), plats.end(), hub.menu_import_platform) == plats.end())
-            hub.menu_import_platform.clear();
-
-        const char* preview = hub.menu_import_platform.empty()
-                                  ? "Select a Platform"
-                                  : platform_display_name(hub.menu_import_platform);
-        bool file_busy = false;
-        {
-            std::lock_guard<std::mutex> lock(hub.file_pick_mu);
-            file_busy = hub.file_pick_busy;
-        }
-        ImGui::BeginDisabled(file_busy || hub.job_running.load());
-        if (ImGui::BeginCombo("##import_platform", preview)) {
-            for (const auto& p : plats) {
-                const bool sel = hub.menu_import_platform == p;
-                if (ImGui::Selectable(platform_display_name(p), sel))
-                    hub.menu_import_platform = p;
-                if (sel) ImGui::SetItemDefaultFocus();
-            }
-            ImGui::EndCombo();
-        }
-        const bool plat_ok = !hub.menu_import_platform.empty();
-        ImGui::BeginDisabled(!plat_ok);
-        if (ImGui::Button("Import ROM", ImVec2(-1, 0))) {
-            const auto exts = rom_exts_for_platform(hub.catalog, hub.menu_import_platform);
-            begin_file_pick(hub, window, retcomm::hub::FilePickKind::ImportRom,
-                            hub.menu_import_platform, "ROM files", exts, /*allow_many=*/true);
-            ImGui::CloseCurrentPopup();
-        }
-        if (ImGui::Button("Import Save File", ImVec2(-1, 0))) {
-            const auto exts = save_exts_for_platform(hub.catalog, hub.menu_import_platform);
-            begin_file_pick(hub, window, retcomm::hub::FilePickKind::ImportSave,
-                            hub.menu_import_platform, "Save files", exts, /*allow_many=*/false);
-            ImGui::CloseCurrentPopup();
-        }
-        if (ImGui::Button("Import BIOS", ImVec2(-1, 0))) {
-            const auto exts = bios_exts_for_platform(hub.menu_import_platform);
-            begin_file_pick(hub, window, retcomm::hub::FilePickKind::ImportBios,
-                            hub.menu_import_platform, "BIOS files", exts, /*allow_many=*/false);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndDisabled();
-        ImGui::EndDisabled();
-        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-        ImGui::TextWrapped(
-            "Copies into your library / saves / BIOS folders for the selected platform, "
-            "then scans when needed. Multi-track discs: select the .cue and .bin tracks together.");
-        ImGui::PopStyleColor();
-    }
-
-    ImGui::Dummy(ImVec2(0, 8));
-    ImGui::Separator();
     ImGui::TextColored(th.text_muted, "Settings");
-    // Settings stay reachable during Build & Install / scans.
+    // Settings stay reachable during Build & Install / library jobs.
     if (ImGui::Button("Library Settings", ImVec2(-1, 0))) {
         hub.open_settings();
         ImGui::CloseCurrentPopup();
@@ -1171,134 +1345,134 @@ void draw_menu_popup(HubModel& hub, const Theme& th, SDL_Window* window) {
     }
 
     ImGui::Dummy(ImVec2(0, 10));
-    if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
-    close_modal_on_outside_click();
-    ImGui::EndPopup();
-}
-
-void draw_updates_popup(HubModel& hub, const Theme& th) {
-    if (hub.pending_open_updates) {
-        ImGui::OpenPopup("Updates###updates_panel");
-        hub.pending_open_updates = false;
-    }
-    if (!ImGui::IsPopupOpen("Updates###updates_panel")) return;
-    constexpr float kUpdatesW = 420.f;
-    center_modal_next();
-    ImGui::SetNextWindowSizeConstraints(ImVec2(kUpdatesW, 0.f), ImVec2(kUpdatesW, FLT_MAX));
-    ImGui::SetNextWindowSize(ImVec2(kUpdatesW, 0.f), ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("Updates###updates_panel", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
-        return;
-
-    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextUnformatted("UPDATES");
-    ImGui::PopStyleColor();
-
-    const bool busy = hub.job_running.load();
-    bool tc_upd = false;
-    std::string tc_line;
-    {
-        std::lock_guard<std::mutex> lock(hub.mu);
-        tc_upd = hub.toolchain_update_available;
-        tc_line = hub.toolchain_status;
-        if (tc_line.empty() && !hub.toolchain_current_version.empty())
-            tc_line = "Toolchain " + hub.toolchain_current_version;
-    }
-
-    ImGui::Dummy(ImVec2(0, 6));
-    ImGui::BeginDisabled(busy);
-    {
-        const retcomm::RetcommInstallInfo install = retcomm::retcomm_install_info();
-        ImGui::BeginDisabled(!install.self_update_supported);
-        if (ImGui::Button("Update RetComM", ImVec2(-1, 0))) {
-            hub.start_job(HubJob::SelfUpdate);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndDisabled();
-        if (!install.self_update_supported) {
-            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-            ImGui::TextWrapped("Self-update is only available from a RetComM portable install.");
-            ImGui::PopStyleColor();
-        }
-    }
-    if (ImGui::Button("Update Catalog", ImVec2(-1, 0))) {
-        hub.start_job(HubJob::RefreshCatalog);
-        ImGui::CloseCurrentPopup();
-    }
-    if (ImGui::Button("Check Game Updates", ImVec2(-1, 0))) {
-        hub.start_job(HubJob::CheckUpdates);
-        ImGui::CloseCurrentPopup();
-    }
-    if (ImGui::Button(tc_upd ? "Update Toolchain (available)" : "Update Toolchain",
-                      ImVec2(-1, 0))) {
-        hub.start_job(HubJob::UpdateToolchain);
-        ImGui::CloseCurrentPopup();
-    }
-    ImGui::EndDisabled();
-
-    ImGui::Dummy(ImVec2(0, 10));
     {
         const std::string ver = retcomm::retcomm_app_version();
         const retcomm::RetcommInstallInfo install = retcomm::retcomm_install_info();
+        std::string tc_line;
+        bool tc_upd = false;
+        {
+            std::lock_guard<std::mutex> lock(hub.mu);
+            tc_upd = hub.toolchain_update_available;
+            tc_line = hub.toolchain_status;
+            if (tc_line.empty() && !hub.toolchain_current_version.empty())
+                tc_line = "Toolchain " + hub.toolchain_current_version;
+        }
         ImGui::TextColored(th.text_muted, "Launcher %s", ver.c_str());
         if (install.self_update_supported && !install.channel_id.empty())
             ImGui::TextColored(th.text_muted, "Channel %s", install.channel_id.c_str());
         if (!tc_line.empty())
             ImGui::TextColored(tc_upd ? th.warn : th.text_muted, "%s", tc_line.c_str());
     }
-
     ImGui::Dummy(ImVec2(0, 10));
     if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
     close_modal_on_outside_click();
     ImGui::EndPopup();
 }
 
-void draw_scans_popup(HubModel& hub, const Theme& th) {
-    if (hub.pending_open_scans) {
-        ImGui::OpenPopup("Scans###scan_panel");
-        hub.pending_open_scans = false;
+void draw_library_popup(HubModel& hub, const Theme& th, SDL_Window* window) {
+    if (hub.pending_open_library) {
+        // Prefill from the platform the user is browsing (Titles view).
+        if (hub.library_nav == retcomm::hub::LibraryNav::Titles &&
+            !hub.library_platform.empty()) {
+            hub.library_import_platform = hub.library_platform;
+            hub.scans_platform_filter = hub.library_platform;
+        }
+        ImGui::OpenPopup("Library###library_panel");
+        hub.pending_open_library = false;
     }
 
     // Only set next-window pos/size when this popup will actually begin — otherwise
     // SetNextWindow* leaks onto the following modal in the frame.
-    if (!ImGui::IsPopupOpen("Scans###scan_panel")) return;
-    constexpr float kScansW = 420.f;
+    if (!ImGui::IsPopupOpen("Library###library_panel")) return;
+    constexpr float kLibW = 420.f;
     center_modal_next();
-    ImGui::SetNextWindowSizeConstraints(ImVec2(kScansW, 0.f), ImVec2(kScansW, FLT_MAX));
-    ImGui::SetNextWindowSize(ImVec2(kScansW, 0.f), ImGuiCond_Appearing);
-    if (!ImGui::BeginPopupModal("Scans###scan_panel", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+    ImGui::SetNextWindowSizeConstraints(ImVec2(kLibW, 0.f), ImVec2(kLibW, FLT_MAX));
+    ImGui::SetNextWindowSize(ImVec2(kLibW, 0.f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Library###library_panel", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
         return;
 
-    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextUnformatted("SCANS");
-    ImGui::PopStyleColor();
-
     const bool busy = hub.job_running.load();
+    bool file_busy = false;
+    {
+        std::lock_guard<std::mutex> lock(hub.file_pick_mu);
+        file_busy = hub.file_pick_busy;
+    }
 
-    // Catalog platforms that have titles (sorted).
     std::vector<std::string> plats;
     {
-        std::map<std::string, bool> seen;
+        std::unordered_set<std::string> seen;
         for (const auto& t : hub.catalog.titles) {
-            if (t.platform.empty()) continue;
-            if (seen.emplace(t.platform, true).second) plats.push_back(t.platform);
+            if (t.platform.empty() || !seen.insert(t.platform).second) continue;
+            plats.push_back(t.platform);
         }
         std::sort(plats.begin(), plats.end(), [](const std::string& a, const std::string& b) {
             return std::string(platform_display_name(a)) < std::string(platform_display_name(b));
         });
     }
-    // Drop a stale filter if the catalog no longer has that platform.
+    if (!hub.library_import_platform.empty() &&
+        std::find(plats.begin(), plats.end(), hub.library_import_platform) == plats.end())
+        hub.library_import_platform.clear();
     if (!hub.scans_platform_filter.empty() &&
         std::find(plats.begin(), plats.end(), hub.scans_platform_filter) == plats.end())
         hub.scans_platform_filter.clear();
 
-    ImGui::Dummy(ImVec2(0, 4));
-    ImGui::TextColored(th.text_muted, "Platform");
+    ImGui::TextColored(th.text_muted, "Add files");
     {
-        const char* preview = hub.scans_platform_filter.empty()
-                                  ? "All Platforms"
-                                  : platform_display_name(hub.scans_platform_filter);
-        ImGui::BeginDisabled(busy);
-        if (ImGui::BeginCombo("##scan_platform", preview)) {
+        const char* preview = hub.library_import_platform.empty()
+                                  ? "Select a Platform"
+                                  : platform_display_name(hub.library_import_platform);
+        ImGui::BeginDisabled(file_busy || busy);
+        if (ImGui::BeginCombo("##library_import_platform", preview)) {
+            for (const auto& p : plats) {
+                const bool sel = hub.library_import_platform == p;
+                if (ImGui::Selectable(platform_display_name(p), sel))
+                    hub.library_import_platform = p;
+                if (sel) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        const bool plat_ok = !hub.library_import_platform.empty();
+        ImGui::BeginDisabled(!plat_ok);
+        if (ImGui::Button("Import ROM", ImVec2(-1, 0))) {
+            const auto exts = rom_exts_for_platform(hub.catalog, hub.library_import_platform);
+            begin_file_pick(hub, window, retcomm::hub::FilePickKind::ImportRom,
+                            hub.library_import_platform, "ROM files", exts, /*allow_many=*/true);
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::Button("Import save file", ImVec2(-1, 0))) {
+            const auto exts = save_exts_for_platform(hub.catalog, hub.library_import_platform);
+            begin_file_pick(hub, window, retcomm::hub::FilePickKind::ImportSave,
+                            hub.library_import_platform, "Save files", exts, /*allow_many=*/false);
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::Button("Import BIOS", ImVec2(-1, 0))) {
+            const auto exts = bios_exts_for_platform(hub.library_import_platform);
+            begin_file_pick(hub, window, retcomm::hub::FilePickKind::ImportBios,
+                            hub.library_import_platform, "BIOS files", exts, /*allow_many=*/false);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Copies into your library / saves / BIOS folders, then scans new files for that "
+            "platform. Multi-track discs: select the .cue and .bin tracks together.");
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Dummy(ImVec2(0, 10));
+    ImGui::Separator();
+    ImGui::TextColored(th.text_muted, "Advanced");
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextWrapped(
+        "For files you already placed in your folders, or to drop deleted entries.");
+    ImGui::PopStyleColor();
+    {
+        const char* scope_preview = hub.scans_platform_filter.empty()
+                                        ? "All Platforms"
+                                        : platform_display_name(hub.scans_platform_filter);
+        ImGui::BeginDisabled(busy || file_busy);
+        if (ImGui::BeginCombo("##library_advanced_scope", scope_preview)) {
             if (ImGui::Selectable("All Platforms", hub.scans_platform_filter.empty()))
                 hub.scans_platform_filter.clear();
             for (const auto& p : plats) {
@@ -1309,25 +1483,24 @@ void draw_scans_popup(HubModel& hub, const Theme& th) {
             }
             ImGui::EndCombo();
         }
+        if (ImGui::Button("Scan new files", ImVec2(-1, 0))) {
+            hub.pending_scan_missing_rom_id.clear();
+            hub.start_job(HubJob::ScanRoms);
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::Button("Clean missing files", ImVec2(-1, 0))) {
+            hub.start_job(HubJob::PurgeMissingFiles);
+            ImGui::CloseCurrentPopup();
+        }
+        if (ImGui::Button("Full rebuild index…", ImVec2(-1, 0)))
+            ImGui::OpenPopup("Full rebuild###confirm_full_rescan");
         ImGui::EndDisabled();
     }
 
     ImGui::Dummy(ImVec2(0, 10));
-    ImGui::BeginDisabled(busy);
-    if (ImGui::Button("Quick Scan", ImVec2(-1, 0))) {
-        hub.pending_scan_missing_rom_id.clear();
-        hub.start_job(HubJob::ScanRoms);
-    }
-    if (ImGui::Button("Full Rescan", ImVec2(-1, 0)))
-        ImGui::OpenPopup("Full rescan###confirm_full_rescan");
-    if (ImGui::Button("Remove Missing Files From DB", ImVec2(-1, 0)))
-        hub.start_job(HubJob::PurgeMissingFiles);
-    ImGui::EndDisabled();
-
-    ImGui::Dummy(ImVec2(0, 10));
     if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
 
-    if (ImGui::BeginPopupModal("Full rescan###confirm_full_rescan", nullptr,
+    if (ImGui::BeginPopupModal("Full rebuild###confirm_full_rescan", nullptr,
                                ImGuiWindowFlags_AlwaysAutoResize)) {
         ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 360.f);
         if (hub.scans_platform_filter.empty()) {
@@ -1342,7 +1515,7 @@ void draw_scans_popup(HubModel& hub, const Theme& th) {
         }
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0, 8));
-        if (accent_button("Rescan", th, ImVec2(120, 0))) {
+        if (accent_button("Rebuild", th, ImVec2(120, 0))) {
             hub.pending_scan_missing_rom_id.clear();
             hub.start_job(HubJob::FullScanRoms);
             ImGui::CloseCurrentPopup();
@@ -1436,7 +1609,7 @@ void draw_welcome_panel(BoxartCache& boxart, const Theme& th) {
     ImGui::EndChild();
 }
 
-void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
+void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window* window) {
     const bool job_busy = hub.job_running.load();
     const bool install_op = job_busy && retcomm::hub::hub_job_is_install(hub.job);
     // Any exclusive worker job blocks starting another install/scan/mutate.
@@ -1504,19 +1677,18 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
             ImGui::PushStyleColor(ImGuiCol_Text, th.warn);
             if (row.has_rom_identity) {
                 ImGui::TextWrapped(
-                    "No verified .cue / ROM in your library yet. Build & Install will offer a "
+                    "No verified .cue / ROM in your library yet. Install will offer a "
                     "quick scan for %s%s.",
                     platform_display_name(row.platform),
                     row.romm_ready ? ", or a RomM download" : "");
             } else {
                 ImGui::TextWrapped(
-                    "Match a verified .cue / ROM in your library before Build & Install.");
+                    "Match a verified .cue / ROM in your library before Install.");
             }
             ImGui::PopStyleColor();
         }
         ImGui::BeginDisabled(block_title_mutate || (!row.has_rom && !row.has_rom_identity));
-        if (accent_button(row.install_dir_present ? "Retry Build & Install" : "Build & Install", th,
-                          ImVec2(-1, 0))) {
+        if (good_button(row.install_dir_present ? "Reinstall" : "Install", th, ImVec2(-1, 0))) {
             // Purges stale DB paths when the matched dump is gone, then prompts
             // for Quick Scan / RomM (same chooser as a never-matched title).
             if (!hub.prepare_build_rom_or_prompt(row.id))
@@ -1530,7 +1702,7 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
         ImGui::EndDisabled();
     } else {
         ImGui::BeginDisabled(block_title_mutate);
-        if (accent_button(row.install_dir_present ? "Retry Install" : "Install", th, ImVec2(-1, 0)))
+        if (good_button(row.install_dir_present ? "Reinstall" : "Install", th, ImVec2(-1, 0)))
             hub.start_job(HubJob::Install, row.id);
         if (row.can_wine_install && !has_native_install) {
             if (ImGui::Button("Install with WINE", ImVec2(-1, 0)))
@@ -1539,38 +1711,33 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
         ImGui::EndDisabled();
     }
 
-    // Saves / memcards sit under Play; ROM paths live in Manage Data.
+    // Slot selection under Play; install lifecycle in Manage Game Data.
     if (row.installed) {
         ImGui::Dummy(ImVec2(0, 8));
-        draw_detail_save_controls(hub, row, th);
+        draw_detail_save_controls(hub, row, th, block_title_mutate, window);
     }
 
-    // Folder / uninstall and RomM actions live in centered modals.
     ImGui::Dummy(ImVec2(0, 12));
-    const bool show_romm = row.romm_ready;
-    const float gap = show_romm ? 8.f : 0.f;
-    const float manage_w =
-        show_romm ? (ImGui::GetContentRegionAvail().x - gap) * 0.5f : -1.f;
     ImGui::BeginDisabled(install_op);
-    if (ImGui::Button("Manage Data", ImVec2(manage_w, 0)))
-        ImGui::OpenPopup("Manage Data###detail_manage_data");
+    if (ImGui::Button("Manage Game Data", ImVec2(-1, 0)))
+        ImGui::OpenPopup("Manage Game Data###detail_manage_game");
     ImGui::EndDisabled();
-    if (show_romm) {
-        ImGui::SameLine(0, gap);
-        ImGui::BeginDisabled(block_title_mutate);
-        if (accent_button("RomM Sync", th, ImVec2(manage_w, 0)))
-            ImGui::OpenPopup("RomM Sync###detail_romm_sync");
-        ImGui::EndDisabled();
-    }
 
-    draw_detail_manage_data_popup(hub, row, th, block_title_mutate);
-    if (show_romm) draw_detail_romm_sync_popup(hub, row, th, block_title_mutate);
+    draw_detail_manage_game_popup(hub, row, th, block_title_mutate);
 
-    // Seldom-touched: BIOS just above author. ROM / disc paths live in Manage Data.
+    // Seldom-touched: BIOS just above author.
     if (row.needs_bios || row.supports_openbios) {
         ImGui::Dummy(ImVec2(0, 16));
         ImGui::TextColored(th.text_muted, "BIOS");
-        if (!row.bios_choice_ids.empty()) {
+        int dump_count = 0;
+        bool has_openbios_opt = false;
+        for (const auto& id : row.bios_choice_ids) {
+            if (id == retcomm::kOpenBiosChoice) has_openbios_opt = true;
+            else ++dump_count;
+        }
+        const bool show_bios_combo =
+            static_cast<int>(row.bios_choice_ids.size()) > 1; // conflict / choice
+        if (show_bios_combo) {
             const char* preview =
                 (row.preferred_bios_index >= 0 &&
                  row.preferred_bios_index < static_cast<int>(row.bios_choice_labels.size()))
@@ -1593,12 +1760,22 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
             }
             if (row.bios_choice == retcomm::kOpenBiosChoice) {
                 ImGui::TextColored(th.text_muted,
-                                   "OpenBIOS regenerates at Build & Install (no dump needed).");
+                                   "OpenBIOS regenerates at Install (no dump needed).");
             }
+        } else if (dump_count == 1) {
+            const char* label =
+                (row.preferred_bios_index >= 0 &&
+                 row.preferred_bios_index < static_cast<int>(row.bios_choice_labels.size()))
+                    ? row.bios_choice_labels[static_cast<size_t>(row.preferred_bios_index)].c_str()
+                    : "matched";
+            ImGui::TextColored(th.good, "Using %s", label);
+        } else if (has_openbios_opt) {
+            ImGui::TextColored(th.good, "Using OpenBIOS");
+            ImGui::TextColored(th.text_muted, "Regenerates at Install (no dump needed).");
         } else if (row.has_bios) {
             ImGui::TextColored(th.good, "BIOS matched");
         } else {
-            ImGui::TextColored(th.warn, "Missing — run Quick Scan / Full Rescan");
+            ImGui::TextColored(th.warn, "Missing — Import BIOS from Library");
             if (row.supports_openbios)
                 ImGui::TextColored(th.text_muted, "Or use OpenBIOS after a catalog refresh.");
         }
@@ -1642,7 +1819,7 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th) {
         if (!row.expected_binary.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
             ImGui::TextWrapped(
-                "Looking for executable \"%s\". Use Manage Data → Open Folder to fix "
+                "Looking for executable \"%s\". Use Manage Game Data → Open Folder to fix "
                 "setup, then Install again.",
                 row.expected_binary.c_str());
             ImGui::PopStyleColor();
@@ -1707,7 +1884,9 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     ImGui::Dummy(ImVec2(0, 12));
     ImGui::Separator();
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextWrapped("Library scans (ROM + BIOS) are under Scans in the top bar.");
+    ImGui::TextWrapped(
+        "Add ROMs / BIOS / saves, refresh folders, or clean missing files from the Library "
+        "button in the top bar.");
     ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0, 10));
@@ -1728,7 +1907,7 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     ImGui::TextWrapped(
         "Hide catalog titles that do not have a ROM available — neither on your local ROM "
         "library path nor (when scanned) on RomM. Installed titles stay visible. Save, then "
-        "use Build & Install / RomM sync so remote-only matches appear.");
+        "use Install / RomM sync so remote-only matches appear.");
     ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0, 8));
@@ -1752,8 +1931,10 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     ImGui::Dummy(ImVec2(0, 8));
     {
         const bool busy = hub.job_running.load();
+        constexpr float kGap = 8.f;
+        const float btn_w = (ImGui::GetContentRegionAvail().x - kGap) * 0.5f;
         ImGui::BeginDisabled(busy);
-        if (ImGui::Button("Clean Unlisted Installs…", ImVec2(-1, 0))) {
+        if (ImGui::Button("Clean Unlisted Installs…", ImVec2(btn_w, 0))) {
             const size_t n = hub.refresh_orphan_installs();
             if (n == 0) {
                 hub.set_status("No installs outside the catalog");
@@ -1762,48 +1943,56 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
                 hub.orphan_prompt_pending.store(true);
             }
         }
+        ImGui::SameLine(0, kGap);
+        if (ImGui::Button("Clean Old Update Files", ImVec2(btn_w, 0)))
+            hub.start_job(HubJob::CleanupOldReleases);
         ImGui::EndDisabled();
         ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
         ImGui::TextWrapped(
-            "Find apps/ installs that are no longer in the catalog (after Update Catalog) and "
-            "offer to remove them.");
+            "Unlisted: remove apps/ installs no longer in the catalog. Old update files: "
+            "promote saves/config into the current release, then delete leftover "
+            "releases/<old-tag>/ folders.");
         ImGui::PopStyleColor();
     }
 
     ImGui::Dummy(ImVec2(0, 10));
-    ImGui::TextColored(th.text_muted, "Platform folders");
-    ImGui::TextWrapped("Catalog platform slug → folder name(s) under the library root "
-                       "(e.g. psx → ps, ps1).");
-    ImGui::Separator();
+    if (ImGui::CollapsingHeader("Advanced folder mapping")) {
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Catalog platform slug → folder name(s) under the library / BIOS / saves roots "
+            "(e.g. psx → ps, ps1). Most setups can leave the defaults.");
+        ImGui::PopStyleColor();
+        ImGui::Separator();
 
-    if (ImGui::BeginTable("platform_folders", 3,
-                          ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
-        ImGui::TableSetupColumn("platform", ImGuiTableColumnFlags_WidthFixed, 120.f);
-        ImGui::TableSetupColumn("folders", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("##rm", ImGuiTableColumnFlags_WidthFixed, 36.f);
-        ImGui::TableHeadersRow();
-        for (int i = 0; i < static_cast<int>(hub.settings.platform_folders.size()); ++i) {
-            auto& row = hub.settings.platform_folders[static_cast<size_t>(i)];
-            ImGui::PushID(i);
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            if (ImGui::InputText("##plat", row.platform, sizeof(row.platform)))
-                hub.settings.dirty = true;
-            ImGui::TableNextColumn();
-            if (ImGui::InputText("##folders", row.folders, sizeof(row.folders)))
-                hub.settings.dirty = true;
-            ImGui::TableNextColumn();
-            if (ImGui::Button("X")) {
-                hub.settings.platform_folders.erase(hub.settings.platform_folders.begin() + i);
-                hub.settings.dirty = true;
+        if (ImGui::BeginTable("platform_folders", 3,
+                              ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+            ImGui::TableSetupColumn("platform", ImGuiTableColumnFlags_WidthFixed, 120.f);
+            ImGui::TableSetupColumn("folders", ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn("##rm", ImGuiTableColumnFlags_WidthFixed, 36.f);
+            ImGui::TableHeadersRow();
+            for (int i = 0; i < static_cast<int>(hub.settings.platform_folders.size()); ++i) {
+                auto& row = hub.settings.platform_folders[static_cast<size_t>(i)];
+                ImGui::PushID(i);
+                ImGui::TableNextRow();
+                ImGui::TableNextColumn();
+                if (ImGui::InputText("##plat", row.platform, sizeof(row.platform)))
+                    hub.settings.dirty = true;
+                ImGui::TableNextColumn();
+                if (ImGui::InputText("##folders", row.folders, sizeof(row.folders)))
+                    hub.settings.dirty = true;
+                ImGui::TableNextColumn();
+                if (ImGui::Button("X")) {
+                    hub.settings.platform_folders.erase(hub.settings.platform_folders.begin() + i);
+                    hub.settings.dirty = true;
+                    ImGui::PopID();
+                    break;
+                }
                 ImGui::PopID();
-                break;
             }
-            ImGui::PopID();
+            ImGui::EndTable();
         }
-        ImGui::EndTable();
+        if (ImGui::Button("Add platform row")) hub.add_platform_folder_row();
     }
-    if (ImGui::Button("Add platform row")) hub.add_platform_folder_row();
 
     ImGui::Dummy(ImVec2(0, 12));
     if (accent_button("Save", th, ImVec2(160, 0))) {
@@ -1827,13 +2016,72 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     ImGui::EndChild();
 }
 
-void draw_setup_wizard(HubModel& hub, const Theme& th, SDL_Window* window) {
+bool draw_setup_path_card(BoxartCache& boxart, const Theme& th, const char* id,
+                          const char* title, const char* subtitle, const char* asset_file,
+                          float card_w, float card_h) {
+    ImGui::PushID(id);
+    const ImVec2 card_min = ImGui::GetCursorScreenPos();
+    const ImVec2 card_max(card_min.x + card_w, card_min.y + card_h);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    const bool hovered = ImGui::IsMouseHoveringRect(card_min, card_max);
+    const ImU32 fill = ImGui::ColorConvertFloat4ToU32(hovered ? th.panel_hovered : th.panel);
+    const ImU32 border =
+        ImGui::ColorConvertFloat4ToU32(hovered ? th.accent_dim : th.border);
+    dl->AddRectFilled(card_min, card_max, fill, th.radius_lg);
+    dl->AddRect(card_min, card_max, border, th.radius_lg, 0, hovered ? 2.f : 1.f);
+
+    const fs::path icon = find_hub_asset_file("setup", asset_file);
+    const BoxartTexture* tex =
+        icon.empty() ? nullptr : boxart.get(std::string("setup:") + id, icon);
+    const float pad = 18.f;
+    const float icon_max = std::min(card_w - pad * 2.f, card_h * 0.48f);
+    float icon_w = 0.f, icon_h = 0.f;
+    if (tex && tex->gl_id && tex->width > 0 && tex->height > 0) {
+        const ImVec2 fit = contain_size(static_cast<float>(tex->width),
+                                        static_cast<float>(tex->height), icon_max, icon_max);
+        icon_w = fit.x;
+        icon_h = fit.y;
+        const float ix = card_min.x + (card_w - icon_w) * 0.5f;
+        const float iy = card_min.y + pad + 8.f;
+        dl->AddImage((ImTextureID)(intptr_t)tex->gl_id, ImVec2(ix, iy),
+                     ImVec2(ix + icon_w, iy + icon_h));
+    }
+
+    const ImVec2 title_sz = ImGui::CalcTextSize(title);
+    const float text_y = card_min.y + pad + 8.f + icon_max + 14.f;
+    dl->AddText(ImVec2(card_min.x + (card_w - title_sz.x) * 0.5f, text_y),
+                ImGui::ColorConvertFloat4ToU32(th.text), title);
+
+    ImGui::SetCursorScreenPos(ImVec2(card_min.x + pad, text_y + title_sz.y + 8.f));
+    ImGui::PushTextWrapPos(card_min.x + card_w - pad);
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextWrapped("%s", subtitle);
+    ImGui::PopStyleColor();
+    ImGui::PopTextWrapPos();
+
+    ImGui::SetCursorScreenPos(card_min);
+    const bool clicked = ImGui::InvisibleButton("##card", ImVec2(card_w, card_h));
+    ImGui::PopID();
+    return clicked;
+}
+
+void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window* window) {
     if (!hub.show_setup) return;
 
     ImGui::OpenPopup("Welcome to RetComM###setup_wizard");
-    const float wiz_w = hub.setup_step == 0 ? 560.f : 640.f;
-    ImGui::SetNextWindowSize(ImVec2(wiz_w, hub.setup_step == 0 ? 0.f : 520.f),
-                             ImGuiCond_Appearing);
+    float wiz_w = 620.f;
+    float wiz_h = 0.f;
+    if (hub.setup_path == SetupPath::Chooser) {
+        wiz_w = 640.f;
+        wiz_h = 0.f;
+    } else if (hub.setup_path == SetupPath::Easy) {
+        wiz_w = 560.f;
+    } else {
+        wiz_w = hub.setup_step == 0 ? 560.f : 640.f;
+        wiz_h = hub.setup_step == 0 ? 0.f : 520.f;
+    }
+    ImGui::SetNextWindowSize(ImVec2(wiz_w, wiz_h), ImGuiCond_Appearing);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
                             ImVec2(0.5f, 0.5f));
     if (!ImGui::BeginPopupModal("Welcome to RetComM###setup_wizard", nullptr,
@@ -1846,7 +2094,18 @@ void draw_setup_wizard(HubModel& hub, const Theme& th, SDL_Window* window) {
         hub.setup_confirm_create_roots = false;
     };
 
-    if (hub.setup_confirm_create_roots) {
+    auto skip_setup = [&]() {
+        std::string err;
+        if (!hub.complete_setup(&err)) {
+            hub.append_log("setup marker failed: " + err);
+            hub.set_status("Setup marker failed");
+        } else {
+            hub.set_status("Setup skipped — set library root in Library settings");
+            hub.append_log("First-time setup skipped");
+        }
+    };
+
+    if (hub.setup_confirm_create_roots && hub.setup_path == SetupPath::Advanced) {
         ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 520.f);
         ImGui::TextWrapped("These folders do not exist yet. Create them now?");
         ImGui::PopTextWrapPos();
@@ -1874,7 +2133,91 @@ void draw_setup_wizard(HubModel& hub, const Theme& th, SDL_Window* window) {
         return;
     }
 
-    if (hub.setup_step == 0) {
+    if (hub.setup_path == SetupPath::Chooser) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 600.f);
+        ImGui::TextWrapped("How do you want to set up your library?");
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 14));
+
+        const float gap = 16.f;
+        const float card_w = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
+        const float card_h = 280.f;
+        if (draw_setup_path_card(boxart, th, "easy", "Easy Setup",
+                                 "Pick one Emulation folder. RetComM creates roms, bios, "
+                                 "and saves under it with default platform folders.",
+                                 "setup_easy_rocket.png", card_w, card_h)) {
+            hub.setup_path = SetupPath::Easy;
+            hub.apply_suggested_emulation_root(/*overwrite_nonempty=*/false);
+            hub.apply_roots_from_emulation_parent();
+        }
+        ImGui::SameLine(0.f, gap);
+        if (draw_setup_path_card(boxart, th, "advanced", "Advanced Setup",
+                                 "Choose roms, bios, and saves separately. Optionally connect "
+                                 "RomM and edit platform folder mappings.",
+                                 "setup_advanced_wrench.png", card_w, card_h)) {
+            hub.setup_path = SetupPath::Advanced;
+            hub.setup_step = 0;
+            hub.apply_suggested_library_roots(/*overwrite_nonempty=*/false);
+        }
+
+        ImGui::Dummy(ImVec2(0, 16));
+        if (ImGui::Button("Skip for now", ImVec2(140, 0))) skip_setup();
+    } else if (hub.setup_path == SetupPath::Easy) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 520.f);
+        ImGui::TextWrapped(
+            "Choose your Emulation folder. RetComM will use …/roms, …/bios, and …/saves "
+            "under it, create any that are missing, and seed default platform folders.");
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 10));
+        if (ImGui::Button("Use ~/Emulation")) {
+            hub.apply_suggested_emulation_root(/*overwrite_nonempty=*/true);
+            hub.apply_roots_from_emulation_parent();
+            hub.set_status("Suggested Emulation folder applied");
+        }
+        ImGui::Dummy(ImVec2(0, 10));
+        if (path_field_with_browse("Emulation folder", "##setup_emulation_root",
+                                   hub.setup_emulation_root, sizeof(hub.setup_emulation_root),
+                                   hub, window, FolderPickTarget::EmulationRoot, th)) {
+            hub.apply_roots_from_emulation_parent();
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        if (hub.setup_emulation_root[0] != '\0') {
+            const fs::path emu(hub.setup_emulation_root);
+            const std::string roms = (emu / "roms").string();
+            const std::string bios = (emu / "bios").string();
+            const std::string saves = (emu / "saves").string();
+            ImGui::TextWrapped("Will use:\n  %s\n  %s\n  %s", roms.c_str(), bios.c_str(),
+                               saves.c_str());
+        } else {
+            ImGui::TextWrapped("Pick a parent folder (for example ~/Emulation).");
+        }
+        ImGui::PopStyleColor();
+
+        const bool emu_ok = hub.setup_emulation_root[0] != '\0';
+        ImGui::Dummy(ImVec2(0, 16));
+        if (ImGui::Button("Back", ImVec2(120, 0))) {
+            hub.setup_path = SetupPath::Chooser;
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!emu_ok);
+        if (accent_button("Finish", th, ImVec2(160, 0))) {
+            std::string err;
+            if (!hub.finish_easy_setup(&err)) {
+                hub.append_log("easy setup failed: " + err);
+                hub.set_status("Easy setup failed");
+            } else {
+                hub.set_status("Setup complete");
+                hub.append_log("First-time easy setup saved");
+            }
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Skip for now", ImVec2(140, 0))) skip_setup();
+        if (!emu_ok) {
+            ImGui::Dummy(ImVec2(0, 6));
+            ImGui::TextColored(th.warn, "Choose an Emulation folder to continue.");
+        }
+    } else if (hub.setup_step == 0) {
         ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 520.f);
         ImGui::TextWrapped(
             "Step 1 of 2 — Set your ROM library, BIOS, and game-saves folders. Suggested "
@@ -1938,6 +2281,12 @@ void draw_setup_wizard(HubModel& hub, const Theme& th, SDL_Window* window) {
 
         const bool library_ok = hub.settings.library_root[0] != '\0';
         ImGui::Dummy(ImVec2(0, 16));
+        if (ImGui::Button("Back", ImVec2(120, 0))) {
+            hub.setup_path = SetupPath::Chooser;
+            hub.setup_confirm_create_roots = false;
+            hub.setup_missing_roots.clear();
+        }
+        ImGui::SameLine();
         ImGui::BeginDisabled(!library_ok);
         if (accent_button("Next", th, ImVec2(160, 0))) {
             hub.collect_missing_setup_roots();
@@ -1949,16 +2298,7 @@ void draw_setup_wizard(HubModel& hub, const Theme& th, SDL_Window* window) {
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::Button("Skip for now", ImVec2(140, 0))) {
-            std::string err;
-            if (!hub.complete_setup(&err)) {
-                hub.append_log("setup marker failed: " + err);
-                hub.set_status("Setup marker failed");
-            } else {
-                hub.set_status("Setup skipped — set library root in Library settings");
-                hub.append_log("First-time setup skipped");
-            }
-        }
+        if (ImGui::Button("Skip for now", ImVec2(140, 0))) skip_setup();
         if (!library_ok) {
             ImGui::Dummy(ImVec2(0, 6));
             ImGui::TextColored(th.warn, "Choose a ROM library folder to continue.");
@@ -2049,8 +2389,8 @@ void draw_setup_scan_prompt(HubModel& hub, const Theme& th) {
 
     ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 420.f);
     ImGui::TextWrapped(
-        "Folder layout is ready. Scan your ROM library now? RetComM will quietly refresh "
-        "the catalog first so title matches are available immediately.");
+        "Folder layout is ready. Scan your library now? This indexes ROMs, BIOS, and save "
+        "files (and refreshes the catalog first).");
     ImGui::PopTextWrapPos();
     ImGui::Dummy(ImVec2(0, 14));
     if (accent_button("Scan now", th, ImVec2(140, 0))) {
@@ -2062,7 +2402,7 @@ void draw_setup_scan_prompt(HubModel& hub, const Theme& th) {
     ImGui::SameLine();
     if (ImGui::Button("Not now", ImVec2(120, 0))) {
         hub.show_setup_scan_prompt = false;
-        hub.set_status("Setup complete — scan later from Scans");
+        hub.set_status("Setup complete — refresh later from Library");
         ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
@@ -2114,7 +2454,7 @@ void draw_romm_settings_panel(HubModel& hub, const Theme& th) {
     ImGui::Separator();
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
     ImGui::TextWrapped(
-        "RomM matching is on-demand during Build & Install. Enable Sync Boxart here, then "
+        "RomM matching is on-demand during Install. Enable Sync Boxart here, then "
         "use Find Missing Boxart in Library Settings to refresh covers.");
     ImGui::PopStyleColor();
 
@@ -2141,6 +2481,32 @@ void draw_romm_settings_panel(HubModel& hub, const Theme& th) {
 }
 
 
+void draw_log_collapsed_bar(HubModel& hub, const Theme& th) {
+    constexpr float kBarH = 40.f;
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.f, 6.f));
+    ImGui::BeginChild("log_collapsed", ImVec2(0, kBarH), ImGuiChildFlags_Borders);
+    // Compact Show button so it sits inside the bar with a little breathing room.
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.f, 3.f));
+    const float btn_h = ImGui::GetFrameHeight();
+    const float y = std::max(0.f, (ImGui::GetContentRegionAvail().y - btn_h) * 0.5f);
+    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + y);
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextUnformatted("ACTIVITY");
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    ImGui::TextColored(th.text_muted, "(collapsed)");
+    {
+        constexpr float kShowW = 64.f;
+        const float right = ImGui::GetWindowContentRegionMax().x;
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX() + 8.f, right - kShowW));
+        if (ImGui::Button("Show", ImVec2(kShowW, 0))) hub.log_expanded = true;
+    }
+    ImGui::PopStyleVar(); // FramePadding
+    ImGui::EndChild();
+    ImGui::PopStyleVar(); // WindowPadding
+}
+
 void draw_log(HubModel& hub, const Theme& th, float height) {
     if (height < 60.f) height = 60.f;
     ImGui::BeginChild("log", ImVec2(0, height), ImGuiChildFlags_Borders);
@@ -2159,9 +2525,15 @@ void draw_log(HubModel& hub, const Theme& th, float height) {
 
     ImGui::SameLine();
     {
-        const float copy_w = ImGui::CalcTextSize("Copy").x + ImGui::GetStyle().FramePadding.x * 2.f;
+        const float hide_w =
+            ImGui::CalcTextSize("Hide").x + ImGui::GetStyle().FramePadding.x * 2.f;
+        const float copy_w =
+            ImGui::CalcTextSize("Copy").x + ImGui::GetStyle().FramePadding.x * 2.f;
+        const float gap = ImGui::GetStyle().ItemSpacing.x;
         const float right = ImGui::GetWindowContentRegionMax().x;
-        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), right - copy_w));
+        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), right - hide_w - gap - copy_w));
+        if (ImGui::SmallButton("Hide")) hub.log_expanded = false;
+        ImGui::SameLine();
         if (ImGui::SmallButton("Copy")) {
             // Tail only — recent errors/status matter more than early startup noise.
             constexpr size_t kCopyLines = 100;
@@ -2399,19 +2771,27 @@ int main(int argc, char** argv) {
 
         draw_marquee(hub, th, ImGui::GetContentRegionAvail().x);
 
-        // Body + splitter + activity must fit the remaining region exactly — ImGui adds
+        // Body + optional activity log must fit the remaining region exactly — ImGui adds
         // ItemSpacing between each, so subtract that or the outer window scrolls.
         static float log_h_pref = 140.f; // manual height; window grow restores up to this
         const float avail_y = ImGui::GetContentRegionAvail().y;
         constexpr float kSplitH = 6.f;
         constexpr float kMinLog = 64.f;
+        constexpr float kCollapsedLog = 40.f;
         constexpr float kMinBody = 160.f;
         const float gap_y = ImGui::GetStyle().ItemSpacing.y;
-        const float chrome = kSplitH + gap_y * 2.f;
-        const float max_log = std::max(kMinLog, avail_y - kMinBody - chrome);
-        // Shrink with the window when needed; never auto-grow past the user's preference.
-        float log_h = std::clamp(log_h_pref, kMinLog, max_log);
-        const float body_h = std::max(kMinBody, avail_y - log_h - chrome);
+        float log_h = 0.f;
+        float body_h = avail_y;
+        if (hub.log_expanded) {
+            const float chrome = kSplitH + gap_y * 2.f;
+            const float max_log = std::max(kMinLog, avail_y - kMinBody - chrome);
+            log_h = std::clamp(log_h_pref, kMinLog, max_log);
+            body_h = std::max(kMinBody, avail_y - log_h - chrome);
+        } else {
+            const float chrome = gap_y;
+            log_h = kCollapsedLog;
+            body_h = std::max(kMinBody, avail_y - log_h - chrome);
+        }
 
         ImGui::BeginChild("body", ImVec2(0, body_h), ImGuiChildFlags_None);
 
@@ -2442,18 +2822,58 @@ int main(int argc, char** argv) {
 
             ImGui::SameLine();
             ImGui::BeginChild("right", ImVec2(right_w, 0), ImGuiChildFlags_None);
-            draw_detail(hub, boxart, th);
+            draw_detail(hub, boxart, th, window);
             ImGui::EndChild();
         }
 
         ImGui::EndChild(); // body
-        draw_log_splitter(log_h, log_h_pref, avail_y, th);
-        draw_log(hub, th, log_h);
-        draw_setup_wizard(hub, th, window);
+        if (hub.log_expanded) {
+            draw_log_splitter(log_h, log_h_pref, avail_y, th);
+            draw_log(hub, th, log_h);
+        } else {
+            draw_log_collapsed_bar(hub, th);
+        }
+        draw_setup_wizard(hub, boxart, th, window);
         draw_setup_scan_prompt(hub, th);
         draw_menu_popup(hub, th, window);
-        draw_scans_popup(hub, th);
-        draw_updates_popup(hub, th);
+        draw_library_popup(hub, th, window);
+
+        // Import / scan toasts.
+        {
+            static std::string toast_text;
+            static double toast_until = 0.0;
+            if (hub.toast_pending.exchange(false)) {
+                std::lock_guard<std::mutex> lock(hub.mu);
+                toast_text = hub.toast_message;
+                toast_until = ImGui::GetTime() + 4.5;
+            }
+            if (!toast_text.empty() && ImGui::GetTime() < toast_until) {
+                const ImGuiViewport* tvp = ImGui::GetMainViewport();
+                const ImVec2 ts = ImGui::CalcTextSize(toast_text.c_str(), nullptr, false, 420.f);
+                const float pad = 14.f;
+                const ImVec2 sz(std::min(440.f, ts.x + pad * 2.f), ts.y + pad * 2.f);
+                const ImVec2 pos(tvp->WorkPos.x + (tvp->WorkSize.x - sz.x) * 0.5f,
+                                 tvp->WorkPos.y + tvp->WorkSize.y - sz.y - 48.f);
+                ImGui::SetNextWindowPos(pos);
+                ImGui::SetNextWindowSize(sz);
+                ImGui::PushStyleColor(ImGuiCol_WindowBg, th.background2);
+                ImGui::PushStyleColor(ImGuiCol_Border, th.accent);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 8.f);
+                ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(pad, pad));
+                ImGui::Begin("##hub_toast", nullptr,
+                             ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoInputs |
+                                 ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoFocusOnAppearing |
+                                 ImGuiWindowFlags_NoSavedSettings);
+                ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + sz.x - pad * 2.f);
+                ImGui::TextColored(th.text, "%s", toast_text.c_str());
+                ImGui::PopTextWrapPos();
+                ImGui::End();
+                ImGui::PopStyleVar(2);
+                ImGui::PopStyleColor(2);
+            } else if (ImGui::GetTime() >= toast_until) {
+                toast_text.clear();
+            }
+        }
 
         if (hub.show_missing_rom_prompt) {
             ImGui::OpenPopup("ROM not found###missing_rom_prompt");
@@ -2477,22 +2897,22 @@ int main(int argc, char** argv) {
             ImGui::Dummy(ImVec2(0, 6));
             if (romm_ok) {
                 ImGui::TextWrapped(
-                    "No verified ROM is in your library yet. Quick-scan %s for a matching dump, "
+                    "No verified ROM is in your library yet. Rescan %s for a matching dump, "
                     "or download from RomM (multi-track discs include the full .cue + track set).",
                     plat_label);
             } else {
                 ImGui::TextWrapped(
-                    "No verified ROM is in your library yet. Quick-scan %s after adding the dump "
-                    "locally. Configure RomM Sync in Library Settings to enable download.",
+                    "No verified ROM is in your library yet. Add the dump locally (Menu → "
+                    "Import), then rescan %s. Configure RomM Sync Settings to enable download.",
                     plat_label);
             }
             ImGui::PopTextWrapPos();
             ImGui::Dummy(ImVec2(0, 10));
             const bool busy = hub.job_running.load() || tid.empty();
             ImGui::BeginDisabled(busy || plat.empty());
-            char scan_label[96];
-            std::snprintf(scan_label, sizeof(scan_label), "Quick Scan %s", plat_label);
-            if (accent_button(scan_label, th, ImVec2(-1, 0))) {
+            char scan_label[128];
+            std::snprintf(scan_label, sizeof(scan_label), "Rescan %s Library", plat_label);
+            if (good_button(scan_label, th, ImVec2(-1, 0))) {
                 hub.scans_platform_filter = plat;
                 hub.pending_scan_missing_rom_id = tid;
                 hub.start_job(HubJob::ScanRoms);
@@ -2500,7 +2920,7 @@ int main(int argc, char** argv) {
             }
             ImGui::EndDisabled();
             ImGui::BeginDisabled(busy || !romm_ok);
-            if (ImGui::Button("Download from RomM & Build", ImVec2(-1, 0))) {
+            if (romm_button("Download from RomM", th, ImVec2(-1, 0))) {
                 hub.start_job(HubJob::Install, tid, false, true);
                 ImGui::CloseCurrentPopup();
             }
@@ -2532,8 +2952,8 @@ int main(int argc, char** argv) {
             ImGui::TextWrapped("%s", prow ? prow->name.c_str() : tid.c_str());
             ImGui::Dummy(ImVec2(0, 6));
             ImGui::TextWrapped(
-                "Quick Scan did not find a verified dump for this title under %s. "
-                "Open the ROM folder to add the files, then run Quick Scan again "
+                "Refresh did not find a verified dump for this title under %s. "
+                "Open the ROM folder to add the files, then refresh again from Library "
                 "(or download from RomM if configured).",
                 plat_label);
             ImGui::PopTextWrapPos();
@@ -2558,7 +2978,7 @@ int main(int argc, char** argv) {
             ImGui::EndDisabled();
             const bool romm_ok = prow && prow->romm_ready && prow->has_rom_identity;
             ImGui::BeginDisabled(hub.job_running.load() || !romm_ok || tid.empty());
-            if (ImGui::Button("Download from RomM & Build", ImVec2(-1, 0))) {
+            if (romm_button("Download from RomM", th, ImVec2(-1, 0))) {
                 hub.start_job(HubJob::Install, tid, false, true);
                 ImGui::CloseCurrentPopup();
             }
@@ -2610,8 +3030,8 @@ int main(int argc, char** argv) {
             ImGui::EndPopup();
         }
 
-        // Launcher prompt first when both launcher + toolchain updates are pending.
-        // Avoid opening toolchain on the same frame (IsPopupOpen can lag OpenPopup).
+        // Update prompts in order: launcher → games → toolchain.
+        // Avoid opening the next modal on the same frame (IsPopupOpen can lag OpenPopup).
         const bool open_launcher_update = hub.launcher_update_prompt_pending.exchange(false);
         if (open_launcher_update) ImGui::OpenPopup("RetComM update###launcher_update");
         if (ImGui::BeginPopupModal("RetComM update###launcher_update", nullptr,
@@ -2644,9 +3064,41 @@ int main(int argc, char** argv) {
             ImGui::EndPopup();
         }
 
-        if (!open_launcher_update &&
-            !ImGui::IsPopupOpen("RetComM update###launcher_update") &&
-            !hub.launcher_update_prompt_pending.load() &&
+        const bool launcher_blocking =
+            open_launcher_update || ImGui::IsPopupOpen("RetComM update###launcher_update") ||
+            hub.launcher_update_prompt_pending.load();
+        const bool open_game_updates =
+            !launcher_blocking && hub.game_updates_prompt_pending.exchange(false);
+        if (open_game_updates) ImGui::OpenPopup("Game updates###game_updates");
+        if (ImGui::BeginPopupModal("Game updates###game_updates", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            int n = 0;
+            {
+                std::lock_guard<std::mutex> lock(hub.mu);
+                n = hub.game_updates_prompt_count;
+            }
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 380.f);
+            if (n == 1) {
+                ImGui::TextWrapped(
+                    "1 installed game has an update available.\n\n"
+                    "Open the title and use Update when you want to install it.");
+            } else {
+                ImGui::TextWrapped(
+                    "%d installed games have updates available.\n\n"
+                    "Open a title and use Update when you want to install it.",
+                    n);
+            }
+            ImGui::PopTextWrapPos();
+            ImGui::Dummy(ImVec2(0, 10));
+            if (ImGui::Button("OK", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+            close_modal_on_outside_click();
+            ImGui::EndPopup();
+        }
+
+        const bool games_blocking =
+            open_game_updates || ImGui::IsPopupOpen("Game updates###game_updates") ||
+            hub.game_updates_prompt_pending.load();
+        if (!launcher_blocking && !games_blocking &&
             hub.toolchain_prompt_pending.exchange(false))
             ImGui::OpenPopup("Toolchain update###toolchain_update");
         if (ImGui::BeginPopupModal("Toolchain update###toolchain_update", nullptr,

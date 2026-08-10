@@ -156,6 +156,26 @@ void stash_user_state_for_update(const Paths& paths, const Title& title,
 void restore_user_state(const fs::path& install_root, const fs::path& release_dir,
                         std::string* note = nullptr);
 
+// apps/<title>/current → releases/<tag> (empty if unset / missing).
+fs::path resolve_current_release_dir(const fs::path& install_root);
+// After a successful install/update: delete releases/<other-tag> dirs, keep only keep_tag.
+// Returns number of directories removed.
+size_t prune_old_release_dirs(const fs::path& install_root, const std::string& keep_tag,
+                              std::string* note = nullptr);
+
+struct OldReleaseCleanupResult {
+    bool ok = true;
+    int titles_scanned = 0;
+    int titles_cleaned = 0;
+    int dirs_removed = 0;
+    std::vector<std::string> messages;
+    std::string message;
+};
+
+// For each catalog install: stash/restore user state into the current release,
+// then delete sibling releases/<old-tag>/ folders left behind by updates.
+OldReleaseCleanupResult cleanup_old_release_dirs(const Paths& paths, const Catalog& catalog);
+
 // Fetch latest release tag for owner/repo (empty on failure).
 std::string fetch_latest_release_tag(const std::string& github_slug, std::string* error = nullptr,
                                      bool allow_prerelease = false);

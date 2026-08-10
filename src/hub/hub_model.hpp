@@ -62,6 +62,7 @@ enum class HubJob : int {
     UpdateToolchain,
     CleanupOrphans,
     CleanupOrphansPurge,
+    CleanupOldReleases,
 };
 
 // Title install/build/update family — mutually exclusive with library scans.
@@ -152,7 +153,7 @@ struct TitleRow {
     std::string preferred_save; // cart battery or memcard 1 id
     int preferred_save_index = -1;
     std::string preferred_save_card2; // memcard 2 id; "__blank__" = empty card
-    int preferred_save_card2_index = -1; // -1 = Blank card
+    int preferred_save_card2_index = -1; // -1 = Empty Card Slot
 
     // Catalog netplay (recomp-net). Populated when Title::supports_netplay().
     bool netplay_supported = false;
@@ -261,9 +262,17 @@ enum class FolderPickTarget : int {
     LibraryRoot,
     BiosRoot,
     SavesRoot,
+    EmulationRoot, // Easy setup: parent of roms/bios/saves
 };
 
-// Native file dialog for Menu → Import (callback may be off-thread).
+// First-run wizard path after the Easy / Advanced chooser.
+enum class SetupPath : int {
+    Chooser = 0,
+    Easy = 1,
+    Advanced = 2,
+};
+
+// Native file dialog for Library → Import (callback may be off-thread).
 enum class FilePickKind : int {
     None = 0,
     ImportRom,
@@ -297,20 +306,24 @@ struct HubModel {
     bool show_settings = false;
     bool show_romm_settings = false;
     bool show_setup = false; // first-time library/BIOS/RomM wizard
-    // Setup wizard: 0 = roots (+ optional RomM), 1 = platform folder mappings.
+    SetupPath setup_path = SetupPath::Chooser;
+    // Advanced wizard: 0 = roots (+ optional RomM), 1 = platform folder mappings.
     int setup_step = 0;
+    // Easy setup: Emulation parent folder (…/roms, …/bios, …/saves derived from this).
+    char setup_emulation_root[1024]{};
     // After Next on step 0: confirm creating missing roms/saves/bios roots.
     bool setup_confirm_create_roots = false;
     std::vector<std::string> setup_missing_roots; // absolute paths to create
     bool setup_create_platform_folders = true;
-    bool pending_open_scans = false;   // Top-bar Scans → open modal next frame
-    bool pending_open_updates = false; // Top-bar Updates → open modal next frame
+    bool pending_open_library = false; // Top-bar Library → open modal next frame
     bool pending_open_menu = false;    // Top-bar Menu → open modal next frame
     // After setup Finish: ask whether to scan the library now.
     bool show_setup_scan_prompt = false;
+    // Activity log collapsed by default; expand from the bottom bar.
+    bool log_expanded = false;
     // When set, ScanRoms/FullScanRoms quietly syncs the catalog first.
     bool job_prefetch_catalog = false;
-    // Scans modal platform filter (empty = all catalog platforms).
+    // Library modal Advanced scope (empty = all catalog platforms).
     std::string scans_platform_filter;
     SettingsDraft settings;
     RommSettingsDraft romm_settings;
@@ -338,8 +351,18 @@ struct HubModel {
     std::atomic<bool> launcher_update_prompt_pending{false};
     std::string launcher_current_version;
     std::string launcher_latest_tag;
-    // After idle: CheckUpdates (launcher → games → toolchain).
+    // After launcher prompt: summary when CheckUpdates finds outdated titles.
+    std::atomic<bool> game_updates_prompt_pending{false};
+    int game_updates_prompt_count = 0; // guarded by mu
+    // After idle: CheckUpdates (catalog → launcher → games → toolchain).
     bool pending_startup_update_check = false;
+    // Brief top-of-window notice (import / scan results). Main thread times display.
+    std::string toast_message; // guarded by mu
+    std::atomic<bool> toast_pending{false};
+    // After Import ROM/BIOS: toast when the follow-up scan finishes.
+    std::string pending_import_toast_name;
+    std::string pending_import_toast_platform;
+    std::string pending_import_toast_kind; // "rom" | "bios"
     // Play preflight: update available → confirm; else launch this id on main thread.
     std::atomic<bool> launch_update_prompt_pending{false};
     std::string launch_update_prompt_id; // guarded by mu
@@ -361,11 +384,12 @@ struct HubModel {
     std::string folder_pick_path;
     bool folder_pick_busy = false;
 
-    // Menu → Import platform + file picker.
-    std::string menu_import_platform; // empty = none selected
+    // Library modal → Import platform (empty = none selected; no "All").
+    std::string library_import_platform;
     std::mutex file_pick_mu;
     FilePickKind file_pick_kind = FilePickKind::None;
     std::string file_pick_platform;
+    std::string file_pick_title_id; // optional: ImportSave binds preferred for this title
     std::vector<std::string> file_pick_paths; // set by dialog callback
     bool file_pick_busy = false;
     // Filter strings must outlive SDL_ShowOpenFileDialog until the callback.
@@ -376,6 +400,8 @@ struct HubModel {
     void append_log(const std::string& line);
     void append_log(const std::string& line, LogLevel level);
     void set_status(const std::string& s);
+    // Queue a short-lived UI toast (shown on the main thread).
+    void show_toast(const std::string& message);
     // Scan apps/ for installs not in the current catalog; store under pending_orphans.
     // Returns count found. Safe on UI or worker thread.
     size_t refresh_orphan_installs();
@@ -406,6 +432,10 @@ struct HubModel {
     void open_setup();
     // Prefill empty library/bios/saves drafts from ~/Emulation/{roms,bios,saves}.
     void apply_suggested_library_roots(bool overwrite_nonempty = false);
+    // Prefill Easy setup emulation parent (default ~/Emulation).
+    void apply_suggested_emulation_root(bool overwrite_nonempty = false);
+    // Derive library/bios/saves drafts from setup_emulation_root (+ /roms,/bios,/saves).
+    void apply_roots_from_emulation_parent();
     // Seed settings.platform_folders from catalog + ES-DE defaults.
     void seed_setup_platform_folders();
     // Collect missing non-empty root paths into setup_missing_roots.
@@ -414,6 +444,8 @@ struct HubModel {
     bool create_missing_setup_roots(std::string* error = nullptr);
     // Create per-platform folders under configured roots (first CSV name).
     bool create_setup_platform_folders(std::string* error = nullptr);
+    // Easy path: apply parent → create missing roots + platform folders → save → complete.
+    bool finish_easy_setup(std::string* error = nullptr);
     // Continue / Skip: write install setup marker so the wizard does not reappear.
     bool complete_setup(std::string* error = nullptr);
     bool save_settings(std::string* error = nullptr);
@@ -436,11 +468,19 @@ struct HubModel {
                                   std::string* error = nullptr);
 
     // Mint a new empty managed save in the library (or install saves/), set preferred.
-    bool create_title_save(const std::string& title_id, std::string* error = nullptr);
+    // for_card2: assign to memcard 2 without changing card 1 preference.
+    bool create_title_save(const std::string& title_id, std::string* error = nullptr,
+                           bool for_card2 = false);
+    // Delete a managed save file. Clears preferences that pointed at it.
+    bool delete_title_save(const std::string& title_id, const std::string& save_id,
+                           std::string* error = nullptr);
+    // Rename a managed save file (new_label = filename, extension optional).
+    bool rename_title_save(const std::string& title_id, const std::string& save_id,
+                           const std::string& new_label, std::string* error = nullptr);
 
     // Apply a completed folder pick into settings drafts (call from UI thread).
     void apply_pending_folder_pick();
-    // Copy Menu → Import picks into library/bios/saves trees; may start a scan.
+    // Copy Library → Import picks into library/bios/saves trees; may start a scan.
     void apply_pending_file_pick();
 };
 

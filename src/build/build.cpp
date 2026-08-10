@@ -2678,6 +2678,8 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
 
     std::string restore_note;
     restore_user_state(install_root, release_dir, &restore_note);
+    std::string prune_note;
+    prune_old_release_dirs(install_root, pin_tag, &prune_note);
 
     InstallRecord rec;
     rec.title_id = title.id;
@@ -2718,6 +2720,7 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
                      "  sdk: " + sdk.tag + "  toolchain: " + tc.tag + "\n";
     if (!stash_note.empty()) result.message += "  " + stash_note;
     if (!restore_note.empty()) result.message += "  " + restore_note;
+    if (!prune_note.empty()) result.message += "  " + prune_note;
     progress(opts.on_progress, "Build complete", 1.0f);
     return result;
 }

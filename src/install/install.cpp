@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <cstddef>
 #include <sstream>
 #include <system_error>
 #include <unordered_set>
@@ -1145,6 +1146,111 @@ void fill_from_disk(InstallPlan& plan) {
 
 } // namespace
 
+fs::path resolve_current_release_dir(const fs::path& install_root) {
+    const fs::path link = install_root / "current";
+    std::error_code ec;
+    if (fs::exists(link, ec)) return fs::weakly_canonical(link, ec);
+    const fs::path ptr = install_root / "current.path";
+    if (fs::is_regular_file(ptr, ec)) {
+        std::ifstream in(ptr);
+        std::string rel;
+        std::getline(in, rel);
+        if (!rel.empty()) return install_root / rel;
+    }
+    return {};
+}
+
+size_t prune_old_release_dirs(const fs::path& install_root, const std::string& keep_tag,
+                              std::string* note) {
+    std::string keep = keep_tag;
+    for (char& c : keep) {
+        if (c == '/' || c == '\\' || c == ':' || c == 0) c = '_';
+    }
+    if (keep.empty()) keep = "unknown";
+    const fs::path releases = install_root / "releases";
+    std::error_code ec;
+    if (!fs::is_directory(releases, ec)) return 0;
+    size_t removed = 0;
+    for (auto it = fs::directory_iterator(releases, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        if (it->path().filename().string() == keep) continue;
+        std::error_code rm_ec;
+        fs::remove_all(it->path(), rm_ec);
+        if (!rm_ec) ++removed;
+    }
+    if (note && removed > 0)
+        *note = "removed " + std::to_string(removed) + " old release folder(s)\n";
+    return removed;
+}
+
+OldReleaseCleanupResult cleanup_old_release_dirs(const Paths& paths, const Catalog& catalog) {
+    OldReleaseCleanupResult result;
+    std::error_code ec;
+    for (const auto& title : catalog.titles) {
+        if (title.install_dir_name.empty()) continue;
+        const fs::path install_root = paths.apps_dir / title.install_dir_name;
+        const fs::path releases = install_root / "releases";
+        if (!fs::is_directory(releases, ec)) continue;
+
+        size_t release_count = 0;
+        for (auto it = fs::directory_iterator(releases, ec); !ec && it != fs::directory_iterator();
+             it.increment(ec)) {
+            if (it->is_directory(ec)) ++release_count;
+        }
+        if (release_count <= 1) continue;
+
+        ++result.titles_scanned;
+        InstallPlan plan = inspect_install(paths, title);
+        std::string keep_tag = plan.installed_tag;
+        if (plan.record && !plan.record->tag.empty()) keep_tag = plan.record->tag;
+        if (keep_tag.empty()) {
+            const fs::path cur = resolve_current_release_dir(install_root);
+            if (!cur.empty()) keep_tag = cur.filename().string();
+        }
+        if (keep_tag.empty()) {
+            result.messages.push_back(title.id + ": skipped — cannot determine current release");
+            continue;
+        }
+
+        std::string stash_note;
+        stash_user_state_for_update(paths, title, &stash_note);
+        fs::path current = resolve_current_release_dir(install_root);
+        if (current.empty()) {
+            // Fall back to releases/<sanitized keep_tag>.
+            std::string keep = keep_tag;
+            for (char& c : keep) {
+                if (c == '/' || c == '\\' || c == ':' || c == 0) c = '_';
+            }
+            current = releases / keep;
+        }
+        if (fs::is_directory(current, ec)) {
+            std::string restore_note;
+            restore_user_state(install_root, current, &restore_note);
+            if (!restore_note.empty()) result.messages.push_back(title.id + ": " + restore_note);
+        }
+        if (!stash_note.empty()) result.messages.push_back(title.id + ": " + stash_note);
+
+        std::string prune_note;
+        const size_t n = prune_old_release_dirs(install_root, keep_tag, &prune_note);
+        if (n > 0) {
+            ++result.titles_cleaned;
+            result.dirs_removed += static_cast<int>(n);
+            result.messages.push_back(title.id + ": removed " + std::to_string(n) +
+                                      " old release folder(s) (kept " + keep_tag + ")");
+        }
+    }
+
+    std::ostringstream oss;
+    if (result.dirs_removed == 0)
+        oss << "No old update folders to remove";
+    else
+        oss << "Cleaned " << result.dirs_removed << " old release folder(s) across "
+            << result.titles_cleaned << " title(s)";
+    result.message = oss.str();
+    return result;
+}
+
 void restore_user_state(const fs::path& install_root, const fs::path& release_dir,
                         std::string* note) {
     const fs::path preserved = install_root / "preserved";
@@ -1604,6 +1710,8 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
 
     std::string restore_note;
     restore_user_state(install_root, release_dir, &restore_note);
+    std::string prune_note;
+    prune_old_release_dirs(install_root, tag, &prune_note);
 
     result.plan = inspect_install(paths, title);
     result.plan.latest_tag = rel.tag;
@@ -1618,6 +1726,7 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
     }
     if (!stash_note.empty()) result.message += "  " + stash_note;
     if (!restore_note.empty()) result.message += "  " + restore_note;
+    if (!prune_note.empty()) result.message += "  " + prune_note;
     return result;
 }
 

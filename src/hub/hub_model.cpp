@@ -44,6 +44,39 @@ void copy_buf(char* dest, size_t dest_n, const std::string& src) {
     dest[dest_n - 1] = '\0';
 }
 
+const char* platform_label(const std::string& slug) {
+    if (slug == "psx" || slug == "ps1" || slug == "ps") return "PlayStation";
+    if (slug == "snes") return "Super Nintendo";
+    if (slug == "gba") return "Game Boy Advance";
+    if (slug == "n64") return "Nintendo 64";
+    if (slug == "genesis" || slug == "md" || slug == "megadrive") return "Genesis / Mega Drive";
+    if (slug == "gb" || slug == "dmg") return "Game Boy";
+    if (slug == "gbc") return "Game Boy Color";
+    if (slug == "psp") return "PlayStation Portable";
+    return slug.empty() ? "library" : slug.c_str();
+}
+
+void finish_pending_import_toast(HubModel& hub) {
+    std::string name, platform, kind;
+    {
+        std::lock_guard<std::mutex> lock(hub.mu);
+        name = std::move(hub.pending_import_toast_name);
+        platform = std::move(hub.pending_import_toast_platform);
+        kind = std::move(hub.pending_import_toast_kind);
+        hub.pending_import_toast_name.clear();
+        hub.pending_import_toast_platform.clear();
+        hub.pending_import_toast_kind.clear();
+    }
+    if (name.empty()) return;
+    const char* plat = platform_label(platform);
+    if (kind == "bios")
+        hub.show_toast("Imported " + name + " → " + plat + " BIOS ready.");
+    else if (kind == "rom")
+        hub.show_toast("Imported " + name + " → " + plat + " library ready.");
+    else
+        hub.show_toast("Imported " + name + " → " + plat + ".");
+}
+
 std::string join_csv(const std::vector<std::string>& parts) {
     std::string s;
     for (const auto& p : parts) {
@@ -237,6 +270,15 @@ void HubModel::set_status(const std::string& s) {
     (void)prev;
 }
 
+void HubModel::show_toast(const std::string& message) {
+    if (message.empty()) return;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        toast_message = message;
+    }
+    toast_pending.store(true);
+}
+
 size_t HubModel::refresh_orphan_installs() {
     auto orphans = list_orphan_installs(paths, catalog);
     const size_t n = orphans.size();
@@ -422,7 +464,8 @@ void HubModel::refresh_rows(bool check_updates) {
             }
         }
 
-        if (row.installed) {
+        row.dual_memcard = title_uses_memcards(t);
+        {
             const auto saves = list_managed_saves(paths, cfg, t);
             row.save_ids.reserve(saves.size());
             row.save_labels.reserve(saves.size());
@@ -430,7 +473,6 @@ void HubModel::refresh_rows(bool check_updates) {
                 row.save_ids.push_back(s.id);
                 row.save_labels.push_back(s.label);
             }
-            row.dual_memcard = title_uses_memcards(t);
 
             auto resolve_index = [&](std::string& id) -> int {
                 if (id.empty() || id == kBlankMemcardId) return -1;
@@ -451,12 +493,46 @@ void HubModel::refresh_rows(bool check_updates) {
             const bool had_preferred = !row.preferred_save.empty();
             row.preferred_save_index = resolve_index(row.preferred_save);
             if (row.preferred_save_index < 0 && !row.save_ids.empty()) {
-                row.preferred_save_index = 0;
-                row.preferred_save = row.save_ids[0];
-                if (!had_preferred) {
-                    set_preferred_save(app_state, t.id, row.preferred_save);
-                    state_dirty = true;
+                // Prefer a pool file named for this title — never the arbitrary first card.
+                int best = -1;
+                const std::string want_name = to_lower_ascii(t.name);
+                const std::string want_id = to_lower_ascii(t.id);
+                auto label_matches = [&](const std::string& label) {
+                    const std::string stem = to_lower_ascii(fs::path(label).stem().string());
+                    if (stem.empty()) return false;
+                    if (!want_name.empty() &&
+                        (stem.find(want_name) != std::string::npos ||
+                         want_name.find(stem) != std::string::npos))
+                        return true;
+                    if (!want_id.empty() &&
+                        (stem.find(want_id) != std::string::npos ||
+                         want_id.find(stem) != std::string::npos))
+                        return true;
+                    return false;
+                };
+                for (size_t i = 0; i < row.save_labels.size(); ++i) {
+                    if (label_matches(row.save_labels[i])) {
+                        best = static_cast<int>(i);
+                        break;
+                    }
                 }
+                if (best >= 0) {
+                    row.preferred_save_index = best;
+                    row.preferred_save = row.save_ids[static_cast<size_t>(best)];
+                    if (!had_preferred) {
+                        set_preferred_save(app_state, t.id, row.preferred_save);
+                        state_dirty = true;
+                    }
+                } else if (!row.dual_memcard) {
+                    // Cart / single-save: keep prior "first file" fallback.
+                    row.preferred_save_index = 0;
+                    row.preferred_save = row.save_ids[0];
+                    if (!had_preferred) {
+                        set_preferred_save(app_state, t.id, row.preferred_save);
+                        state_dirty = true;
+                    }
+                }
+                // Dual memcard with no title-named file: leave unset until Play/ensure mints.
             }
 
             if (row.dual_memcard) {
@@ -464,20 +540,17 @@ void HubModel::refresh_rows(bool check_updates) {
                 if (row.preferred_save_card2 == kBlankMemcardId) {
                     row.preferred_save_card2_index = -1;
                 } else if (row.preferred_save_card2.empty()) {
-                    // No preference yet: default to a different file than card1, else blank.
+                    // New installs: slot 2 stays blank until the user picks a card.
                     row.preferred_save_card2_index = -1;
-                    for (size_t i = 0; i < row.save_ids.size(); ++i) {
-                        if (static_cast<int>(i) == row.preferred_save_index) continue;
-                        row.preferred_save_card2_index = static_cast<int>(i);
-                        row.preferred_save_card2 = row.save_ids[i];
-                        break;
-                    }
-                    if (row.preferred_save_card2_index < 0)
-                        row.preferred_save_card2 = kBlankMemcardId;
+                    row.preferred_save_card2 = kBlankMemcardId;
+                    set_preferred_save_card2(app_state, t.id, kBlankMemcardId);
+                    state_dirty = true;
                 } else {
                     row.preferred_save_card2_index = resolve_index(row.preferred_save_card2);
-                    if (row.preferred_save_card2_index < 0)
+                    if (row.preferred_save_card2_index < 0) {
                         row.preferred_save_card2 = kBlankMemcardId;
+                        row.preferred_save_card2_index = -1;
+                    }
                 }
             }
         }
@@ -785,6 +858,13 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 wire_build_activity(this, bopts);
                 auto r = install_title_auto(paths, *t, opts, bopts);
                 append_log(r.message);
+                if (r.ok) {
+                    // Assign title-named memcard/SRAM to slot 1; leave memcard 2 blank.
+                    const fs::path rom = library.preferred_rom(title_id);
+                    auto ensured = ensure_canonical_save(paths, cfg, *t, rom, true);
+                    if (!ensured.message.empty()) append_log(ensured.message);
+                    app_state = load_app_state(paths.state_path);
+                }
                 set_status(r.ok ? ((prebuilt ? "Installed " : "Built ") + title_id)
                                 : ("Install failed: " + title_id));
                 break;
@@ -809,7 +889,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 break;
             }
             case HubJob::GenerateRebuild: {
-                set_status("Generate & Rebuild " + title_id + "…");
+                set_status("Reinstall " + title_id + "…");
                 const auto* t = find_title();
                 if (!t) {
                     append_log("unknown title: " + title_id);
@@ -817,7 +897,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 }
                 if (!t->supports_local_build()) {
                     append_log("catalog has no local build recipe for " + title_id);
-                    set_status("Generate & Rebuild unavailable: " + title_id);
+                    set_status("Reinstall unavailable: " + title_id);
                     break;
                 }
                 BuildOptions bopts;
@@ -825,8 +905,8 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 bopts.force_generate = true;
                 bopts.rom_path = library.preferred_rom(title_id);
                 if (bopts.rom_path.empty()) {
-                    append_log("Generate & Rebuild needs a matched .cue in the library");
-                    set_status("Generate & Rebuild failed: no disc");
+                    append_log("Reinstall needs a matched .cue in the library");
+                    set_status("Reinstall failed: no disc");
                     break;
                 }
                 app_state = load_app_state(paths.state_path);
@@ -834,8 +914,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 wire_build_activity(this, bopts);
                 auto r = build_title(paths, *t, bopts);
                 append_log(r.message);
-                set_status(r.ok ? ("Generated & rebuilt " + title_id)
-                                : ("Generate & Rebuild failed: " + title_id));
+                set_status(r.ok ? ("Reinstalled " + title_id) : ("Reinstall failed: " + title_id));
                 break;
             }
             case HubJob::Uninstall:
@@ -877,13 +956,13 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                                    " — continuing ROM scan with current catalog");
                     }
                 }
-                const char* rom_label = full ? "Full Rescan" : "Quick Scan";
+                const char* rom_label = full ? "Full rebuild" : "Scan new files";
                 set_status(std::string(rom_label) + (plat_filter.empty()
                                                          ? "…"
                                                          : (" [" + plat_filter + "]…")));
                 // Only wipe the whole index on a full all-platforms rescan.
                 if (full && plat_filter.empty()) {
-                    append_log("Full Rescan: clearing library index cache…");
+                    append_log("Full rebuild: clearing library index cache…");
                     library = LibraryIndex{};
                 } else {
                     library = load_library_index(paths.library_index_path);
@@ -894,7 +973,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 opts.index = full ? nullptr : &library;
                 if (!plat_filter.empty()) opts.platforms = {plat_filter};
                 opts.on_progress = [this, full](const ScanProgress& p) {
-                    const char* label = full ? "Full Rescan" : "Quick Scan";
+                    const char* label = full ? "Full rebuild" : "Scan new files";
                     if (p.phase == "walk") {
                         if (should_log_progress(p.current, 0, 50)) {
                             std::ostringstream oss;
@@ -952,7 +1031,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 if (!cfg.bios_root.empty()) {
                     set_status(std::string(rom_label) + ": scanning BIOS…");
                     if (full && plat_filter.empty()) {
-                        append_log("Full Rescan: clearing BIOS index cache…");
+                        append_log("Full rebuild: clearing BIOS index cache…");
                         bios = BiosIndex{};
                     } else {
                         bios = load_bios_index(paths.bios_index_path);
@@ -962,7 +1041,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     bopts.index = full ? nullptr : &bios;
                     if (!plat_filter.empty()) bopts.platforms = {plat_filter};
                     bopts.on_progress = [this, full](const BiosScanProgress& p) {
-                        const char* label = full ? "Full Rescan" : "Quick Scan";
+                        const char* label = full ? "Full rebuild" : "Scan new files";
                         if (p.phase == "hash" && p.total > 0) {
                             std::ostringstream st;
                             st << label << ": BIOS hashing " << p.current << "/" << p.total;
@@ -985,7 +1064,25 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     append_log(boss.str());
                 }
 
-                // Build & Install → Quick Scan follow-up: still missing → open folder.
+                // Discover / promote managed saves for titles in scope.
+                {
+                    set_status(std::string(rom_label) + ": scanning saves…");
+                    int promoted = 0;
+                    int found = 0;
+                    for (const auto& t : catalog.titles) {
+                        if (!plat_filter.empty() && t.platform != plat_filter) continue;
+                        const fs::path rom = library.preferred_rom(t.id);
+                        promoted += promote_install_saves_to_library(paths, cfg, t, rom);
+                        found += static_cast<int>(list_managed_saves(paths, cfg, t).size());
+                    }
+                    std::ostringstream soss;
+                    soss << rom_label << " saves: " << found << " file(s)";
+                    if (promoted > 0) soss << ", promoted " << promoted << " from installs";
+                    if (!plat_filter.empty()) soss << " [platform=" << plat_filter << "]";
+                    append_log(soss.str());
+                }
+
+                // Install → Quick Scan follow-up: still missing → open folder.
                 std::string scan_missing_id;
                 {
                     std::lock_guard<std::mutex> lock(mu);
@@ -994,8 +1091,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 }
                 if (!scan_missing_id.empty()) {
                     if (!library.preferred_rom(scan_missing_id).empty()) {
-                        set_status("ROM found for " + scan_missing_id +
-                                   " — ready to Build & Install");
+                        set_status("ROM found for " + scan_missing_id + " — ready to Install");
                         append_log("Missing-ROM scan: bound " + scan_missing_id);
                     } else {
                         std::string plat;
@@ -1014,17 +1110,18 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 } else {
                     set_status(std::string(rom_label) + " complete");
                 }
+                finish_pending_import_toast(*this);
                 break;
             }
             case HubJob::PurgeMissingFiles: {
                 const std::string plat_filter = scans_platform_filter;
-                set_status(plat_filter.empty() ? "Removing missing files from DB…"
-                                               : ("Removing missing [" + plat_filter + "] from DB…"));
+                set_status(plat_filter.empty() ? "Cleaning missing files…"
+                                               : ("Cleaning missing [" + plat_filter + "]…"));
                 library = load_library_index(paths.library_index_path);
                 auto pr = purge_missing_library_files(library, plat_filter);
                 save_library_index(paths.library_index_path, library);
                 std::ostringstream oss;
-                oss << "Remove missing from DB: removed " << pr.removed_files << " ROM file(s)";
+                oss << "Clean missing: removed " << pr.removed_files << " ROM file(s)";
                 if (pr.removed_title_binds)
                     oss << ", " << pr.removed_title_binds << " title bind(s)";
                 if (!plat_filter.empty()) oss << " [platform=" << plat_filter << "]";
@@ -1039,24 +1136,24 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     auto bpr = purge_missing_bios_files(bios, catalog, plat_filter);
                     save_bios_index(paths.bios_index_path, bios);
                     std::ostringstream boss;
-                    boss << "Remove missing BIOS from DB: removed " << bpr.removed_files
-                         << " file(s)";
+                    boss << "Clean missing BIOS: removed " << bpr.removed_files << " file(s)";
                     if (bpr.removed_title_binds)
                         boss << ", " << bpr.removed_title_binds << " title bind(s)";
                     append_log(boss.str());
                     pr.removed_files += bpr.removed_files;
                 }
                 set_status(pr.removed_files == 0
-                               ? "DB cleanup complete — nothing missing"
-                               : ("DB cleanup complete — removed " +
-                                  std::to_string(pr.removed_files) + " missing file(s)"));
+                               ? "Clean missing complete — nothing missing"
+                               : ("Clean missing complete — removed " +
+                                  std::to_string(pr.removed_files) + " file(s)"));
                 break;
             }
             case HubJob::ScanBios:
             case HubJob::FullScanBios: {
                 const bool full = (j == HubJob::FullScanBios);
+                const std::string plat_filter = scans_platform_filter;
                 set_status(full ? "Full BIOS rescan…" : "Scanning BIOS tree…");
-                if (full) {
+                if (full && plat_filter.empty()) {
                     append_log("Full BIOS rescan: clearing BIOS index cache…");
                     bios = BiosIndex{};
                 } else {
@@ -1066,6 +1163,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 BiosScanOptions opts;
                 opts.full_rescan = full;
                 opts.index = full ? nullptr : &bios;
+                if (!plat_filter.empty()) opts.platforms = {plat_filter};
                 opts.on_progress = [this, full](const BiosScanProgress& p) {
                     const char* label = full ? "Full BIOS rescan" : "BIOS scan";
                     if (p.phase == "walk") {
@@ -1107,12 +1205,26 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     << result.cache_hits;
                 append_log(oss.str());
                 set_status(full ? "Full BIOS rescan complete" : "BIOS scan complete");
+                finish_pending_import_toast(*this);
                 break;
             }
             case HubJob::CheckUpdates: {
                 set_status("Checking updates…");
-                // Launcher first so its prompt appears before toolchain when both update.
+                // Catalog → launcher → games → toolchain (prompt order matches).
                 {
+                    set_status("Checking catalog…");
+                    auto cr = sync_remote_catalog(paths, cfg, false);
+                    append_log(cr.message);
+                    if (cr.ok && !cr.skipped) {
+                        try {
+                            catalog = load_catalog(paths.catalog_dir);
+                        } catch (const std::exception& e) {
+                            append_log(std::string("catalog reload: ") + e.what());
+                        }
+                    }
+                }
+                {
+                    set_status("Checking RetComM…");
                     auto lc = check_retcomm_update(paths);
                     append_log(lc.message);
                     std::lock_guard<std::mutex> lock(mu);
@@ -1120,17 +1232,21 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     launcher_latest_tag = lc.latest_tag;
                     if (lc.ok && lc.update_available) launcher_update_prompt_pending.store(true);
                 }
+                set_status("Checking game updates…");
                 refresh_rows(true);
                 int game_updates = 0;
                 {
                     std::lock_guard<std::mutex> lock(mu);
                     for (const auto& r : rows)
                         if (r.update_available) ++game_updates;
+                    game_updates_prompt_count = game_updates;
+                    if (game_updates > 0) game_updates_prompt_pending.store(true);
                 }
                 if (game_updates > 0) {
                     append_log(std::to_string(game_updates) + " game update(s) available");
                 }
                 {
+                    set_status("Checking toolchain…");
                     auto tc = check_toolchain_update(paths);
                     append_log(tc.message);
                     std::lock_guard<std::mutex> lock(mu);
@@ -1140,10 +1256,11 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     toolchain_status = tc.message;
                     if (tc.update_available) toolchain_prompt_pending.store(true);
                 }
-                if (game_updates > 0)
-                    set_status(std::to_string(game_updates) + " game update(s) available");
+                if (launcher_update_prompt_pending.load() || toolchain_prompt_pending.load() ||
+                    game_updates > 0)
+                    set_status("Updates available");
                 else
-                    set_status("Update check complete");
+                    set_status("Up to date");
                 job_running = false;
                 job = HubJob::None;
                 return;
@@ -1305,7 +1422,9 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 set_status("RomM BIOS ready: " + title_id);
                 break;
             }
-            case HubJob::SyncRommSaves: {
+            case HubJob::SyncRommSaves:
+            case HubJob::SyncRommStates: {
+                // One hub action syncs native saves + savestates together.
                 set_status("RomM: syncing saves for " + title_id + "…");
                 const auto* t = find_title();
                 if (!t) {
@@ -1316,23 +1435,14 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     set_status(s);
                 });
                 append_log(sr.message);
-                set_status(sr.ok ? ("Save sync complete: " + title_id)
-                                 : ("Save sync failed: " + title_id));
-                break;
-            }
-            case HubJob::SyncRommStates: {
                 set_status("RomM: syncing savestates for " + title_id + "…");
-                const auto* t = find_title();
-                if (!t) {
-                    append_log("unknown title: " + title_id);
-                    break;
-                }
-                auto sr = sync_states_with_romm(paths, cfg, *t, [this](const std::string& s) {
+                auto st = sync_states_with_romm(paths, cfg, *t, [this](const std::string& s) {
                     set_status(s);
                 });
-                append_log(sr.message);
-                set_status(sr.ok ? ("Savestate sync complete: " + title_id)
-                                 : ("Savestate sync failed: " + title_id));
+                append_log(st.message);
+                const bool ok = sr.ok && st.ok;
+                set_status(ok ? ("Save sync complete: " + title_id)
+                              : ("Save sync finished with errors: " + title_id));
                 break;
             }
             case HubJob::SelfUpdate: {
@@ -1432,6 +1542,14 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                                     " error(s)"));
                 break;
             }
+            case HubJob::CleanupOldReleases: {
+                set_status("Cleaning old update files…");
+                auto cr = cleanup_old_release_dirs(paths, catalog);
+                for (const auto& m : cr.messages) append_log(m);
+                append_log(cr.message);
+                set_status(cr.message);
+                break;
+            }
             case HubJob::None:
                 break;
             }
@@ -1490,6 +1608,22 @@ void HubModel::apply_suggested_library_roots(bool overwrite_nonempty) {
     fill(settings.saves_root, sizeof(settings.saves_root), sug.saves_root);
 }
 
+void HubModel::apply_suggested_emulation_root(bool overwrite_nonempty) {
+    if (!overwrite_nonempty && setup_emulation_root[0] != '\0') return;
+    const fs::path home = user_home_dir();
+    if (home.empty()) return;
+    copy_buf(setup_emulation_root, sizeof(setup_emulation_root), (home / "Emulation").string());
+}
+
+void HubModel::apply_roots_from_emulation_parent() {
+    if (setup_emulation_root[0] == '\0') return;
+    const fs::path emu(setup_emulation_root);
+    copy_buf(settings.library_root, sizeof(settings.library_root), (emu / "roms").string());
+    copy_buf(settings.bios_root, sizeof(settings.bios_root), (emu / "bios").string());
+    copy_buf(settings.saves_root, sizeof(settings.saves_root), (emu / "saves").string());
+    settings.dirty = true;
+}
+
 void HubModel::collect_missing_setup_roots() {
     setup_missing_roots.clear();
     auto consider = [&](const char* path) {
@@ -1538,6 +1672,24 @@ bool HubModel::create_setup_platform_folders(std::string* error) {
     return true;
 }
 
+bool HubModel::finish_easy_setup(std::string* error) {
+    if (setup_emulation_root[0] == '\0') {
+        if (error) *error = "choose an Emulation folder";
+        return false;
+    }
+    apply_roots_from_emulation_parent();
+    seed_setup_platform_folders();
+    collect_missing_setup_roots();
+    if (!setup_missing_roots.empty() && !create_missing_setup_roots(error)) return false;
+    if (!save_settings(error)) return false;
+    if (setup_create_platform_folders && !create_setup_platform_folders(error)) return false;
+    // Easy path skips RomM; keep any existing token blanks already in drafts.
+    if (!save_romm_settings(error, /*refresh_boxart=*/false)) return false;
+    if (!complete_setup(error)) return false;
+    show_setup_scan_prompt = true;
+    return true;
+}
+
 void HubModel::open_settings() {
     cfg = load_app_config(paths.config_path);
     copy_buf(settings.library_root, sizeof(settings.library_root), cfg.library_root.string());
@@ -1569,6 +1721,16 @@ void HubModel::open_setup() {
     settings.platform_folders.clear();
     settings.dirty = false;
     apply_suggested_library_roots(/*overwrite_nonempty=*/false);
+    setup_emulation_root[0] = '\0';
+    // Prefer parent of an existing library root (…/roms → …), else ~/Emulation.
+    if (settings.library_root[0] != '\0') {
+        const fs::path lib(settings.library_root);
+        if (lib.filename() == "roms" && !lib.parent_path().empty())
+            copy_buf(setup_emulation_root, sizeof(setup_emulation_root),
+                     lib.parent_path().string());
+    }
+    apply_suggested_emulation_root(/*overwrite_nonempty=*/false);
+    setup_path = SetupPath::Chooser;
     setup_step = 0;
     setup_confirm_create_roots = false;
     setup_missing_roots.clear();
@@ -1586,6 +1748,7 @@ void HubModel::open_setup() {
 bool HubModel::complete_setup(std::string* error) {
     if (!mark_hub_setup_completed(paths, exe_dir, error)) return false;
     show_setup = false;
+    setup_path = SetupPath::Chooser;
     setup_step = 0;
     setup_confirm_create_roots = false;
     setup_missing_roots.clear();
@@ -1618,25 +1781,33 @@ void HubModel::apply_pending_folder_pick() {
         copy_buf(settings.saves_root, sizeof(settings.saves_root), path);
         settings.dirty = true;
         set_status("Saves folder selected");
+    } else if (target == FolderPickTarget::EmulationRoot) {
+        copy_buf(setup_emulation_root, sizeof(setup_emulation_root), path);
+        apply_roots_from_emulation_parent();
+        set_status("Emulation folder selected");
     }
 }
 
 void HubModel::apply_pending_file_pick() {
     FilePickKind kind = FilePickKind::None;
     std::string platform;
+    std::string title_id;
     std::vector<std::string> picked;
     {
         std::lock_guard<std::mutex> lock(file_pick_mu);
         if (file_pick_paths.empty() || file_pick_kind == FilePickKind::None) return;
         kind = file_pick_kind;
         platform = file_pick_platform;
+        title_id = std::move(file_pick_title_id);
+        file_pick_title_id.clear();
         picked = std::move(file_pick_paths);
         file_pick_paths.clear();
         file_pick_kind = FilePickKind::None;
         file_pick_platform.clear();
         file_pick_busy = false;
     }
-    if (platform.empty() || picked.empty()) return;
+    if (picked.empty()) return;
+    if (platform.empty() && title_id.empty()) return;
 
     cfg = load_app_config(paths.config_path);
     std::error_code ec;
@@ -1695,15 +1866,38 @@ void HubModel::apply_pending_file_pick() {
             set_status("Import ROM failed");
             return;
         }
+        {
+            std::string name = fs::path(picked.front()).filename().string();
+            for (const auto& p : picked) {
+                std::string ext = fs::path(p).extension().string();
+                for (char& c : ext)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (ext == ".cue") {
+                    name = fs::path(p).filename().string();
+                    break;
+                }
+            }
+            std::lock_guard<std::mutex> lock(mu);
+            pending_import_toast_name = std::move(name);
+            pending_import_toast_platform = platform;
+            pending_import_toast_kind = "rom";
+        }
         scans_platform_filter = platform;
         pending_scan_missing_rom_id.clear();
-        set_status("Imported ROM — scanning " + platform + "…");
+        set_status("Imported ROM — scanning " + std::string(platform_label(platform)) + "…");
         start_job(HubJob::ScanRoms);
         return;
     }
 
     if (kind == FilePickKind::ImportSave) {
-        fs::path dest_dir = cfg.saves_dir_for_platform(platform, true);
+        fs::path dest_dir;
+        const Title* bind_title = nullptr;
+        if (!title_id.empty()) {
+            bind_title = catalog.find(title_id);
+            if (bind_title)
+                dest_dir = title_saves_dir(paths, cfg, *bind_title, true);
+        }
+        if (dest_dir.empty()) dest_dir = cfg.saves_dir_for_platform(platform, true);
         if (dest_dir.empty()) {
             set_status("Import save failed — set saves_root in Library Settings");
             return;
@@ -1712,8 +1906,18 @@ void HubModel::apply_pending_file_pick() {
             set_status("Import save failed");
             return;
         }
+        const std::string name = fs::path(picked.front()).filename().string();
+        if (bind_title) {
+            const std::string save_id = "saves/" + name;
+            app_state = load_app_state(paths.state_path);
+            set_preferred_save(app_state, bind_title->id, save_id);
+            save_app_state(paths.state_path, app_state, nullptr);
+            show_toast("Imported " + name + " → " + bind_title->name);
+        } else {
+            show_toast("Imported " + name + " → " + platform_label(platform) + " save ready.");
+        }
         refresh_rows(false);
-        set_status("Imported save into " + dest_dir.string());
+        set_status("Imported save");
         return;
     }
 
@@ -1732,8 +1936,14 @@ void HubModel::apply_pending_file_pick() {
             set_status("Import BIOS failed");
             return;
         }
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            pending_import_toast_name = fs::path(picked.front()).filename().string();
+            pending_import_toast_platform = platform;
+            pending_import_toast_kind = "bios";
+        }
         scans_platform_filter = platform;
-        set_status("Imported BIOS — scanning " + platform + "…");
+        set_status("Imported BIOS — scanning " + std::string(platform_label(platform)) + "…");
         start_job(HubJob::ScanBios);
         return;
     }
@@ -1923,21 +2133,120 @@ bool HubModel::set_title_preferred_save_card2(const std::string& title_id,
     return true;
 }
 
-bool HubModel::create_title_save(const std::string& title_id, std::string* error) {
+bool HubModel::create_title_save(const std::string& title_id, std::string* error,
+                                 bool for_card2) {
     const Title* t = catalog.find(title_id);
     if (!t) {
         if (error) *error = "unknown title: " + title_id;
         return false;
     }
+    app_state = load_app_state(paths.state_path);
+    const std::string prev_card1 = preferred_save_for(app_state, title_id);
     const fs::path rom = library.preferred_rom(title_id);
     auto created = create_managed_save(paths, cfg, *t, rom);
     if (!created.ok) {
         if (error) *error = created.message.empty() ? "could not create save" : created.message;
         return false;
     }
+    if (for_card2) {
+        app_state = load_app_state(paths.state_path);
+        if (!prev_card1.empty()) set_preferred_save(app_state, title_id, prev_card1);
+        set_preferred_save_card2(app_state, title_id, created.save.id);
+        if (!save_app_state(paths.state_path, app_state, error)) return false;
+    }
     append_log(created.message);
-    set_status("Created save " + created.save.label);
+    set_status(for_card2 ? ("Created memory card 2: " + created.save.label)
+                         : ("Created save " + created.save.label));
+    refresh_rows(false);
+    return true;
+}
+
+bool HubModel::delete_title_save(const std::string& title_id, const std::string& save_id,
+                                 std::string* error) {
+    if (save_id.empty() || save_id == kBlankMemcardId) {
+        if (error) *error = "nothing to delete";
+        return false;
+    }
+    const Title* t = catalog.find(title_id);
+    if (!t) {
+        if (error) *error = "unknown title: " + title_id;
+        return false;
+    }
+    const fs::path path = resolve_managed_save(paths, cfg, *t, save_id);
+    if (path.empty()) {
+        if (error) *error = "save not found: " + save_id;
+        return false;
+    }
+    std::error_code ec;
+    fs::remove(path, ec);
+    if (ec) {
+        if (error) *error = "delete failed: " + ec.message();
+        return false;
+    }
     app_state = load_app_state(paths.state_path);
+    if (preferred_save_for(app_state, title_id) == save_id)
+        set_preferred_save(app_state, title_id, "");
+    if (preferred_save_card2_for(app_state, title_id) == save_id)
+        set_preferred_save_card2(app_state, title_id, kBlankMemcardId);
+    if (!save_app_state(paths.state_path, app_state, error)) return false;
+    append_log("Deleted save " + path.filename().string());
+    set_status("Deleted " + path.filename().string());
+    refresh_rows(false);
+    return true;
+}
+
+bool HubModel::rename_title_save(const std::string& title_id, const std::string& save_id,
+                                 const std::string& new_label, std::string* error) {
+    if (save_id.empty() || save_id == kBlankMemcardId) {
+        if (error) *error = "nothing to rename";
+        return false;
+    }
+    const Title* t = catalog.find(title_id);
+    if (!t) {
+        if (error) *error = "unknown title: " + title_id;
+        return false;
+    }
+    std::string label = new_label;
+    while (!label.empty() && (label.front() == ' ' || label.front() == '\t')) label.erase(label.begin());
+    while (!label.empty() && (label.back() == ' ' || label.back() == '\t')) label.pop_back();
+    if (label.empty()) {
+        if (error) *error = "name is empty";
+        return false;
+    }
+    for (char c : label) {
+        if (c == '/' || c == '\\' || c == ':' || c == '\0') {
+            if (error) *error = "invalid characters in name";
+            return false;
+        }
+    }
+    const fs::path src = resolve_managed_save(paths, cfg, *t, save_id);
+    if (src.empty()) {
+        if (error) *error = "save not found: " + save_id;
+        return false;
+    }
+    fs::path dest_name = label;
+    if (!dest_name.has_extension()) dest_name += src.extension();
+    const fs::path dest = src.parent_path() / dest_name;
+    if (dest.filename() == src.filename()) return true;
+    std::error_code ec;
+    if (fs::exists(dest, ec)) {
+        if (error) *error = "a file named " + dest.filename().string() + " already exists";
+        return false;
+    }
+    fs::rename(src, dest, ec);
+    if (ec) {
+        if (error) *error = "rename failed: " + ec.message();
+        return false;
+    }
+    const std::string new_id = "saves/" + dest.filename().string();
+    app_state = load_app_state(paths.state_path);
+    if (preferred_save_for(app_state, title_id) == save_id)
+        set_preferred_save(app_state, title_id, new_id);
+    if (preferred_save_card2_for(app_state, title_id) == save_id)
+        set_preferred_save_card2(app_state, title_id, new_id);
+    if (!save_app_state(paths.state_path, app_state, error)) return false;
+    append_log("Renamed save " + src.filename().string() + " → " + dest.filename().string());
+    set_status("Renamed to " + dest.filename().string());
     refresh_rows(false);
     return true;
 }

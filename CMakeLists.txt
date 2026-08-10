@@ -227,6 +227,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/platforms/psx.png")
             DESTINATION share/retcomm/platforms
             FILES_MATCHING PATTERN "*.png")
 endif()
+# First-run setup path cards (Easy / Advanced).
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/setup/setup_easy_rocket.png")
+    install(DIRECTORY assets/setup/
+            DESTINATION share/retcomm/setup
+            FILES_MATCHING PATTERN "*.png")
+endif()
 
 # Windows: ship vcpkg/shared runtime DLLs next to the installed exes.
 if(WIN32)
