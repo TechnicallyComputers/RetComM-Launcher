@@ -24,6 +24,9 @@ struct LaunchOptions {
     LaunchMode mode = LaunchMode::Default;
     fs::path rom_path;  // optional; library index used when empty at CLI layer
     fs::path bios_path; // optional; bios index used when empty at CLI layer
+    // Explicit OpenBIOS pick (hub __openbios__). Clears bios_path and stages an
+    // empty bios.cfg so a prior retail sidecar cannot win at Play.
+    bool use_openbios = false;
     // Optional native save (host path or release-relative "saves/Foo.sav").
     // Cart: --save-path; disc: settings.toml [memcard] card1 via bind.
     fs::path save_path;
@@ -43,12 +46,13 @@ struct LaunchPlan {
     fs::path cwd; // usually binary parent (release dir)
     fs::path media_path; // ROM/disc actually passed / staged (host path)
     fs::path bios_path;  // BIOS passed / staged (host path)
+    bool use_openbios = false; // stage empty bios.cfg; strip settings [bios]
     fs::path save_path;  // preferred native save (host path)
     // When set, rom.cfg is written with this path (install-local library.gba)
     // so GBA launcher Save row resolves to sibling library.sav — not the ES-DE tree.
     fs::path staged_rom_link;
     fs::path staged_cfg;      // rom.cfg or disc.cfg
-    fs::path staged_bios_cfg; // bios.cfg
+    fs::path staged_bios_cfg; // bios.cfg (path or empty clear for OpenBIOS)
     fs::path staged_settings; // settings.toml ([bios]/[disc] for psxrecomp)
     std::vector<std::string> argv;
     // Extra env for the child (e.g. PSXRECOMP_PROJECT_ROOT → src/current).

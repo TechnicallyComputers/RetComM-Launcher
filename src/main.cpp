@@ -723,8 +723,11 @@ int cmd_launch(const retcomm::Paths& paths, const retcomm::Catalog& cat,
         const auto st = retcomm::load_app_state(paths.state_path);
         const std::string choice = retcomm::preferred_bios_for(st, id);
         if (choice == retcomm::kOpenBiosChoice) {
+            opts.use_openbios = true;
+            opts.bios_path.clear();
             bios_source = "openbios";
         } else if (!choice.empty()) {
+            opts.use_openbios = false;
             opts.bios_path = choice;
             bios_source = "state";
         } else if (t->has_bios_identity()) {
@@ -733,6 +736,7 @@ int cmd_launch(const retcomm::Paths& paths, const retcomm::Catalog& cat,
             if (!opts.bios_path.empty()) bios_source = "bios-index";
         }
     } else {
+        opts.use_openbios = false;
         bios_source = "--bios";
     }
     if (opts.save_path.empty()) {
@@ -761,7 +765,9 @@ int cmd_launch(const retcomm::Paths& paths, const retcomm::Catalog& cat,
         std::cout << "  media source: " << rom_source << "\n";
     else if (opts.rom_path.empty() && result.plan.ready)
         std::cout << "  tip: run retcomm scan, or pass --rom PATH\n";
-    if (!opts.bios_path.empty() && result.plan.ready)
+    if (opts.use_openbios && result.plan.ready)
+        std::cout << "  bios source:  " << bios_source << "\n";
+    else if (!opts.bios_path.empty() && result.plan.ready)
         std::cout << "  bios source:  " << bios_source << "\n";
     else if (t->requires_bios() && opts.bios_path.empty() && result.plan.ready)
         std::cout << "  tip: run retcomm bios scan, or pass --bios PATH\n";

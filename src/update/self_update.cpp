@@ -349,12 +349,35 @@ bool save_launcher_state(const Paths& paths, const std::string& tag, const std::
 }
 
 #if defined(_WIN32)
+// Fire-and-forget a .bat with no console window. Avoid std::system / "cmd /C start"
+// — those spawn visible (or idle minimized) CMD windows while the script waits on PID.
 bool schedule_bat(const fs::path& script, std::string* error) {
-    const std::string cmd = "cmd /C start \"\" /MIN \"" + script.string() + "\"";
-    if (std::system(cmd.c_str()) != 0) {
-        if (error) *error = "failed to launch apply script";
+    wchar_t sys_dir[MAX_PATH]{};
+    const UINT n = GetSystemDirectoryW(sys_dir, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) {
+        if (error) *error = "GetSystemDirectoryW failed";
         return false;
     }
+    const std::wstring cmd_exe = std::wstring(sys_dir) + L"\\cmd.exe";
+    std::wstring cmdline = L"\"" + cmd_exe + L"\" /C \"" + script.wstring() + L"\"";
+    std::vector<wchar_t> mutable_cmd(cmdline.begin(), cmdline.end());
+    mutable_cmd.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    const DWORD flags = CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+    if (!CreateProcessW(cmd_exe.c_str(), mutable_cmd.data(), nullptr, nullptr, FALSE, flags,
+                        nullptr, script.parent_path().wstring().c_str(), &si, &pi)) {
+        if (error)
+            *error = "failed to launch apply script (CreateProcess " +
+                     std::to_string(GetLastError()) + ")";
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
     return true;
 }
 
@@ -396,7 +419,7 @@ bool schedule_replace_portable_and_restart(const fs::path& new_portable, const f
             << "    echo Timed out waiting for PID !PID!>> \"!LOG!\"\r\n"
             << "    goto fail\r\n"
             << "  )\r\n"
-            << "  timeout /t 1 /nobreak >NUL\r\n"
+            << "  ping -n 2 127.0.0.1 >NUL\r\n"
             << "  goto wait\r\n"
             << ")\r\n"
             << "if not exist \"!NEW!\" (\r\n"
@@ -415,14 +438,14 @@ bool schedule_replace_portable_and_restart(const fs::path& new_portable, const f
             << "if exist \"!DEST!\" (\r\n"
             << "  move /Y \"!DEST!\" \"!OLD!\" >> \"!LOG!\" 2>&1\r\n"
             << "  if errorlevel 1 (\r\n"
-            << "    timeout /t 1 /nobreak >NUL\r\n"
+            << "    ping -n 2 127.0.0.1 >NUL\r\n"
             << "    goto retry\r\n"
             << "  )\r\n"
             << ")\r\n"
             << "copy /Y \"!NEW!\" \"!DEST!\" >> \"!LOG!\" 2>&1\r\n"
             << "if errorlevel 1 (\r\n"
             << "  if exist \"!OLD!\" move /Y \"!OLD!\" \"!DEST!\" >> \"!LOG!\" 2>&1\r\n"
-            << "  timeout /t 1 /nobreak >NUL\r\n"
+            << "  ping -n 2 127.0.0.1 >NUL\r\n"
             << "  goto retry\r\n"
             << ")\r\n"
             << "for %%A in (\"!NEW!\") do set NEWSIZE=%%~zA\r\n"
@@ -431,7 +454,7 @@ bool schedule_replace_portable_and_restart(const fs::path& new_portable, const f
             << "  echo Size mismatch NEW=!NEWSIZE! DEST=!DESTSIZE!>> \"!LOG!\"\r\n"
             << "  del /F /Q \"!DEST!\" 2>NUL\r\n"
             << "  if exist \"!OLD!\" move /Y \"!OLD!\" \"!DEST!\" >> \"!LOG!\" 2>&1\r\n"
-            << "  timeout /t 1 /nobreak >NUL\r\n"
+            << "  ping -n 2 127.0.0.1 >NUL\r\n"
             << "  goto retry\r\n"
             << ")\r\n"
             << "del /F /Q \"!OLD!\" 2>NUL\r\n"
@@ -473,7 +496,7 @@ bool schedule_run_setup_and_restart(const fs::path& setup_exe, const fs::path& i
             << "if errorlevel 1 (\r\n"
             << "  set /a W+=1\r\n"
             << "  if !W! GTR 120 exit /b 1\r\n"
-            << "  timeout /t 1 /nobreak >NUL\r\n"
+            << "  ping -n 2 127.0.0.1 >NUL\r\n"
             << "  goto wait\r\n"
             << ")\r\n"
             << "start /wait \"\" \"" << setup_exe.string()
@@ -611,7 +634,7 @@ bool schedule_retcomm_relaunch_impl(std::string* error) {
             << "if errorlevel 1 (\r\n"
             << "  set /a W+=1\r\n"
             << "  if !W! GTR 120 exit /b 1\r\n"
-            << "  timeout /t 1 /nobreak >NUL\r\n"
+            << "  ping -n 2 127.0.0.1 >NUL\r\n"
             << "  goto wait\r\n"
             << ")\r\n"
             << "start \"\" \"" << launch.string() << "\"\r\n";

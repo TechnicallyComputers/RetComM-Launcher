@@ -671,6 +671,8 @@ LaunchPlan plan_launch(const Paths& paths, const Title& title, const LaunchOptio
         }
     }
     lp.bios_path = opts.bios_path;
+    lp.use_openbios = opts.use_openbios;
+    if (lp.use_openbios) lp.bios_path.clear();
     if (!opts.save_path.empty()) {
         std::error_code ec;
         fs::path sp = opts.save_path;
@@ -709,12 +711,15 @@ LaunchPlan plan_launch(const Paths& paths, const Title& title, const LaunchOptio
         const char* cfg_name = is_disc_platform(title.platform) ? "disc.cfg" : "rom.cfg";
         lp.staged_cfg = lp.cwd / cfg_name;
     }
-    if (!lp.bios_path.empty()) lp.staged_bios_cfg = lp.cwd / "bios.cfg";
+    // Retail: write the dump path. OpenBIOS: write an empty bios.cfg so a
+    // prior SCPH sidecar cannot hydrate the game launcher / runtime.
+    if (!lp.bios_path.empty() || lp.use_openbios) lp.staged_bios_cfg = lp.cwd / "bios.cfg";
 
     // psxrecomp launcher preselect: stage settings.toml [bios]/[disc] for
     // current release builds (CLI --disc is intentionally omitted).
+    // OpenBIOS also stages so a stale [bios] path is stripped.
     if (is_disc_platform(title.platform) &&
-        (!lp.bios_path.empty() || !lp.media_path.empty())) {
+        (!lp.bios_path.empty() || lp.use_openbios || !lp.media_path.empty())) {
         lp.staged_settings = lp.cwd / "settings.toml";
     }
 
@@ -726,7 +731,9 @@ LaunchPlan plan_launch(const Paths& paths, const Title& title, const LaunchOptio
         << "  cwd:    " << lp.cwd.string() << "\n";
     if (lp.use_wine) oss << "  runtime: wine\n";
     if (!inst.installed_tag.empty()) oss << "  version:" << " " << inst.installed_tag << "\n";
-    if (!lp.bios_path.empty())
+    if (lp.use_openbios)
+        oss << "  bios:   (OpenBIOS — clear bios.cfg)\n";
+    else if (!lp.bios_path.empty())
         oss << "  bios:   " << lp.bios_path.string() << "\n"
             << "          guest: " << path_for_guest(lp.bios_path, lp.use_wine) << "\n";
     else if (title.requires_bios())
@@ -739,7 +746,11 @@ LaunchPlan plan_launch(const Paths& paths, const Title& title, const LaunchOptio
     if (!lp.save_path.empty())
         oss << "  save:   " << lp.save_path.string() << "\n"
             << "          argv:  " << save_arg_for_plan(lp) << "\n";
-    if (!lp.staged_bios_cfg.empty()) oss << "  stage:  " << lp.staged_bios_cfg.string() << "\n";
+    if (!lp.staged_bios_cfg.empty()) {
+        oss << "  stage:  " << lp.staged_bios_cfg.string();
+        if (lp.use_openbios) oss << " (empty = OpenBIOS)";
+        oss << "\n";
+    }
     if (!lp.staged_cfg.empty()) oss << "  stage:  " << lp.staged_cfg.string() << "\n";
     if (!lp.staged_settings.empty())
         oss << "  stage:  " << lp.staged_settings.string() << " ([bios]/[disc])\n";
@@ -801,11 +812,16 @@ LaunchResult launch_title(const Paths& paths, const Title& title, const LaunchOp
             result.plan.message += "  warning: " + note + "\n";
     }
 
-    if (!result.plan.staged_bios_cfg.empty() && !result.plan.bios_path.empty()) {
+    if (!result.plan.staged_bios_cfg.empty() &&
+        (result.plan.use_openbios || !result.plan.bios_path.empty())) {
         std::string err;
-        if (!write_text_file(result.plan.staged_bios_cfg,
-                             path_for_guest(result.plan.bios_path, result.plan.use_wine),
-                             &err)) {
+        // Empty file = intentional OpenBIOS (psxrecomp BIOS_SELECTION.md).
+        // Do not delete: a missing bios.cfg can rediscover a nearby SCPH dump.
+        const std::string bios_line =
+            result.plan.use_openbios
+                ? std::string{}
+                : path_for_guest(result.plan.bios_path, result.plan.use_wine);
+        if (!write_text_file(result.plan.staged_bios_cfg, bios_line, &err)) {
             result.plan.message += "  warning: " + err + "\n";
         }
     }

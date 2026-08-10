@@ -129,9 +129,11 @@ void apply_bios_choice_to_launch(const Title& t, const BiosIndex& bios_idx, cons
                                  LaunchOptions& opts) {
     const std::string choice = preferred_bios_for(st, t.id);
     if (choice == kOpenBiosChoice) {
+        opts.use_openbios = true;
         opts.bios_path.clear(); // runtime uses linked OpenBIOS
         return;
     }
+    opts.use_openbios = false;
     std::error_code ec;
     if (!choice.empty() && fs::is_regular_file(choice, ec)) {
         opts.bios_path = choice;
