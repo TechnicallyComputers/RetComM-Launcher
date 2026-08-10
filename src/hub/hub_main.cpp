@@ -2763,52 +2763,74 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     ImGui::EndChild();
 }
 
+// Draw-list only — must not submit ImGui items (breaks SameLine for side-by-side cards).
+void draw_list_wrapped_text(ImDrawList* dl, ImVec2 pos, float wrap_w, ImU32 col, const char* text) {
+    if (!dl || !text || !text[0] || wrap_w <= 1.f) return;
+    ImFont* font = ImGui::GetFont();
+    const float font_size = ImGui::GetFontSize();
+    const float scale = (font && font->FontSize > 0.f) ? (font_size / font->FontSize) : 1.f;
+    const float line_h = ImGui::GetTextLineHeightWithSpacing();
+    const char* end = text + std::strlen(text);
+    const char* s = text;
+    float y = pos.y;
+    while (s < end) {
+        while (s < end && (*s == '\n' || *s == '\r')) {
+            y += line_h;
+            ++s;
+        }
+        if (s >= end) break;
+        const char* line_end =
+            font ? font->CalcWordWrapPositionA(scale, s, end, wrap_w) : end;
+        if (line_end == s) line_end = s + 1; // always advance
+        dl->AddText(font, font_size, ImVec2(pos.x, y), col, s, line_end);
+        s = line_end;
+        while (s < end && (*s == ' ' || *s == '\t')) ++s;
+        y += line_h;
+    }
+}
+
 bool draw_setup_path_card(BoxartCache& boxart, const Theme& th, const char* id,
                           const char* title, const char* subtitle, const char* asset_file,
                           float card_w, float card_h) {
     ImGui::PushID(id);
+    // Single layout item so SameLine keeps both cards on one row.
     const ImVec2 card_min = ImGui::GetCursorScreenPos();
     const ImVec2 card_max(card_min.x + card_w, card_min.y + card_h);
-    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const bool clicked = ImGui::InvisibleButton("##card", ImVec2(card_w, card_h));
+    const bool hovered = ImGui::IsItemHovered();
 
-    const bool hovered = ImGui::IsMouseHoveringRect(card_min, card_max);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImU32 fill = ImGui::ColorConvertFloat4ToU32(hovered ? th.panel_hovered : th.panel);
     const ImU32 border =
         ImGui::ColorConvertFloat4ToU32(hovered ? th.accent_dim : th.border);
     dl->AddRectFilled(card_min, card_max, fill, th.radius_lg);
     dl->AddRect(card_min, card_max, border, th.radius_lg, 0, hovered ? 2.f : 1.f);
+    dl->PushClipRect(ImVec2(card_min.x + 1.f, card_min.y + 1.f),
+                     ImVec2(card_max.x - 1.f, card_max.y - 1.f), true);
 
     const fs::path icon = find_hub_asset_file("setup", asset_file);
     const BoxartTexture* tex =
         icon.empty() ? nullptr : boxart.get(std::string("setup:") + id, icon);
-    const float pad = 18.f;
-    const float icon_max = std::min(card_w - pad * 2.f, card_h * 0.48f);
-    float icon_w = 0.f, icon_h = 0.f;
+    const float pad = 20.f;
+    const float icon_max = std::min(card_w - pad * 2.f, card_h * 0.42f);
     if (tex && tex->gl_id && tex->width > 0 && tex->height > 0) {
         const ImVec2 fit = contain_size(static_cast<float>(tex->width),
                                         static_cast<float>(tex->height), icon_max, icon_max);
-        icon_w = fit.x;
-        icon_h = fit.y;
-        const float ix = card_min.x + (card_w - icon_w) * 0.5f;
-        const float iy = card_min.y + pad + 8.f;
+        const float ix = card_min.x + (card_w - fit.x) * 0.5f;
+        const float iy = card_min.y + pad + 6.f;
         dl->AddImage((ImTextureID)(intptr_t)tex->gl_id, ImVec2(ix, iy),
-                     ImVec2(ix + icon_w, iy + icon_h));
+                     ImVec2(ix + fit.x, iy + fit.y));
     }
 
     const ImVec2 title_sz = ImGui::CalcTextSize(title);
-    const float text_y = card_min.y + pad + 8.f + icon_max + 14.f;
+    const float text_y = card_min.y + pad + 6.f + icon_max + 12.f;
     dl->AddText(ImVec2(card_min.x + (card_w - title_sz.x) * 0.5f, text_y),
                 ImGui::ColorConvertFloat4ToU32(th.text), title);
+    draw_list_wrapped_text(dl, ImVec2(card_min.x + pad, text_y + title_sz.y + 8.f),
+                           card_w - pad * 2.f, ImGui::ColorConvertFloat4ToU32(th.text_muted),
+                           subtitle);
+    dl->PopClipRect();
 
-    ImGui::SetCursorScreenPos(ImVec2(card_min.x + pad, text_y + title_sz.y + 8.f));
-    ImGui::PushTextWrapPos(card_min.x + card_w - pad);
-    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextWrapped("%s", subtitle);
-    ImGui::PopStyleColor();
-    ImGui::PopTextWrapPos();
-
-    ImGui::SetCursorScreenPos(card_min);
-    const bool clicked = ImGui::InvisibleButton("##card", ImVec2(card_w, card_h));
     ImGui::PopID();
     return clicked;
 }
@@ -2817,23 +2839,42 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
     if (!hub.show_setup) return;
 
     ImGui::OpenPopup("Welcome to RetComM###setup_wizard");
-    float wiz_w = 620.f;
-    float wiz_h = 0.f;
-    if (hub.setup_path == SetupPath::Chooser) {
-        wiz_w = 640.f;
-        wiz_h = 0.f;
-    } else if (hub.setup_path == SetupPath::Easy) {
-        wiz_w = 560.f;
-    } else {
-        wiz_w = hub.setup_step == 0 ? 560.f : 640.f;
-        wiz_h = hub.setup_step == 0 ? 0.f : 520.f;
+    constexpr float kWizW = 820.f; // a bit wider so the two path cards can breathe
+    constexpr float kWizH = 628.f;
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    float target_w = kWizW;
+    float target_h = kWizH;
+    if (hub.setup_path == SetupPath::Easy) {
+        // Sparse content — ~30% smaller than the shared wizard size.
+        target_w = 780.f * 0.70f;
+        target_h = 628.f * 0.70f;
     }
-    ImGui::SetNextWindowSize(ImVec2(wiz_w, wiz_h), ImGuiCond_Appearing);
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
-                            ImVec2(0.5f, 0.5f));
+    const float wiz_w = std::min(target_w, vp->WorkSize.x * 0.96f);
+    const float wiz_h = std::min(target_h, vp->WorkSize.y * 0.92f);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(wiz_w, wiz_h), ImVec2(wiz_w, wiz_h));
+    ImGui::SetNextWindowSize(ImVec2(wiz_w, wiz_h), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     if (!ImGui::BeginPopupModal("Welcome to RetComM###setup_wizard", nullptr,
-                                ImGuiWindowFlags_AlwaysAutoResize))
+                                ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoScrollbar))
         return;
+
+    auto push_wrap = [&] {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + ImGui::GetContentRegionAvail().x);
+    };
+
+    // Reserve footer space, then pin action buttons to the bottom-left with padding.
+    auto footer_reserve = [&](float warn_h = 0.f) {
+        const float gap_above = 24.f;
+        const float pad_below = 18.f;
+        return gap_above + ImGui::GetFrameHeight() + warn_h + pad_below;
+    };
+    auto pin_footer_row = [&](float warn_h = 0.f) {
+        const float pad_below = 18.f;
+        const float pad_left = 6.f; // on top of window padding
+        const float row_h = ImGui::GetFrameHeight() + warn_h;
+        ImGui::SetCursorPosY(ImGui::GetWindowContentRegionMax().y - pad_below - row_h);
+        ImGui::SetCursorPosX(ImGui::GetStyle().WindowPadding.x + pad_left);
+    };
 
     auto advance_to_platform_step = [&]() {
         hub.seed_setup_platform_folders();
@@ -2853,14 +2894,20 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
     };
 
     if (hub.setup_confirm_create_roots && hub.setup_path == SetupPath::Advanced) {
-        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 520.f);
+        const float footer_h = footer_reserve();
+        ImGui::BeginChild("##setup_create_roots_body", ImVec2(0.f, -footer_h),
+                          ImGuiChildFlags_None);
+        push_wrap();
         ImGui::TextWrapped("These folders do not exist yet. Create them now?");
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0, 8));
         for (const auto& p : hub.setup_missing_roots) {
+            push_wrap();
             ImGui::BulletText("%s", p.c_str());
+            ImGui::PopTextWrapPos();
         }
-        ImGui::Dummy(ImVec2(0, 14));
+        ImGui::EndChild();
+        pin_footer_row();
         if (accent_button("Create folders", th, ImVec2(160, 0))) {
             std::string err;
             if (!hub.create_missing_setup_roots(&err)) {
@@ -2881,14 +2928,20 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
     }
 
     if (hub.setup_path == SetupPath::Chooser) {
-        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 600.f);
+        const float footer_h = footer_reserve();
+        ImGui::BeginChild("##setup_chooser_body", ImVec2(0.f, -footer_h), ImGuiChildFlags_None,
+                          ImGuiWindowFlags_NoScrollbar);
+        push_wrap();
         ImGui::TextWrapped("How do you want to set up your library?");
         ImGui::PopTextWrapPos();
-        ImGui::Dummy(ImVec2(0, 14));
+        ImGui::Dummy(ImVec2(0, 16));
 
-        const float gap = 16.f;
-        const float card_w = (ImGui::GetContentRegionAvail().x - gap) * 0.5f;
-        const float card_h = 280.f;
+        const float gap = 20.f;
+        const float side_pad = 4.f;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + side_pad);
+        const float row_w = ImGui::GetContentRegionAvail().x - side_pad;
+        const float card_w = (row_w - gap) * 0.5f;
+        const float card_h = std::max(240.f, ImGui::GetContentRegionAvail().y - 4.f);
         if (draw_setup_path_card(boxart, th, "easy", "Easy Setup",
                                  "Pick one Emulation folder. RetComM creates roms, bios, "
                                  "and saves under it with default platform folders.",
@@ -2906,11 +2959,16 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
             hub.setup_step = 0;
             hub.apply_suggested_library_roots(/*overwrite_nonempty=*/false);
         }
+        ImGui::EndChild();
 
-        ImGui::Dummy(ImVec2(0, 16));
-        if (ImGui::Button("Skip for now", ImVec2(140, 0))) skip_setup();
+        pin_footer_row();
+        if (ImGui::Button("Skip for now", ImVec2(150, 0))) skip_setup();
     } else if (hub.setup_path == SetupPath::Easy) {
-        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 520.f);
+        const bool emu_ok = hub.setup_emulation_root[0] != '\0';
+        const float warn_h = emu_ok ? 0.f : ImGui::GetTextLineHeightWithSpacing();
+        const float footer_h = footer_reserve(warn_h);
+        ImGui::BeginChild("##setup_easy_body", ImVec2(0.f, -footer_h), ImGuiChildFlags_None);
+        push_wrap();
         ImGui::TextWrapped(
             "Choose your Emulation folder. RetComM will use …/roms, …/bios, and …/saves "
             "under it, create any that are missing, and seed default platform folders.");
@@ -2928,6 +2986,7 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
             hub.apply_roots_from_emulation_parent();
         }
         ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        push_wrap();
         if (hub.setup_emulation_root[0] != '\0') {
             const fs::path emu(hub.setup_emulation_root);
             const std::string roms = (emu / "roms").string();
@@ -2938,16 +2997,17 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
         } else {
             ImGui::TextWrapped("Pick a parent folder (for example ~/Emulation).");
         }
+        ImGui::PopTextWrapPos();
         ImGui::PopStyleColor();
+        ImGui::EndChild();
 
-        const bool emu_ok = hub.setup_emulation_root[0] != '\0';
-        ImGui::Dummy(ImVec2(0, 16));
-        if (ImGui::Button("Back", ImVec2(120, 0))) {
+        pin_footer_row(warn_h);
+        if (ImGui::Button("Back", ImVec2(100, 0))) {
             hub.setup_path = SetupPath::Chooser;
         }
         ImGui::SameLine();
         ImGui::BeginDisabled(!emu_ok);
-        if (accent_button("Finish", th, ImVec2(160, 0))) {
+        if (accent_button("Finish", th, ImVec2(120, 0))) {
             std::string err;
             if (!hub.finish_easy_setup(&err)) {
                 hub.append_log("easy setup failed: " + err);
@@ -2959,13 +3019,16 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::Button("Skip for now", ImVec2(140, 0))) skip_setup();
+        if (ImGui::Button("Skip for now", ImVec2(120, 0))) skip_setup();
         if (!emu_ok) {
-            ImGui::Dummy(ImVec2(0, 6));
             ImGui::TextColored(th.warn, "Choose an Emulation folder to continue.");
         }
     } else if (hub.setup_step == 0) {
-        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 520.f);
+        const bool library_ok = hub.settings.library_root[0] != '\0';
+        const float warn_h = library_ok ? 0.f : ImGui::GetTextLineHeightWithSpacing();
+        const float footer_h = footer_reserve(warn_h);
+        ImGui::BeginChild("##setup_adv0_body", ImVec2(0.f, -footer_h), ImGuiChildFlags_None);
+        push_wrap();
         ImGui::TextWrapped(
             "Step 1 of 2 — Set your ROM library, BIOS, and game-saves folders. Suggested "
             "paths use ~/Emulation/{roms,bios,saves}. Optionally connect RomM for library "
@@ -2983,7 +3046,9 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
                                    hub, window, FolderPickTarget::LibraryRoot, th))
             hub.settings.dirty = true;
         ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        push_wrap();
         ImGui::TextWrapped("Required — EmulationStation / RomM-style root (e.g. …/roms).");
+        ImGui::PopTextWrapPos();
         ImGui::PopStyleColor();
 
         ImGui::Dummy(ImVec2(0, 10));
@@ -2992,7 +3057,9 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
                                    FolderPickTarget::BiosRoot, th))
             hub.settings.dirty = true;
         ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        push_wrap();
         ImGui::TextWrapped("Optional — system BIOS / firmware dumps (e.g. …/bios).");
+        ImGui::PopTextWrapPos();
         ImGui::PopStyleColor();
 
         ImGui::Dummy(ImVec2(0, 10));
@@ -3001,9 +3068,11 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
                                    window, FolderPickTarget::SavesRoot, th))
             hub.settings.dirty = true;
         ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        push_wrap();
         ImGui::TextWrapped(
             "Recommended — SRAM / memcard library (e.g. …/saves). RomM sync and launches "
             "quarantine each game under …/<platform>/<title_id>/.");
+        ImGui::PopTextWrapPos();
         ImGui::PopStyleColor();
 
         ImGui::Dummy(ImVec2(0, 14));
@@ -3011,9 +3080,11 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
         ImGui::Dummy(ImVec2(0, 8));
         ImGui::TextColored(th.text_muted, "RomM (optional)");
         ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        push_wrap();
         ImGui::TextWrapped(
             "Leave blank for local-only. Use a Client API Token from RomM → Administration → "
             "Client API Tokens (Bearer rmm_…).");
+        ImGui::PopTextWrapPos();
         ImGui::PopStyleColor();
         ImGui::Dummy(ImVec2(0, 6));
         ImGui::TextColored(th.text_muted, "RomM Instance URL");
@@ -3025,17 +3096,17 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
         if (ImGui::InputText("##setup_romm_api_token", hub.romm_settings.api_token,
                              sizeof(hub.romm_settings.api_token), ImGuiInputTextFlags_Password))
             hub.romm_settings.dirty = true;
+        ImGui::EndChild();
 
-        const bool library_ok = hub.settings.library_root[0] != '\0';
-        ImGui::Dummy(ImVec2(0, 16));
-        if (ImGui::Button("Back", ImVec2(120, 0))) {
+        pin_footer_row(warn_h);
+        if (ImGui::Button("Back", ImVec2(100, 0))) {
             hub.setup_path = SetupPath::Chooser;
             hub.setup_confirm_create_roots = false;
             hub.setup_missing_roots.clear();
         }
         ImGui::SameLine();
         ImGui::BeginDisabled(!library_ok);
-        if (accent_button("Next", th, ImVec2(160, 0))) {
+        if (accent_button("Next", th, ImVec2(120, 0))) {
             hub.collect_missing_setup_roots();
             if (!hub.setup_missing_roots.empty()) {
                 hub.setup_confirm_create_roots = true;
@@ -3045,28 +3116,36 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (ImGui::Button("Skip for now", ImVec2(140, 0))) skip_setup();
+        if (ImGui::Button("Skip for now", ImVec2(120, 0))) skip_setup();
         if (!library_ok) {
-            ImGui::Dummy(ImVec2(0, 6));
             ImGui::TextColored(th.warn, "Choose a ROM library folder to continue.");
         }
     } else {
-        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 600.f);
+        const float footer_h = footer_reserve();
+        // Outer body never scrolls — only the mappings table does.
+        ImGui::BeginChild("##setup_adv1_body", ImVec2(0.f, -footer_h), ImGuiChildFlags_None,
+                          ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                            ImVec2(ImGui::GetStyle().ItemSpacing.x, 4.f));
+        push_wrap();
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text);
         ImGui::TextWrapped(
-            "Step 2 of 2 — Platform folder mappings (ES-DE / RomM defaults). On Finish, "
-            "RetComM creates any missing platform folders using the first name in each "
-            "comma-separated list when none of the aliases already exist.");
+            "Step 2 of 2 - Assign platform folder mappings.  Platform name is on the left, "
+            "and on the right is a list of folder names to search.  RetComM will create empty "
+            "folders for any platforms that are missing from your library, to import new files "
+            "you provide.");
+        ImGui::PopStyleColor();
         ImGui::PopTextWrapPos();
-        ImGui::Dummy(ImVec2(0, 8));
         ImGui::Checkbox("Create missing platform folders under roms / bios / saves",
                         &hub.setup_create_platform_folders);
 
-        ImGui::Dummy(ImVec2(0, 8));
-        ImGui::BeginChild("##setup_platform_table", ImVec2(0, 280.f), ImGuiChildFlags_Borders);
+        const float add_row_h = ImGui::GetFrameHeightWithSpacing();
+        const float table_h = std::max(120.f, ImGui::GetContentRegionAvail().y - add_row_h);
+        ImGui::BeginChild("##setup_platform_table", ImVec2(0, table_h), ImGuiChildFlags_Borders);
         if (ImGui::BeginTable("setup_platform_folders", 3,
                               ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp |
                                   ImGuiTableFlags_ScrollY)) {
-            ImGui::TableSetupColumn("platform", ImGuiTableColumnFlags_WidthFixed, 120.f);
+            ImGui::TableSetupColumn("platform", ImGuiTableColumnFlags_WidthFixed, 100.f);
             ImGui::TableSetupColumn("folders", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("##rm", ImGuiTableColumnFlags_WidthFixed, 36.f);
             ImGui::TableHeadersRow();
@@ -3094,13 +3173,15 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
         }
         ImGui::EndChild();
         if (ImGui::Button("Add platform row")) hub.add_platform_folder_row();
+        ImGui::PopStyleVar();
+        ImGui::EndChild();
 
-        ImGui::Dummy(ImVec2(0, 14));
-        if (ImGui::Button("Back", ImVec2(120, 0))) {
+        pin_footer_row();
+        if (ImGui::Button("Back", ImVec2(100, 0))) {
             hub.setup_step = 0;
         }
         ImGui::SameLine();
-        if (accent_button("Finish", th, ImVec2(160, 0))) {
+        if (accent_button("Finish", th, ImVec2(120, 0))) {
             std::string err;
             if (!hub.save_settings(&err)) {
                 hub.append_log("setup save failed: " + err);
