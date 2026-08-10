@@ -1,7 +1,9 @@
 #include "retcomm/build.hpp"
+#include "retcomm/config.hpp"
 #include "retcomm/http.hpp"
 #include "retcomm/library_index.hpp"
 #include "retcomm/process_env.hpp"
+#include "retcomm/release_tags.hpp"
 #include "retcomm/toolchain_env.hpp"
 
 #include <nlohmann/json.hpp>
@@ -40,6 +42,17 @@ using nlohmann::json;
 void progress(const BuildProgressFn& fn, const std::string& msg, float frac = -1.0f) {
     if (fn) fn(msg, frac);
     std::cerr << msg << "\n";
+}
+
+// Keep hub Check Updates / ReleaseTagCache aligned with live fetches & installs.
+void sync_release_tag_cache(const Paths& paths, const Title& title, const std::string& tag) {
+    if (tag.empty()) return;
+    const std::string gh =
+        !title.release.github.empty() ? title.release.github : title.build.source.github;
+    if (gh.empty()) return;
+    ReleaseTagCache cache(release_tags_cache_path(paths));
+    cache.note_latest_tag(gh, title.release.allow_prerelease, tag);
+    cache.save_if_dirty();
 }
 
 // Stream a file with throttled status updates (same cadence as RomM downloads).
@@ -410,6 +423,127 @@ bool install_extracted_tree(const fs::path& staging, const fs::path& dest, std::
         return false;
     }
     return true;
+}
+
+// Stable per-title working tree (package updates overlay here so cmake/ninja stay incremental).
+constexpr const char* kWorkingSourceDir = "current";
+
+std::string read_source_marker_ref(const fs::path& dest) {
+    std::error_code ec;
+    const fs::path marker = dest / ".retcomm-source.json";
+    if (!fs::is_regular_file(marker, ec)) return {};
+    try {
+        std::ifstream in(marker);
+        const json j = json::parse(in);
+        return j.value("ref", "");
+    } catch (...) {
+        return {};
+    }
+}
+
+// Move legacy src/<tag>/ → src/current when present (keeps any leftover cmake build/).
+bool ensure_working_source_dir(const Title& title, const fs::path& src_base, const fs::path& current,
+                               const std::string& preferred_tag, const BuildProgressFn& on_progress) {
+    std::error_code ec;
+    if (fs::is_directory(current, ec) && source_tree_buildable(title, current)) return true;
+
+    auto try_rename = [&](const fs::path& from) -> bool {
+        if (!fs::is_directory(from, ec) || !source_tree_buildable(title, from)) return false;
+        if (from == current) return true;
+        progress(on_progress, "Migrating source tree to src/current…");
+        fs::create_directories(src_base, ec);
+        fs::rename(from, current, ec);
+        if (!ec && source_tree_buildable(title, current)) return true;
+        ec.clear();
+        fs::copy(from, current,
+                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+        if (!ec && source_tree_buildable(title, current)) {
+            fs::remove_all(from, ec);
+            return true;
+        }
+        fs::remove_all(current, ec);
+        return false;
+    };
+
+    const std::string safe = sanitize_tag(preferred_tag);
+    if (!safe.empty() && try_rename(src_base / safe)) return true;
+
+    std::vector<fs::path> candidates;
+    for (auto it = fs::directory_iterator(src_base, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        const auto name = it->path().filename().string();
+        if (name.empty() || name[0] == '.' || name == kWorkingSourceDir) continue;
+        if (source_tree_buildable(title, it->path())) candidates.push_back(it->path());
+    }
+    std::sort(candidates.begin(), candidates.end());
+    for (auto it = candidates.rbegin(); it != candidates.rend(); ++it) {
+        if (try_rename(*it)) return true;
+    }
+    return false;
+}
+
+// Replace dest with staging contents but keep cmake build_dir (and restore it afterward).
+bool install_extracted_tree_preserving_build(const fs::path& staging, const fs::path& dest,
+                                             const fs::path& build_rel, std::string* error,
+                                             const BuildProgressFn& on_progress) {
+    std::error_code ec;
+    fs::path aside;
+    const fs::path build_dir = dest / build_rel;
+    if (!build_rel.empty() && fs::is_directory(build_dir, ec)) {
+        aside = dest.parent_path() / (".keep-build-" + unique_pack_suffix());
+        progress(on_progress, "Preserving cmake build tree for incremental compile…");
+        fs::rename(build_dir, aside, ec);
+        if (ec) {
+            fs::copy(build_dir, aside,
+                     fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+            if (ec) {
+                if (error) *error = "cannot preserve build dir: " + ec.message();
+                return false;
+            }
+            fs::remove_all(build_dir, ec);
+        }
+    }
+
+    if (!install_extracted_tree(staging, dest, error)) {
+        if (!aside.empty() && fs::is_directory(aside, ec)) {
+            // Best-effort restore if the package install failed mid-way.
+            fs::create_directories(dest, ec);
+            fs::rename(aside, dest / build_rel, ec);
+        }
+        return false;
+    }
+
+    if (!aside.empty() && fs::is_directory(aside, ec)) {
+        progress(on_progress, "Restoring cmake build tree…");
+        const fs::path target = dest / build_rel;
+        fs::remove_all(target, ec);
+        ec.clear();
+        fs::rename(aside, target, ec);
+        if (ec) {
+            fs::copy(aside, target,
+                     fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
+            fs::remove_all(aside, ec);
+            if (ec) {
+                if (error) *error = "cannot restore build dir: " + ec.message();
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+void prune_stale_source_tag_dirs(const fs::path& src_base, const fs::path& keep) {
+    std::error_code ec;
+    if (!fs::is_directory(src_base, ec)) return;
+    for (auto it = fs::directory_iterator(src_base, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        const auto name = it->path().filename().string();
+        if (name.empty() || name[0] == '.') continue;
+        if (it->path() == keep || name == kWorkingSourceDir) continue;
+        fs::remove_all(it->path(), ec);
+    }
 }
 
 std::string shell_quote(const std::string& s) {
@@ -1090,10 +1224,12 @@ PackEnsureResult harvest_embedded_toolchain(const Paths& paths, const Title& tit
     return r;
 }
 
-void prune_build_tree_after_success(const fs::path& src_root, const fs::path& build_dir) {
+void prune_build_tree_after_success(const fs::path& src_root, const fs::path& build_dir,
+                                    bool auto_clean_build_dirs) {
     std::error_code ec;
-    // Drop cmake intermediates / whole build dir (staged binary lives under releases/).
-    if (!build_dir.empty()) fs::remove_all(build_dir, ec);
+    // Optional: drop cmake intermediates to save disk (next update rebuilds cold).
+    if (auto_clean_build_dirs && !build_dir.empty()) fs::remove_all(build_dir, ec);
+    // Always drop leftover embedded toolchain/ (compilers live in the shared cache).
     prune_embedded_toolchain(src_root);
 }
 
@@ -1976,7 +2112,8 @@ PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, boo
 
 PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
                                     const fs::path& override_dir, bool force,
-                                    BuildProgressFn on_progress) {
+                                    BuildProgressFn on_progress,
+                                    const std::string& hint_latest_tag) {
     PackEnsureResult r;
     std::error_code ec;
 
@@ -2011,89 +2148,128 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
 
     const fs::path install_root = paths.apps_dir / title.install_dir_name;
     ensure_dirs(paths);
-    const fs::path staging = install_root / "src" / ".staging";
-    const fs::path download_dir = install_root / "src" / ".download";
+    const fs::path src_base = install_root / "src";
+    const fs::path dest = src_base / kWorkingSourceDir;
+    const fs::path staging = src_base / ".staging";
+    const fs::path download_dir = src_base / ".download";
     fs::create_directories(download_dir, ec);
+    const fs::path build_rel = title.build.cmake.build_dir.empty()
+                                   ? fs::path("build")
+                                   : fs::path(title.build.cmake.build_dir);
 
-    auto finish_ok = [&](const fs::path& dest, const std::string& tag, const std::string& asset,
-                         const char* kind) {
+    auto finish_ok = [&](const std::string& tag, const std::string& asset, const char* kind) {
         json meta = {{"github", gh},
                      {"ref", tag},
                      {"asset", asset},
                      {"source", kind}};
         std::ofstream out(dest / ".retcomm-source.json");
         out << meta.dump(2) << "\n";
+        // Do not prune legacy src/<tag>/ here — build_title may still adopt
+        // generated C from those trees before codegen-cache exists.
+        if (std::string(kind) == "release" && !tag.empty())
+            sync_release_tag_cache(paths, title, tag);
         r.ok = true;
         r.root = dest;
         r.tag = tag;
         r.message = std::string("source ready (") + kind + ") at " + dest.string();
     };
 
-    // 1) Prefer the host OS game release zip (vendors engine + UI at release pins).
-    //    Falls through to zipball when the asset is binary-only or missing.
+    auto source_up_to_date = [&](const std::string& want_tag) -> bool {
+        if (force) return false;
+        if (!source_tree_buildable(title, dest)) return false;
+        const std::string have = read_source_marker_ref(dest);
+        if (have.empty()) return false;
+        return sanitize_tag(have) == sanitize_tag(want_tag);
+    };
+
+    auto install_into_working = [&](const fs::path& stg, std::string* err) -> bool {
+        const bool preserve =
+            fs::is_directory(dest / build_rel, ec) || source_tree_buildable(title, dest);
+        if (preserve) {
+            return install_extracted_tree_preserving_build(stg, dest, build_rel, err, on_progress);
+        }
+        return install_extracted_tree(stg, dest, err);
+    };
+
+    // 1) Host OS game release zip (MotK/BPE/Rampage setup-host packs).
+    //    Shares install/prefetch durable cache + 403 → offline fallback.
     const std::string release_gh =
         title.release.github.empty() ? gh : title.release.github;
     const std::string asset_glob = title.asset_glob_for_host();
-    if (!asset_glob.empty() && !release_gh.empty()) {
-        GhRelease rel;
-        std::string err;
-        const bool allow_pre = title.release.allow_prerelease;
-        if (fetch_latest_release(release_gh, rel, &err, allow_pre)) {
-            const GhAsset* asset = pick_asset(rel, asset_glob);
-            if (asset) {
-                const std::string tag = rel.tag.empty() ? ref : rel.tag;
-                const std::string safe = sanitize_tag(tag.empty() ? asset->name : tag);
-                const fs::path dest = install_root / "src" / safe;
-                const fs::path marker = dest / ".retcomm-source.json";
-                if (!force && fs::is_regular_file(marker, ec) && source_tree_buildable(title, dest)) {
-                    r.ok = true;
-                    r.root = dest;
-                    r.tag = tag;
-                    r.message = "source cached (release): " + dest.string();
+    const bool prefer_release_zip = !asset_glob.empty() && !release_gh.empty();
+    if (prefer_release_zip) {
+        InstallOptions iopts;
+        iopts.hint_latest_tag = hint_latest_tag;
+        iopts.allow_prerelease = title.release.allow_prerelease;
+        iopts.force = force;
+
+        progress(on_progress, "Resolving release source zip…");
+        int last_pct = -1;
+        auto zip = resolve_title_release_zip(
+            paths, title, iopts, [&](std::uint64_t got, std::uint64_t total) {
+                if (!on_progress || total == 0) return;
+                const int pct = static_cast<int>((got * 100) / total);
+                if (pct == last_pct || (pct != 100 && pct % 5 != 0)) return;
+                last_pct = pct;
+                progress(on_progress,
+                         "Downloading release source… " + std::to_string(pct) + "%",
+                         static_cast<float>(got) / static_cast<float>(total));
+            });
+
+        if (zip.ok && !zip.zip_path.empty() && !zip.tag.empty()) {
+            ensure_working_source_dir(title, src_base, dest, zip.tag, on_progress);
+            if (source_up_to_date(zip.tag)) {
+                r.ok = true;
+                r.root = dest;
+                r.tag = zip.tag;
+                r.message = "source cached (release): " + dest.string();
+                return r;
+            }
+
+            progress(on_progress,
+                     (zip.from_cache ? "Using cached release source " : "Extracting ") +
+                         zip.asset_name + "…");
+            fs::remove_all(staging, ec);
+            fs::create_directories(staging, ec);
+            std::string err;
+            if (extract_archive_to(zip.zip_path, staging, &err) &&
+                install_into_working(staging, &err)) {
+                if (source_tree_buildable(title, dest)) {
+                    finish_ok(zip.tag, zip.asset_name, "release");
+                    if (zip.from_cache) r.message += " [" + zip.message + "]";
                     return r;
                 }
-
-                const std::string dl_label = "Downloading release source " + asset->name;
-                progress(on_progress, dl_label + "…");
-                fs::remove_all(staging, ec);
-                fs::create_directories(staging, ec);
-                const fs::path download = download_dir / asset->name;
-                auto headers = github_http_headers();
-                headers.erase(std::remove_if(headers.begin(), headers.end(),
-                                             [](const auto& h) { return h.first == "Accept"; }),
-                              headers.end());
-                headers.emplace_back("Accept", "application/octet-stream");
-                const bool downloaded = http_download_with_progress(
-                    asset->browser_download_url, download, &err, headers, on_progress, dl_label);
-                if (downloaded) progress(on_progress, "Extracting " + asset->name + "…");
-                if (downloaded && extract_archive_to(download, staging, &err) &&
-                    install_extracted_tree(staging, dest, &err)) {
-                    fs::remove(download, ec);
-                    if (source_tree_buildable(title, dest)) {
-                        finish_ok(dest, tag, asset->name, "release");
-                        return r;
-                    }
-                    progress(on_progress,
-                             "Release zip lacks buildable engine/UI — falling back to zipball…");
-                    fs::remove_all(dest, ec);
-                } else {
-                    progress(on_progress,
-                             "Release source fetch failed (" + err + ") — trying zipball…");
-                }
+                r.message =
+                    "release zip lacks buildable engine/UI tree (" + zip.asset_name + ")";
+                return r;
             }
+            r.message = "release source extract failed: " +
+                        (err.empty() ? zip.message : err);
+            return r;
         }
+
+        // Setup-host titles must not fall through to incomplete zipball@main.
+        if (title.supports_local_build()) {
+            r.message =
+                "release source unavailable: " +
+                (zip.message.empty() ? "no cached zip and GitHub API failed" : zip.message) +
+                ". Run Check Updates when GitHub is reachable so the release zip can "
+                "prefetch, then retry Update.";
+            return r;
+        }
+        progress(on_progress, "Release source unavailable (" + zip.message +
+                                  ") — trying zipball…");
     }
 
-    // 2) GitHub source zipball (no git submodules — may be incomplete for psx titles).
+    // 2) GitHub source zipball — only when there is no host release asset glob
+    //    (or non-build titles above). Zipballs omit git submodules.
     if (ref.empty()) {
         r.message =
             "no buildable release zip and build.source.ref empty — cannot fetch source zipball";
         return r;
     }
-    const std::string safe_ref = sanitize_tag(ref);
-    const fs::path dest = install_root / "src" / safe_ref;
-    const fs::path marker = dest / ".retcomm-source.json";
-    if (!force && fs::is_regular_file(marker, ec) && source_tree_buildable(title, dest)) {
+    ensure_working_source_dir(title, src_base, dest, ref, on_progress);
+    if (source_up_to_date(ref)) {
         r.ok = true;
         r.root = dest;
         r.tag = ref;
@@ -2101,6 +2277,7 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
         return r;
     }
 
+    const std::string safe_ref = sanitize_tag(ref);
     const std::string zip_label = "Downloading source zipball " + gh + "@" + ref;
     progress(on_progress, zip_label + "…");
     fs::remove_all(staging, ec);
@@ -2122,7 +2299,7 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
         r.message = "source extract failed: " + err;
         return r;
     }
-    if (!install_extracted_tree(staging, dest, &err)) {
+    if (!install_into_working(staging, &err)) {
         r.message = "source install failed: " + err;
         return r;
     }
@@ -2134,7 +2311,7 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
             "RETCOMM_SOURCE_DIR to a full checkout.";
         return r;
     }
-    finish_ok(dest, ref, safe_ref + "-zipball.zip", "zipball");
+    finish_ok(ref, safe_ref + "-zipball.zip", "zipball");
     return r;
 }
 
@@ -2170,7 +2347,8 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
         return result;
     }
 
-    auto src = ensure_source_tree(paths, title, opts.source_dir, opts.force, opts.on_progress);
+    auto src = ensure_source_tree(paths, title, opts.source_dir, opts.force, opts.on_progress,
+                                  opts.hint_latest_tag);
     if (!src.ok) {
         result.message = src.message;
         return result;
@@ -2544,7 +2722,9 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
     }
 
     const fs::path build_dir = src.root / title.build.cmake.build_dir;
-    if (opts.force) {
+    // Keep build/ across normal Update / --force so ninja stays incremental.
+    // Only wipe when the caller asks for a full regenerate from disc.
+    if (opts.force_generate) {
         progress(opts.on_progress, "Cleaning previous cmake build…", 0.52f);
         fs::remove_all(build_dir, ec);
     }
@@ -2707,10 +2887,18 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
         result.message = "built but failed to write install.json";
         return result;
     }
+    if (!rec.source_ref.empty() && rec.source_ref != "main" && rec.source_ref != "master" &&
+        rec.source_ref != "override")
+        sync_release_tag_cache(paths, title, rec.source_ref);
 
-    // Free disk: drop per-title build tree + any leftover embedded toolchain/
-    // (compilers live in the shared toolchains cache after harvest).
-    prune_build_tree_after_success(src.root, build_dir);
+    // Free disk: optional cmake build/ wipe (Library Settings → Advanced) + always
+    // drop leftover embedded toolchain/ (compilers live in the shared cache).
+    const bool auto_clean =
+        load_app_config(paths.config_path).auto_clean_build_dirs;
+    if (auto_clean)
+        progress(opts.on_progress, "Cleaning cmake build directory…", 0.97f);
+    prune_build_tree_after_success(src.root, build_dir, auto_clean);
+    prune_stale_source_tag_dirs(paths.apps_dir / title.install_dir_name / "src", src.root);
 
     result.plan = inspect_install(paths, title);
     result.plan.latest_tag = pin_tag;
@@ -2718,6 +2906,7 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
     result.message = "built " + title.id + " from " + rec.source_ref + "\n" +
                      "  binary: " + result.plan.binary_path.string() + "\n" +
                      "  sdk: " + sdk.tag + "  toolchain: " + tc.tag + "\n";
+    if (auto_clean) result.message += "  cleaned cmake build/ (auto_clean_build_dirs)\n";
     if (!stash_note.empty()) result.message += "  " + stash_note;
     if (!restore_note.empty()) result.message += "  " + restore_note;
     if (!prune_note.empty()) result.message += "  " + prune_note;
@@ -2738,6 +2927,7 @@ InstallResult install_title_auto(const Paths& paths, const Title& title,
             b.rom_path = idx.preferred_rom(title.id);
         }
         b.force = install_opts.force || b.force;
+        if (b.hint_latest_tag.empty()) b.hint_latest_tag = install_opts.hint_latest_tag;
         return build_title(paths, title, b);
     };
 
@@ -2774,11 +2964,26 @@ InstallResult update_title_auto(const Paths& paths, const Title& title,
                     install_opts.allow_prerelease || title.release.allow_prerelease;
                 if (fetch_latest_release(title.release.github, rel, &err, allow_pre) &&
                     !rel.tag.empty()) {
+                    sync_release_tag_cache(paths, title, rel.tag);
                     const std::string latest = sanitize_tag(rel.tag);
                     const std::string have = sanitize_tag(plan.record->source_ref);
-                    need = (have != latest);
+                    // Version-aware: installed ahead of a stale hint is not "need update".
+                    need = release_tag_cmp(have, latest) < 0;
                 } else {
-                    need = plan.record->source_ref != title.build.source.ref;
+                    // API failed (often 403): compare against hub hint / tag cache.
+                    std::string latest = install_opts.hint_latest_tag;
+                    if (latest.empty()) {
+                        ReleaseTagCache tag_cache(release_tags_cache_path(paths));
+                        latest = tag_cache.latest_tag(title.release.github, allow_pre,
+                                                      /*force=*/false, nullptr);
+                        tag_cache.save_if_dirty();
+                    }
+                    if (!latest.empty()) {
+                        need = release_tag_cmp(sanitize_tag(plan.record->source_ref),
+                                               sanitize_tag(latest)) < 0;
+                    } else {
+                        need = plan.record->source_ref != title.build.source.ref;
+                    }
                 }
             } else {
                 need = plan.record->source_ref != title.build.source.ref;
@@ -2793,7 +2998,10 @@ InstallResult update_title_auto(const Paths& paths, const Title& title,
                         (plan.record ? plan.record->source_ref : title.build.source.ref) + ")\n";
             return r;
         }
-        b.force = true;
+        // Re-fetch when the release tag changed (ensure_source_tree compares
+        // marker ref). force only when the caller asked — do not wipe cmake.
+        b.force = b.force || install_opts.force;
+        if (b.hint_latest_tag.empty()) b.hint_latest_tag = install_opts.hint_latest_tag;
         // Leave force_generate as caller set (false → reuse codegen-cache).
         return build_title(paths, title, b);
     }

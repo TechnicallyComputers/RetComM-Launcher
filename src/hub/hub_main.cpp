@@ -1267,6 +1267,28 @@ void draw_detail_manage_game_popup(HubModel& hub, const TitleRow& row, const The
             hub.start_job(keep_saves ? HubJob::Uninstall : HubJob::UninstallPurge, row.id);
             ImGui::CloseCurrentPopup();
         }
+        if (row.supports_local_build &&
+            (row.installed || row.install_dir_present || row.install_method == "build")) {
+            ImGui::Dummy(ImVec2(0, 4));
+            ImGui::BeginDisabled(!row.has_cmake_build_data);
+            if (ImGui::Button("Delete Build Data", ImVec2(-1, 0))) {
+                hub.start_job(HubJob::DeleteBuildData, row.id);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal |
+                                     ImGuiHoveredFlags_AllowWhenDisabled)) {
+                if (row.has_cmake_build_data) {
+                    ImGui::SetTooltip(
+                        "Deletes cmake build intermediates (src/*/build/) to free disk space.\n"
+                        "The next app update will need a full rebuild instead of an incremental "
+                        "one.\n"
+                        "Does not remove the installed game, saves, or ROM library.");
+                } else {
+                    ImGui::SetTooltip("No cmake build data on disk.");
+                }
+            }
+        }
     } else {
         ImGui::TextColored(th.text_muted, "No install folder or preserved data yet.");
     }
@@ -1958,6 +1980,19 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
             "Unlisted: remove apps/ installs no longer in the catalog. Old update files: "
             "promote saves/config into the current release, then delete leftover "
             "releases/<old-tag>/ folders.");
+        ImGui::PopStyleColor();
+    }
+
+    ImGui::Dummy(ImVec2(0, 10));
+    if (ImGui::CollapsingHeader("Advanced")) {
+        if (ImGui::Checkbox("Auto-clean cmake build directories after install",
+                            &hub.settings.auto_clean_build_dirs))
+            hub.settings.dirty = true;
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "When enabled, RetComM deletes each title's src/current/build/ after a successful "
+            "local build to free disk space. Leave off for faster package updates (incremental "
+            "Ninja). Save to apply.");
         ImGui::PopStyleColor();
     }
 

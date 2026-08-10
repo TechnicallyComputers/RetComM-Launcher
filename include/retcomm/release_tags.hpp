@@ -13,6 +13,9 @@ inline constexpr std::int64_t kReleaseTagCacheTtlSeconds = 4 * 60 * 60; // 4 hou
 
 fs::path release_tags_cache_path(const Paths& paths);
 
+// Compare release tags (optional leading 'v', dotted numerics). <0 / 0 / >0.
+int release_tag_cmp(const std::string& a, const std::string& b);
+
 // Session + disk cache for GitHub latest release tags.
 // Dedupes by (slug, allow_prerelease) within one instance; persists under
 // data_dir/release-tags.json so Check Updates stays fast as installs grow.
@@ -23,6 +26,14 @@ public:
     // force=true ignores TTL (still dedupes within this instance).
     std::string latest_tag(const std::string& github_slug, bool allow_prerelease, bool force,
                            std::string* error = nullptr);
+
+    // Record a live GitHub latest (or an installed source_ref that is ahead of a
+    // stale TTL entry) so Check Updates / hub rows stay consistent with Update.
+    void note_latest_tag(const std::string& github_slug, bool allow_prerelease,
+                         const std::string& tag);
+    // Like note_latest_tag, but only replaces the cached value when `tag` is newer.
+    void note_latest_tag_if_newer(const std::string& github_slug, bool allow_prerelease,
+                                  const std::string& tag);
 
     void save_if_dirty();
 

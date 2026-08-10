@@ -18,8 +18,9 @@ using BuildProgressFn = std::function<void(const std::string& message, float fra
 using BuildOutputFn = std::function<void(const std::string& line)>;
 
 struct BuildOptions {
-    bool force = false; // re-fetch source / rebuild even if pins match
+    bool force = false; // re-fetch source even if marker tag matches
     // When true, always re-run generate even if codegen-cache / prior src matches.
+    // Also wipes the per-title cmake build/ dir (clean rebuild).
     bool force_generate = false;
     fs::path rom_path;  // required verified ROM (library preferred_rom)
     // Retail BIOS dump for psxrecomp generate (--bios). Empty + use_openbios → OpenBIOS.
@@ -30,6 +31,8 @@ struct BuildOptions {
     fs::path toolchain_dir;
     fs::path sdk_dir;
     fs::path source_dir;
+    // Hub row / ReleaseTagCache hint — used when GitHub /releases/latest is 403.
+    std::string hint_latest_tag;
     BuildProgressFn on_progress;
     // When set, CLI lines are streamed live and failure messages omit the full dump
     // (already delivered via this callback).
@@ -72,10 +75,13 @@ PackEnsureResult update_toolchain_to_latest(
     const std::string& pack_id = "cmake-clang-v1",
     const std::string& github = "TechnicallyComputers/retcomm-toolchains");
 
-// Fetch GitHub source zipball into apps/<install>/src/<ref>/ (or override).
+// Fetch release/zipball source into apps/<install>/src/current/ (or override).
+// Package updates overlay in place and preserve cmake build/ for incremental ninja.
+// hint_latest_tag: same offline fallback as zip install when the live API fails.
 PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
                                     const fs::path& override_dir = {}, bool force = false,
-                                    BuildProgressFn on_progress = {});
+                                    BuildProgressFn on_progress = {},
+                                    const std::string& hint_latest_tag = {});
 
 // Local generate + cmake + stage into releases/build-<ref>/ + install.json.
 InstallResult build_title(const Paths& paths, const Title& title, const BuildOptions& opts = {});
@@ -86,9 +92,9 @@ InstallResult install_title_auto(const Paths& paths, const Title& title,
                                  const InstallOptions& install_opts = {},
                                  const BuildOptions& build_opts = {});
 
-// Setup-host titles: rebuild from latest release zip; codegen-cache skips regenerate
-// when ROM/BIOS/emitters match (host/UI-only updates). Pure prebuilt: zip extract.
-// Generate & Rebuild sets force_generate.
+// Setup-host titles: overlay latest release zip onto src/current and cmake-build
+// incrementally; codegen-cache skips regenerate when ROM/BIOS/emitters match.
+// Pure prebuilt: zip extract. Generate & Rebuild sets force_generate.
 InstallResult update_title_auto(const Paths& paths, const Title& title,
                                 const InstallOptions& install_opts = {},
                                 const BuildOptions& build_opts = {});

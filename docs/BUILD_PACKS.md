@@ -7,7 +7,7 @@ tools may be a separate pack **or** embedded in the game release zip.
 |---|---|---|
 | Toolchain (`cmake-clang-v1`) | `~/.local/share/retcomm/toolchains/<id>/<tag>/` (Windows: `%LOCALAPPDATA%\retcomm\toolchains\…`) — shared with standalone setup wizards | `RETCOMM_TOOLCHAIN_DIR` |
 | SDK tools (`snesrecomp-tools` / `psxrecomp-tools`) | `~/.local/share/retcomm/sdks/<id>/<tag>/` | `RETCOMM_SDK_DIR` |
-| Game source | `…/apps/<install>/src/<tag>/` | `RETCOMM_SOURCE_DIR` |
+| Game source | `…/apps/<install>/src/current/` (stable; tag in `.retcomm-source.json`) | `RETCOMM_SOURCE_DIR` |
 
 Game source prefers the host **release zip** (`release.asset_glob`) when that
 archive vendors a cmake-buildable tree (e.g. BPE `bpe-*.zip` ships `psxrecomp/` +
@@ -16,23 +16,35 @@ GitHub source zipball at `build.source.ref` (note: zipballs omit git submodules)
 
 **One-zip titles (BPE):** the same `bpe-*.zip` is used for install and update.
 RetComM harvests CLI + `psxrecomp-game` / `psxrecomp-bios` into the shared SDK
-cache, prunes those binaries from the per-title source tree, rebuilds cleanly,
-and restores saves + user config (`settings.toml`, etc.) across updates. Harvest
+cache, prunes those binaries from the per-title source tree, rebuilds, and
+restores saves + user config (`settings.toml`, etc.) across updates. Harvest
 requires **both** emitters (no separate tools zip). The setup host inside `src/`
 is never treated as a finished Play install — only `releases/` (or `current/`)
 counts.
 
+**Incremental cmake on update:** source always lives at `src/current/`. A newer
+release zip replaces package files in place while preserving `src/current/build/`
+so Ninja only recompiles changed translation units. Legacy `src/<tag>/` trees are
+migrated to `current` once, then pruned. Disk cost: the cmake tree stays after
+install (often hundreds of MiB) unless Library Settings → **Advanced** →
+**Auto-clean cmake build directories after install** is enabled
+(`auto_clean_build_dirs` in `config.json`). Hub **Generate & Rebuild**
+(`force_generate`) wipes `build/` and regenerates C from the disc.
+
 **Codegen reuse on update:** after the first successful generate, RetComM keeps
 `apps/<title>/codegen-cache/` keyed by ROM/BIOS + emitter fingerprints. Updates
 that only change runtime/UI sources restore that cache (or a stamped prior
-`src/<tag>/`) and skip regenerate; pass `force_generate` (Hub **Generate &
+source tree) and skip regenerate; pass `force_generate` (Hub **Generate &
 Rebuild**) to rebuild C from the disc again.
 
 **Setup-host vs raw zip:** catalog titles with `build.enabled` treat the GitHub
 release zip as *source* for generate+cmake (`install_title_auto` /
 `update_title_auto`). Blind zip extract would replace a built Play binary with
 the setup-host wizard — never do that for MotK/BPE-style packs. Pure prebuilt
-titles (no local build recipe) still Update via zip extract.
+titles (no local build recipe) still Update via zip extract. When GitHub
+`/releases/latest` is rate-limited (HTTP 403), Update uses the same durable
+release-zip cache as prefetch (`data_dir/cache/releases/…`) plus the hub tag
+hint — it does **not** fall back to an incomplete `zipball@main`.
 
 Optional: `RETCOMM_PYTHON` selects the interpreter for SDK CLIs
 (default `python3` / `python` on Windows).

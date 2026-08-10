@@ -1500,12 +1500,14 @@ InstallPlan plan_install(const Paths& paths, const Title& title, const InstallOp
             tag_cache.save_if_dirty();
         }
         if (!plan.latest_tag.empty()) {
-            oss << "  latest:  " << plan.latest_tag << "\n";
             const std::string have = install_release_compare_tag(plan);
-            if (plan.installed && !have.empty() && have != plan.latest_tag) {
+            if (plan.installed && !have.empty() && release_tag_cmp(have, plan.latest_tag) > 0)
+                plan.latest_tag = have; // installed ahead of stale cache
+            oss << "  latest:  " << plan.latest_tag << "\n";
+            if (plan.installed && !have.empty() && release_tag_cmp(have, plan.latest_tag) < 0) {
                 plan.update_available = true;
                 oss << "  update:  available (" << have << " → " << plan.latest_tag << ")\n";
-            } else if (plan.installed && !have.empty() && have == plan.latest_tag) {
+            } else if (plan.installed && !have.empty()) {
                 oss << "  update:  up to date\n";
             }
         } else if (!err.empty()) {
@@ -1732,6 +1734,22 @@ EnsuredReleaseAsset ensure_release_asset_cached(const Paths& paths, const Title&
 }
 
 } // namespace
+
+ResolvedReleaseZip resolve_title_release_zip(const Paths& paths, const Title& title,
+                                             const InstallOptions& opts,
+                                             HttpProgressFn on_progress) {
+    auto ensured =
+        ensure_release_asset_cached(paths, title, opts, /*allow_skip_uptodate=*/false,
+                                    std::move(on_progress));
+    ResolvedReleaseZip out;
+    out.ok = ensured.ok;
+    out.from_cache = ensured.from_cache;
+    out.zip_path = ensured.download;
+    out.tag = ensured.rel.tag;
+    out.asset_name = ensured.asset_name;
+    out.message = ensured.message;
+    return out;
+}
 
 PrefetchResult prefetch_title_release(const Paths& paths, const Title& title,
                                       const InstallOptions& opts) {

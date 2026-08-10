@@ -191,6 +191,8 @@ AppConfig load_app_config(const fs::path& config_path) {
             cfg.filter_unsupported_titles = j.value("filter_unsupported_titles", false);
         if (j.contains("check_updates_before_launch"))
             cfg.check_updates_before_launch = j.value("check_updates_before_launch", true);
+        if (j.contains("auto_clean_build_dirs"))
+            cfg.auto_clean_build_dirs = j.value("auto_clean_build_dirs", false);
 
         if (j.contains("catalog") && j.at("catalog").is_object()) {
             const auto& c = j.at("catalog");
@@ -243,6 +245,7 @@ bool save_app_config(const fs::path& config_path, const AppConfig& cfg, std::str
               {"prefer_local_boxart", cfg.prefer_local_boxart},
               {"filter_unsupported_titles", cfg.filter_unsupported_titles},
               {"check_updates_before_launch", cfg.check_updates_before_launch},
+              {"auto_clean_build_dirs", cfg.auto_clean_build_dirs},
               {"catalog",
                {{"url", cfg.catalog.url},
                 {"github_repo", cfg.catalog.github_repo},

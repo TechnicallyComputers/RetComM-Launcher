@@ -42,6 +42,8 @@ enum class HubJob : int {
     GenerateRebuild,
     Uninstall,
     UninstallPurge,
+    // Drop per-title cmake build/ intermediates (keeps Play binary + saves).
+    DeleteBuildData,
     Launch,
     ScanRoms,
     FullScanRoms,
@@ -75,6 +77,7 @@ inline bool hub_job_is_install(HubJob j) {
     case HubJob::GenerateRebuild:
     case HubJob::Uninstall:
     case HubJob::UninstallPurge:
+    case HubJob::DeleteBuildData:
     case HubJob::FetchRommRom:
     case HubJob::FetchRommBios:
         return true;
@@ -140,6 +143,8 @@ struct TitleRow {
     bool can_wine_install = false;
     bool supports_local_build = false;
     bool can_prebuilt_install = false;
+    // True when apps/<install>/src/*/build/ exists (cmake intermediates).
+    bool has_cmake_build_data = false;
     // install.json method: "build" | "zip" | "" (unknown / not installed).
     std::string install_method;
     bool has_rom_identity = false;
@@ -245,6 +250,7 @@ struct SettingsDraft {
     bool prefer_local_boxart = false;
     bool filter_unsupported_titles = false;
     bool check_updates_before_launch = true;
+    bool auto_clean_build_dirs = false;
     std::vector<PlatformFolderEdit> platform_folders;
     bool dirty = false;
 };

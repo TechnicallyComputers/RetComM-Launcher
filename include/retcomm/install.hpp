@@ -1,6 +1,7 @@
 #pragma once
 
 #include "retcomm/catalog.hpp"
+#include "retcomm/http.hpp"
 #include "retcomm/paths.hpp"
 
 #include <filesystem>
@@ -201,6 +202,20 @@ struct PrefetchResult {
 // Does not extract or swap current/. Used to warm the cache before Update.
 PrefetchResult prefetch_title_release(const Paths& paths, const Title& title,
                                       const InstallOptions& opts = {});
+
+// Same durable-cache resolution as install/prefetch (live GitHub, else hint/tag
+// cache + on-disk zip). Used by local generate+cmake source staging.
+struct ResolvedReleaseZip {
+    bool ok = false;
+    bool from_cache = false;
+    fs::path zip_path;
+    std::string tag;
+    std::string asset_name;
+    std::string message;
+};
+ResolvedReleaseZip resolve_title_release_zip(const Paths& paths, const Title& title,
+                                             const InstallOptions& opts = {},
+                                             HttpProgressFn on_progress = {});
 
 // Wine helpers for Linux / macOS fallback installs.
 bool host_supports_wine();

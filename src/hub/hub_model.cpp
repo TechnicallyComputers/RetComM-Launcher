@@ -361,6 +361,26 @@ void HubModel::refresh_rows(bool check_updates) {
             host_supports_wine() && t.supports_wine_install() && host_os_key() != "windows";
         row.supports_local_build = t.supports_local_build();
         row.can_prebuilt_install = t.supports_prebuilt_install();
+        row.has_cmake_build_data = false;
+        if (row.supports_local_build && !plan.install_root.empty()) {
+            const fs::path src_base = plan.install_root / "src";
+            const fs::path build_rel = t.build.cmake.build_dir.empty()
+                                          ? fs::path("build")
+                                          : fs::path(t.build.cmake.build_dir);
+            std::error_code bec;
+            if (fs::is_directory(src_base, bec)) {
+                for (auto it = fs::directory_iterator(src_base, bec);
+                     !bec && it != fs::directory_iterator(); it.increment(bec)) {
+                    if (!it->is_directory(bec)) continue;
+                    const auto name = it->path().filename().string();
+                    if (name.empty() || name[0] == '.') continue;
+                    if (fs::is_directory(it->path() / build_rel, bec)) {
+                        row.has_cmake_build_data = true;
+                        break;
+                    }
+                }
+            }
+        }
         row.has_rom_identity = t.has_rom_identity();
         row.romm_ready = cfg.romm.enabled() && !cfg.romm.api_token.empty();
 
@@ -569,19 +589,31 @@ void HubModel::refresh_rows(bool check_updates) {
                 row.latest_tag = it->second.latest_tag;
             }
             // Compare GitHub latest to release_compare_tag (source_ref for build
-            // pins; install.json tag is "build-<ref>"). Update prefers zip when
-            // host release assets exist.
+            // pins; install.json tag is "build-<ref>").
             const std::string& have = row.release_compare_tag.empty() ? row.installed_tag
                                                                      : row.release_compare_tag;
-            if (!row.latest_tag.empty() && !have.empty() && row.latest_tag != have)
-                row.update_available = true;
+            if (!have.empty() && !row.latest_tag.empty()) {
+                // Installed ahead of a stale TTL cache (Update fetched newer live):
+                // promote cache/UI so we don't offer a downgrade to the old "latest".
+                if (release_tag_cmp(have, row.latest_tag) > 0) {
+                    tag_cache.note_latest_tag_if_newer(t.release.github, t.release.allow_prerelease,
+                                                      have);
+                    row.latest_tag = have;
+                    row.update_available = false;
+                } else if (release_tag_cmp(have, row.latest_tag) < 0) {
+                    row.update_available = true;
+                } else {
+                    row.update_available = false;
+                }
+            }
         }
 
         next.push_back(std::move(row));
     }
 
+    // Persist network fetches and any "installed ahead of stale cache" promotions.
+    tag_cache.save_if_dirty();
     if (check_updates) {
-        tag_cache.save_if_dirty();
         append_log("Game update check: " + std::to_string(tag_cache.network_fetches()) +
                    " GitHub fetch(es), " + std::to_string(tag_cache.cache_hits()) +
                    " cache hit(s)");
@@ -946,6 +978,22 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 wire_build_activity(this, bopts);
                 auto r = update_title_auto(paths, *t, iopts, bopts);
                 append_log(r.message);
+                if (r.ok) {
+                    // Align Check Updates cache with whatever Update just resolved/installed.
+                    std::string noted;
+                    if (r.plan.record && !r.plan.record->source_ref.empty())
+                        noted = r.plan.record->source_ref;
+                    else if (!r.plan.latest_tag.empty())
+                        noted = r.plan.latest_tag;
+                    else if (!iopts.hint_latest_tag.empty())
+                        noted = iopts.hint_latest_tag;
+                    if (!noted.empty() && !t->release.github.empty()) {
+                        ReleaseTagCache cache(release_tags_cache_path(paths));
+                        cache.note_latest_tag(t->release.github, t->release.allow_prerelease,
+                                              noted);
+                        cache.save_if_dirty();
+                    }
+                }
                 set_status(r.ok ? (r.skipped ? ("Up to date: " + title_id)
                                              : ("Updated " + title_id))
                                 : ("Update failed: " + title_id));
@@ -993,6 +1041,52 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 auto r = uninstall_title(paths, *t, opts);
                 append_log(r.message);
                 set_status(r.ok ? ("Uninstalled " + title_id) : ("Uninstall failed: " + title_id));
+                break;
+            }
+            case HubJob::DeleteBuildData: {
+                set_status("Deleting build data for " + title_id + "…");
+                const auto* t = find_title();
+                if (!t) {
+                    append_log("unknown title: " + title_id);
+                    break;
+                }
+                const fs::path src_base = paths.apps_dir / t->install_dir_name / "src";
+                const fs::path build_rel = t->build.cmake.build_dir.empty()
+                                              ? fs::path("build")
+                                              : fs::path(t->build.cmake.build_dir);
+                std::error_code ec;
+                int removed = 0;
+                auto wipe_build = [&](const fs::path& src_root) {
+                    const fs::path build_dir = src_root / build_rel;
+                    if (!fs::is_directory(build_dir, ec)) return;
+                    fs::remove_all(build_dir, ec);
+                    if (!ec) {
+                        ++removed;
+                        append_log("Removed " + build_dir.string());
+                    } else {
+                        append_log("Failed to remove " + build_dir.string() + ": " +
+                                   ec.message());
+                    }
+                };
+                // Stable working tree + any leftover src/<tag>/build from older layouts.
+                if (fs::is_directory(src_base, ec)) {
+                    for (auto it = fs::directory_iterator(src_base, ec);
+                         !ec && it != fs::directory_iterator(); it.increment(ec)) {
+                        if (!it->is_directory(ec)) continue;
+                        const auto name = it->path().filename().string();
+                        if (name.empty() || name[0] == '.') continue;
+                        wipe_build(it->path());
+                    }
+                }
+                if (removed > 0) {
+                    set_status("Deleted build data: " + title_id);
+                    append_log("Deleted " + std::to_string(removed) +
+                               " cmake build tree(s) for " + title_id +
+                               " (Play binary and saves kept)");
+                } else {
+                    set_status("No build data: " + title_id);
+                    append_log("No cmake build/ directory found under " + src_base.string());
+                }
                 break;
             }
             case HubJob::Launch:
@@ -1367,13 +1461,19 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 const auto plan = inspect_install(paths, *t);
                 std::string err;
                 ReleaseTagCache tag_cache(release_tags_cache_path(paths));
-                const std::string latest =
+                std::string latest =
                     tag_cache.latest_tag(t->release.github, t->release.allow_prerelease,
                                          /*force=*/false, &err);
-                tag_cache.save_if_dirty();
                 const std::string have = install_release_compare_tag(plan);
+                // Installed ahead of stale TTL cache → promote, don't block launch.
+                if (!have.empty() && !latest.empty() && release_tag_cmp(have, latest) > 0) {
+                    tag_cache.note_latest_tag_if_newer(t->release.github,
+                                                      t->release.allow_prerelease, have);
+                    latest = have;
+                }
+                tag_cache.save_if_dirty();
                 const bool upd =
-                    !latest.empty() && !have.empty() && latest != have;
+                    !latest.empty() && !have.empty() && release_tag_cmp(have, latest) < 0;
                 if (!latest.empty())
                     append_log(title_id + ": installed " + have + ", latest " + latest);
                 else if (!err.empty())
@@ -1881,6 +1981,7 @@ void HubModel::open_settings() {
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
     settings.check_updates_before_launch = cfg.check_updates_before_launch;
+    settings.auto_clean_build_dirs = cfg.auto_clean_build_dirs;
 
     seed_setup_platform_folders();
     settings.dirty = false;
@@ -1900,6 +2001,7 @@ void HubModel::open_setup() {
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
     settings.check_updates_before_launch = cfg.check_updates_before_launch;
+    settings.auto_clean_build_dirs = cfg.auto_clean_build_dirs;
     settings.platform_folders.clear();
     settings.dirty = false;
     apply_suggested_library_roots(/*overwrite_nonempty=*/false);
@@ -2148,6 +2250,7 @@ bool HubModel::save_settings(std::string* error) {
     next.prefer_local_boxart = settings.prefer_local_boxart;
     next.filter_unsupported_titles = settings.filter_unsupported_titles;
     next.check_updates_before_launch = settings.check_updates_before_launch;
+    next.auto_clean_build_dirs = settings.auto_clean_build_dirs;
 
     // Setup wizard leaves platform_folders empty — keep whatever was already in cfg.
     if (!settings.platform_folders.empty()) {
@@ -2166,6 +2269,7 @@ bool HubModel::save_settings(std::string* error) {
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
     settings.check_updates_before_launch = cfg.check_updates_before_launch;
+    settings.auto_clean_build_dirs = cfg.auto_clean_build_dirs;
     settings.dirty = false;
     set_status("Saved library settings");
     append_log("Wrote " + paths.config_path.string());

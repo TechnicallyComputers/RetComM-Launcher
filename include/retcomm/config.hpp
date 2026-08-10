@@ -46,6 +46,9 @@ struct AppConfig {
     bool filter_unsupported_titles = false;
     // When Play is pressed, query GitHub for that title and prompt if newer.
     bool check_updates_before_launch = true;
+    // After a successful local generate+cmake, delete apps/<title>/src/current/build/
+    // to save disk. Off by default so package updates stay incremental.
+    bool auto_clean_build_dirs = false;
     CatalogConfig catalog;
     RommConfig romm;
     NetplayConfig netplay;
