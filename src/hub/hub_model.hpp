@@ -242,6 +242,11 @@ struct PlatformFolderEdit {
     char folders[256]{}; // comma-separated folder names under library_root
 };
 
+struct InstallRootEdit {
+    char label[128]{};
+    char path[1024]{};
+};
+
 struct SettingsDraft {
     char library_root[1024]{};
     char bios_root[1024]{};
@@ -252,6 +257,8 @@ struct SettingsDraft {
     bool check_updates_before_launch = true;
     bool auto_clean_build_dirs = false;
     std::vector<PlatformFolderEdit> platform_folders;
+    std::vector<InstallRootEdit> install_roots;
+    int default_install_root_index = 0;
     bool dirty = false;
 };
 
@@ -269,6 +276,7 @@ enum class FolderPickTarget : int {
     BiosRoot,
     SavesRoot,
     EmulationRoot, // Easy setup: parent of roms/bios/saves
+    InstallRoot,   // Library Settings → add/edit game install location
 };
 
 // First-run wizard path after the Easy / Advanced chooser.
@@ -397,6 +405,7 @@ struct HubModel {
     FolderPickTarget folder_pick_target = FolderPickTarget::None;
     std::string folder_pick_path;
     bool folder_pick_busy = false;
+    int folder_pick_install_index = -1; // InstallRoot row being browsed
 
     // Library modal → Import platform (empty = none selected; no "All").
     std::string library_import_platform;
@@ -440,10 +449,21 @@ struct HubModel {
     // Build & Install with no local ROM → quick scan / RomM download chooser.
     bool show_missing_rom_prompt = false;
     std::string missing_rom_prompt_id;
+    // Multi-root Install: choose apps/ location before ROM prompts / job.
+    bool show_install_root_prompt = false;
+    std::string install_root_prompt_id;
+    int install_root_prompt_index = 0;
+    // Apps root for the next Install/Update job (empty → default / existing).
+    fs::path job_apps_dir;
+    // Start Install: may open install-root chooser. Returns true if job started
+    // (or ROM prompt shown); false if waiting on install-root modal.
+    bool begin_install(const std::string& title_id);
+    void confirm_install_root_and_continue();
     // If the library DB still points at a missing dump, purge stale rows for the
     // title's platform and open the missing-ROM chooser. Returns true when the
     // caller must not start Install (prompt shown or still no ROM).
     bool prepare_build_rom_or_prompt(const std::string& title_id);
+    void add_install_root_row();
     // Set when Quick Scan is started from the missing-ROM prompt; after scan,
     // if still unbound, open_rom_folder_prompt_pending asks to open the folder.
     std::string pending_scan_missing_rom_id;

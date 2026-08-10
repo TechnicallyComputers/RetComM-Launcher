@@ -562,7 +562,8 @@ LaunchPlan plan_launch(const Paths& paths, const Title& title, const LaunchOptio
         return lp;
     }
 
-    const InstallPlan inst = inspect_install(paths, title);
+    const AppConfig cfg = load_app_config(paths.config_path);
+    const InstallPlan inst = inspect_install_any(paths, cfg, title);
     lp.binary = inst.binary_path;
     if (!inst.installed || lp.binary.empty()) {
         lp.ready = false;

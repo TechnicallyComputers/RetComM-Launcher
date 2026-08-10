@@ -94,6 +94,13 @@ void ensure_dirs(const Paths& p) {
                                      ec.message());
 }
 
+void ensure_apps_dir(const Paths& p) {
+    std::error_code ec;
+    fs::create_directories(p.apps_dir, ec);
+    if (ec) throw std::runtime_error("cannot create " + p.apps_dir.string() + ": " +
+                                     ec.message());
+}
+
 fs::path resolve_catalog_dir(const fs::path& /*exe_dir*/, const fs::path& override_dir,
                              const Paths* paths) {
     if (!override_dir.empty()) return override_dir;

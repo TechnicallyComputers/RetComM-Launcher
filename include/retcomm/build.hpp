@@ -33,6 +33,8 @@ struct BuildOptions {
     fs::path source_dir;
     // Hub row / ReleaseTagCache hint — used when GitHub /releases/latest is 403.
     std::string hint_latest_tag;
+    // Override Paths::apps_dir for this build (multi-root installs).
+    fs::path apps_dir;
     BuildProgressFn on_progress;
     // When set, CLI lines are streamed live and failure messages omit the full dump
     // (already delivered via this callback).

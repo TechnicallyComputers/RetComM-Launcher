@@ -341,7 +341,7 @@ void HubModel::refresh_rows(bool check_updates) {
         row.kind = t.kind;
         row.needs_bios = t.requires_bios();
 
-        const auto plan = inspect_install(paths, t);
+        const auto plan = inspect_install_any(paths, cfg, t);
         row.installed = plan.installed;
         row.install_dir_present = plan.install_dir_present;
         row.has_preserved_state = plan.has_preserved_state;
@@ -901,18 +901,31 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 opts.check_latest = true;
                 opts.use_wine = wine;
                 opts.prefer_prebuilt = prebuilt;
+                {
+                    fs::path apps;
+                    {
+                        std::lock_guard<std::mutex> lock(mu);
+                        apps = std::move(job_apps_dir);
+                        job_apps_dir.clear();
+                    }
+                    if (apps.empty())
+                        apps = resolve_default_install_root(cfg, paths);
+                    opts.apps_dir = std::move(apps);
+                }
                 BuildOptions bopts;
                 bopts.rom_path = library.preferred_rom(title_id);
+                bopts.apps_dir = opts.apps_dir;
                 // Reinstall (partial / NEEDS SETUP): clear apps/<title> first. Mid-setup
                 // crashes leave leftovers that a plain Install can refuse to overwrite.
                 // Keep saves/config under preserved/ (same default as Manage Game Data).
                 {
-                    const InstallPlan existing = inspect_install(paths, *t);
+                    Paths job_paths = with_apps_dir(paths, opts.apps_dir);
+                    const InstallPlan existing = inspect_install(job_paths, *t);
                     if (existing.install_dir_present) {
                         set_status("Clearing game data for " + title_id + "…");
                         UninstallOptions uopts;
                         uopts.keep_saves = true;
-                        auto ur = uninstall_title(paths, *t, uopts);
+                        auto ur = uninstall_title(job_paths, *t, uopts);
                         append_log(ur.message);
                         if (!ur.ok) {
                             set_status("Reinstall failed: could not clear game data");
@@ -968,11 +981,14 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     for (const auto& r : rows) {
                         if (r.id != title_id) continue;
                         iopts.hint_latest_tag = r.latest_tag;
+                        if (!r.install_root.empty())
+                            iopts.apps_dir = fs::path(r.install_root).parent_path();
                         break;
                     }
                 }
                 BuildOptions bopts;
                 bopts.rom_path = library.preferred_rom(title_id);
+                bopts.apps_dir = iopts.apps_dir;
                 app_state = load_app_state(paths.state_path);
                 apply_bios_choice_to_build(*t, bios, app_state, bopts);
                 wire_build_activity(this, bopts);
@@ -1050,7 +1066,11 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     append_log("unknown title: " + title_id);
                     break;
                 }
-                const fs::path src_base = paths.apps_dir / t->install_dir_name / "src";
+                const InstallPlan plan = inspect_install_any(paths, cfg, *t);
+                const fs::path src_base =
+                    (plan.install_root.empty() ? (paths.apps_dir / t->install_dir_name)
+                                               : plan.install_root) /
+                    "src";
                 const fs::path build_rel = t->build.cmake.build_dir.empty()
                                               ? fs::path("build")
                                               : fs::path(t->build.cmake.build_dir);
@@ -1458,7 +1478,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     set_status("Launching " + title_id + "…");
                     break;
                 }
-                const auto plan = inspect_install(paths, *t);
+                const auto plan = inspect_install_any(paths, cfg, *t);
                 std::string err;
                 ReleaseTagCache tag_cache(release_tags_cache_path(paths));
                 std::string latest =
@@ -1982,6 +2002,20 @@ void HubModel::open_settings() {
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
     settings.check_updates_before_launch = cfg.check_updates_before_launch;
     settings.auto_clean_build_dirs = cfg.auto_clean_build_dirs;
+    settings.install_roots.clear();
+    settings.default_install_root_index = 0;
+    {
+        const auto roots = effective_install_roots(cfg, paths);
+        const fs::path def = resolve_default_install_root(cfg, paths);
+        for (size_t i = 0; i < roots.size(); ++i) {
+            InstallRootEdit row;
+            copy_buf(row.label, sizeof(row.label), roots[i].label);
+            copy_buf(row.path, sizeof(row.path), roots[i].path.string());
+            settings.install_roots.push_back(row);
+            if (roots[i].path == def)
+                settings.default_install_root_index = static_cast<int>(i);
+        }
+    }
 
     seed_setup_platform_folders();
     settings.dirty = false;
@@ -2069,6 +2103,17 @@ void HubModel::apply_pending_folder_pick() {
         copy_buf(setup_emulation_root, sizeof(setup_emulation_root), path);
         apply_roots_from_emulation_parent();
         set_status("Emulation folder selected");
+    } else if (target == FolderPickTarget::InstallRoot) {
+        if (folder_pick_install_index >= 0 &&
+            folder_pick_install_index < static_cast<int>(settings.install_roots.size())) {
+            auto& row = settings.install_roots[static_cast<size_t>(folder_pick_install_index)];
+            copy_buf(row.path, sizeof(row.path), path);
+            if (row.label[0] == '\0')
+                copy_buf(row.label, sizeof(row.label), fs::path(path).filename().string());
+            settings.dirty = true;
+            set_status("Install folder selected");
+        }
+        folder_pick_install_index = -1;
     }
 }
 
@@ -2241,6 +2286,84 @@ void HubModel::add_platform_folder_row() {
     settings.dirty = true;
 }
 
+void HubModel::add_install_root_row() {
+    InstallRootEdit row;
+    copy_buf(row.label, sizeof(row.label), "Games");
+    row.path[0] = '\0';
+    settings.install_roots.push_back(row);
+    settings.dirty = true;
+}
+
+bool HubModel::begin_install(const std::string& title_id) {
+    const Title* t = catalog.find(title_id);
+    if (!t) {
+        append_log("unknown title: " + title_id);
+        set_status("Unknown title");
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        job_apps_dir.clear();
+        show_install_root_prompt = false;
+        install_root_prompt_id.clear();
+    }
+    cfg = load_app_config(paths.config_path);
+    const auto existing = inspect_install_any(paths, cfg, *t);
+    // Already installed / leftover → reuse that root (no chooser).
+    if (existing.installed || existing.install_dir_present || existing.has_preserved_state) {
+        job_apps_dir = existing.install_root.parent_path();
+        if (t->supports_local_build() && !t->supports_prebuilt_install()) {
+            if (prepare_build_rom_or_prompt(title_id)) return true; // ROM prompt
+        }
+        return start_job(HubJob::Install, title_id);
+    }
+
+    const auto roots = effective_install_roots(cfg, paths);
+    if (roots.size() <= 1) {
+        job_apps_dir = resolve_default_install_root(cfg, paths);
+        if (t->supports_local_build() && !t->supports_prebuilt_install()) {
+            if (prepare_build_rom_or_prompt(title_id)) return true;
+        }
+        return start_job(HubJob::Install, title_id);
+    }
+
+    const fs::path def = resolve_default_install_root(cfg, paths);
+    install_root_prompt_index = 0;
+    for (size_t i = 0; i < roots.size(); ++i) {
+        if (roots[i].path == def) {
+            install_root_prompt_index = static_cast<int>(i);
+            break;
+        }
+    }
+    install_root_prompt_id = title_id;
+    show_install_root_prompt = true;
+    set_status("Choose install location for " + title_id);
+    return true;
+}
+
+void HubModel::confirm_install_root_and_continue() {
+    cfg = load_app_config(paths.config_path);
+    const auto roots = effective_install_roots(cfg, paths);
+    const std::string title_id = install_root_prompt_id;
+    show_install_root_prompt = false;
+    install_root_prompt_id.clear();
+    if (title_id.empty() || roots.empty()) return;
+    int idx = install_root_prompt_index;
+    if (idx < 0 || idx >= static_cast<int>(roots.size())) idx = 0;
+    job_apps_dir = roots[static_cast<size_t>(idx)].path;
+    append_log("Install location: " + job_apps_dir.string());
+
+    const Title* t = catalog.find(title_id);
+    if (!t) {
+        append_log("unknown title: " + title_id);
+        return;
+    }
+    if (t->supports_local_build() && !t->supports_prebuilt_install()) {
+        if (prepare_build_rom_or_prompt(title_id)) return;
+    }
+    start_job(HubJob::Install, title_id);
+}
+
 bool HubModel::save_settings(std::string* error) {
     AppConfig next = cfg;
     next.library_root = settings.library_root;
@@ -2251,6 +2374,23 @@ bool HubModel::save_settings(std::string* error) {
     next.filter_unsupported_titles = settings.filter_unsupported_titles;
     next.check_updates_before_launch = settings.check_updates_before_launch;
     next.auto_clean_build_dirs = settings.auto_clean_build_dirs;
+    next.install_roots.clear();
+    next.default_install_root.clear();
+    for (int i = 0; i < static_cast<int>(settings.install_roots.size()); ++i) {
+        const auto& row = settings.install_roots[static_cast<size_t>(i)];
+        if (row.path[0] == '\0') continue;
+        InstallRootEntry e;
+        e.label = row.label;
+        e.path = row.path;
+        if (i == settings.default_install_root_index) next.default_install_root = e.path;
+        next.install_roots.push_back(std::move(e));
+    }
+    // Single builtin Default with no extras → omit from config (implicit).
+    if (next.install_roots.size() == 1 &&
+        next.install_roots.front().path == builtin_apps_dir(paths)) {
+        next.install_roots.clear();
+        next.default_install_root.clear();
+    }
 
     // Setup wizard leaves platform_folders empty — keep whatever was already in cfg.
     if (!settings.platform_folders.empty()) {

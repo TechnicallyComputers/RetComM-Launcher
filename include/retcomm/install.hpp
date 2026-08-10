@@ -1,6 +1,7 @@
 #pragma once
 
 #include "retcomm/catalog.hpp"
+#include "retcomm/config.hpp"
 #include "retcomm/http.hpp"
 #include "retcomm/paths.hpp"
 
@@ -64,6 +65,8 @@ struct InstallOptions {
     // Optional latest tag from a prior check (hub row / ReleaseTagCache). Used when
     // the live GitHub API is rate-limited so Update can still apply a prefetched zip.
     std::string hint_latest_tag;
+    // Override Paths::apps_dir for this operation (multi-root installs).
+    fs::path apps_dir;
 };
 
 struct InstallResult {
@@ -82,6 +85,10 @@ std::string install_release_compare_tag(const InstallRecord& rec);
 std::string install_release_compare_tag(const InstallPlan& plan);
 
 InstallPlan inspect_install(const Paths& paths, const Title& title);
+// Same as inspect_install but with an explicit apps/ root.
+InstallPlan inspect_install(const Paths& paths, const Title& title, const fs::path& apps_dir);
+// Prefer an installed (or leftover) tree across configured + builtin apps roots.
+InstallPlan inspect_install_any(const Paths& paths, const AppConfig& cfg, const Title& title);
 
 // Plan + optional remote latest tag (when check_latest).
 InstallPlan plan_install(const Paths& paths, const Title& title,

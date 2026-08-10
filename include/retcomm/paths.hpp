@@ -24,6 +24,8 @@ struct Paths {
 
 Paths default_paths();
 void ensure_dirs(const Paths& p);
+// Ensure config/data dirs; also create apps_dir when missing.
+void ensure_apps_dir(const Paths& p);
 
 // USERPROFILE (Windows) or HOME. Empty when unset.
 fs::path user_home_dir();

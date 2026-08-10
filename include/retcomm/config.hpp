@@ -1,5 +1,6 @@
 #pragma once
 
+#include "retcomm/paths.hpp"
 #include "retcomm/romm.hpp"
 
 #include <filesystem>
@@ -28,12 +29,23 @@ struct NetplayConfig {
 inline constexpr const char* kDefaultNetplayLobbyUrl =
     "ws://netplay.retcomm.net:8765";
 
+// One game-install location (holds <install_dir_name>/ trees like default apps/).
+struct InstallRootEntry {
+    std::string label;
+    fs::path path;
+};
+
 // User config (~/.config/retcomm/config.json). RomM/ES-style library layout:
 //   <library_root>/<platform_folder>/...
 struct AppConfig {
     fs::path library_root;
     fs::path bios_root;  // RomM/ES-DE style BIOS tree (flat + per-system folders)
     fs::path saves_root; // Shared native saves (SRAM / memcard) library tree
+    // Optional extra (or replacement) game install roots. Empty → only the
+    // RetComM data_dir/apps default. When 2+ effective roots exist, Install asks.
+    std::vector<InstallRootEntry> install_roots;
+    // Preferred root for new installs (must match an effective root path).
+    fs::path default_install_root;
     // catalog platform slug -> one or more folder names under library_root
     // e.g. "psx" -> ["ps", "ps1"]
     std::map<std::string, std::vector<std::string>> platform_folders;
@@ -95,5 +107,16 @@ AppConfig load_app_config(const fs::path& config_path);
 AppConfig normalize_config(AppConfig cfg);
 // Write config.json (creates parent dirs). Returns false on I/O failure.
 bool save_app_config(const fs::path& config_path, const AppConfig& cfg, std::string* error = nullptr);
+
+// data_dir/apps (always the built-in default install location).
+fs::path builtin_apps_dir(const Paths& paths);
+// Roots offered for new Install (config list, or single Default when unset).
+std::vector<InstallRootEntry> effective_install_roots(const AppConfig& cfg, const Paths& paths);
+// Roots to scan for existing installs (effective ∪ builtin apps/).
+std::vector<InstallRootEntry> scan_install_roots(const AppConfig& cfg, const Paths& paths);
+// Preferred new-install root (default_install_root, else first effective).
+fs::path resolve_default_install_root(const AppConfig& cfg, const Paths& paths);
+// Copy of paths with apps_dir overridden (empty override → unchanged).
+Paths with_apps_dir(Paths paths, const fs::path& apps_dir);
 
 } // namespace retcomm

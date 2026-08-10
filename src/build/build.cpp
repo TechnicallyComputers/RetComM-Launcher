@@ -2315,7 +2315,9 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
     return r;
 }
 
-InstallResult build_title(const Paths& paths, const Title& title, const BuildOptions& opts) {
+InstallResult build_title(const Paths& paths_in, const Title& title, const BuildOptions& opts) {
+    Paths paths = with_apps_dir(paths_in, opts.apps_dir);
+    ensure_apps_dir(paths);
     InstallResult result;
     result.plan = inspect_install(paths, title);
 
@@ -2917,8 +2919,13 @@ InstallResult build_title(const Paths& paths, const Title& title, const BuildOpt
 InstallResult install_title_auto(const Paths& paths, const Title& title,
                                  const InstallOptions& install_opts,
                                  const BuildOptions& build_opts) {
+    InstallOptions iopts = install_opts;
+    if (iopts.apps_dir.empty()) {
+        const AppConfig cfg = load_app_config(paths.config_path);
+        iopts.apps_dir = resolve_default_install_root(cfg, paths);
+    }
     const bool can_zip = title.supports_prebuilt_install();
-    const bool can_build = !install_opts.prefer_prebuilt && title.supports_local_build();
+    const bool can_build = !iopts.prefer_prebuilt && title.supports_local_build();
 
     auto run_build = [&]() -> InstallResult {
         BuildOptions b = build_opts;
@@ -2926,24 +2933,35 @@ InstallResult install_title_auto(const Paths& paths, const Title& title,
             const auto idx = load_library_index(paths.library_index_path);
             b.rom_path = idx.preferred_rom(title.id);
         }
-        b.force = install_opts.force || b.force;
-        if (b.hint_latest_tag.empty()) b.hint_latest_tag = install_opts.hint_latest_tag;
+        b.force = iopts.force || b.force;
+        if (b.hint_latest_tag.empty()) b.hint_latest_tag = iopts.hint_latest_tag;
+        if (b.apps_dir.empty()) b.apps_dir = iopts.apps_dir;
         return build_title(paths, title, b);
     };
 
     // Setup-host / one-zip catalogs: the GitHub asset is a SOURCE pack (wizard +
     // emitters), not a finished Play binary — always generate+cmake locally.
     if (can_build) return run_build();
-    return install_title(paths, title, install_opts);
+    return install_title(paths, title, iopts);
 }
 
 InstallResult update_title_auto(const Paths& paths, const Title& title,
                                 const InstallOptions& install_opts,
                                 const BuildOptions& build_opts) {
-    const auto plan = inspect_install(paths, title);
+    AppConfig cfg = load_app_config(paths.config_path);
+    InstallOptions iopts = install_opts;
+    if (iopts.apps_dir.empty()) {
+        const auto existing = inspect_install_any(paths, cfg, title);
+        if (!existing.install_root.empty())
+            iopts.apps_dir = existing.install_root.parent_path();
+        else
+            iopts.apps_dir = resolve_default_install_root(cfg, paths);
+    }
+    Paths job_paths = with_apps_dir(paths, iopts.apps_dir);
+    const auto plan = inspect_install(job_paths, title);
     const bool was_build = plan.record && plan.record->method == "build";
     const bool can_build =
-        !install_opts.prefer_prebuilt && (was_build || title.supports_local_build());
+        !iopts.prefer_prebuilt && (was_build || title.supports_local_build());
     const bool can_zip = title.supports_prebuilt_install();
 
     // Setup-host titles: pull latest release zip as source and rebuild.
@@ -2955,13 +2973,14 @@ InstallResult update_title_auto(const Paths& paths, const Title& title,
             const auto idx = load_library_index(paths.library_index_path);
             b.rom_path = idx.preferred_rom(title.id);
         }
-        bool need = b.force || install_opts.force || !plan.installed;
+        b.apps_dir = iopts.apps_dir;
+        bool need = b.force || iopts.force || !plan.installed;
         if (!need && plan.record) {
             if (can_zip && !title.release.github.empty()) {
                 GhRelease rel;
                 std::string err;
                 const bool allow_pre =
-                    install_opts.allow_prerelease || title.release.allow_prerelease;
+                    iopts.allow_prerelease || title.release.allow_prerelease;
                 if (fetch_latest_release(title.release.github, rel, &err, allow_pre) &&
                     !rel.tag.empty()) {
                     sync_release_tag_cache(paths, title, rel.tag);
@@ -2971,7 +2990,7 @@ InstallResult update_title_auto(const Paths& paths, const Title& title,
                     need = release_tag_cmp(have, latest) < 0;
                 } else {
                     // API failed (often 403): compare against hub hint / tag cache.
-                    std::string latest = install_opts.hint_latest_tag;
+                    std::string latest = iopts.hint_latest_tag;
                     if (latest.empty()) {
                         ReleaseTagCache tag_cache(release_tags_cache_path(paths));
                         latest = tag_cache.latest_tag(title.release.github, allow_pre,
@@ -3000,14 +3019,13 @@ InstallResult update_title_auto(const Paths& paths, const Title& title,
         }
         // Re-fetch when the release tag changed (ensure_source_tree compares
         // marker ref). force only when the caller asked — do not wipe cmake.
-        b.force = b.force || install_opts.force;
-        if (b.hint_latest_tag.empty()) b.hint_latest_tag = install_opts.hint_latest_tag;
+        b.force = b.force || iopts.force;
+        if (b.hint_latest_tag.empty()) b.hint_latest_tag = iopts.hint_latest_tag;
         // Leave force_generate as caller set (false → reuse codegen-cache).
         return build_title(paths, title, b);
     }
 
-    if (can_zip) return update_title(paths, title, install_opts);
-    return update_title(paths, title, install_opts);
+    return update_title(paths, title, iopts);
 }
 
 ToolchainUpdateInfo check_toolchain_update(const Paths& paths, const std::string& pack_id,

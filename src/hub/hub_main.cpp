@@ -1664,7 +1664,6 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
 
     // Primary actions under the title.
     const float btn_w = (ImGui::GetContentRegionAvail().x - 8.f) * 0.5f;
-    const bool has_native_install = row.supports_local_build || row.can_prebuilt_install;
     if (row.installed) {
         // Play stays available during Build & Install / scans (own worker thread).
         const bool play_blocked = hub.launch_running.load() ||
@@ -1713,29 +1712,13 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
         }
         ImGui::BeginDisabled(block_title_mutate ||
                              (!zip_first && !row.has_rom && !row.has_rom_identity));
-        if (good_button(row.install_dir_present ? "Reinstall" : "Install", th, ImVec2(-1, 0))) {
-            if (zip_first) {
-                hub.start_job(HubJob::Install, row.id);
-            } else if (!hub.prepare_build_rom_or_prompt(row.id)) {
-                // Purges stale DB paths when the matched dump is gone, then prompts
-                // for Quick Scan / RomM (same chooser as a never-matched title).
-                hub.start_job(HubJob::Install, row.id);
-            }
-        }
-        // Wine only when there is no native release path for this OS.
-        if (row.can_wine_install && !has_native_install) {
-            if (ImGui::Button("Install with WINE", ImVec2(-1, 0)))
-                hub.start_job(HubJob::InstallWine, row.id);
-        }
+        if (good_button(row.install_dir_present ? "Reinstall" : "Install", th, ImVec2(-1, 0)))
+            hub.begin_install(row.id);
         ImGui::EndDisabled();
     } else {
         ImGui::BeginDisabled(block_title_mutate);
         if (good_button(row.install_dir_present ? "Reinstall" : "Install", th, ImVec2(-1, 0)))
-            hub.start_job(HubJob::Install, row.id);
-        if (row.can_wine_install && !has_native_install) {
-            if (ImGui::Button("Install with WINE", ImVec2(-1, 0)))
-                hub.start_job(HubJob::InstallWine, row.id);
-        }
+            hub.begin_install(row.id);
         ImGui::EndDisabled();
     }
 
@@ -1908,6 +1891,75 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     if (ImGui::InputText("##exclude_dirs", hub.settings.exclude_dirs,
                          sizeof(hub.settings.exclude_dirs)))
         hub.settings.dirty = true;
+
+    ImGui::Dummy(ImVec2(0, 12));
+    ImGui::Separator();
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextUnformatted("GAME INSTALL LOCATIONS");
+    ImGui::PopStyleColor();
+    ImGui::TextWrapped(
+        "Folders that hold installed titles (each contains <game>/releases/…). "
+        "Default is RetComM's apps/ folder. Add another root (e.g. an external drive) when "
+        "you want Install to ask where to put a new game. Existing installs stay where they are.");
+    if (ImGui::BeginTable("install_roots", 4,
+                          ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("##def", ImGuiTableColumnFlags_WidthFixed, 56.f);
+        ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, 100.f);
+        ImGui::TableSetupColumn("path", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("##rm", ImGuiTableColumnFlags_WidthFixed, 36.f);
+        ImGui::TableHeadersRow();
+        for (int i = 0; i < static_cast<int>(hub.settings.install_roots.size()); ++i) {
+            auto& row = hub.settings.install_roots[static_cast<size_t>(i)];
+            ImGui::PushID(i);
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            if (ImGui::RadioButton("##default_root", &hub.settings.default_install_root_index, i))
+                hub.settings.dirty = true;
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Default for new installs");
+            ImGui::TableNextColumn();
+            if (ImGui::InputText("##label", row.label, sizeof(row.label)))
+                hub.settings.dirty = true;
+            ImGui::TableNextColumn();
+            {
+                const float browse_w = 72.f;
+                const float gap = ImGui::GetStyle().ItemSpacing.x;
+                const float input_w = ImGui::GetContentRegionAvail().x - browse_w - gap;
+                if (input_w > 60.f) ImGui::SetNextItemWidth(input_w);
+                if (ImGui::InputText("##path", row.path, sizeof(row.path)))
+                    hub.settings.dirty = true;
+                ImGui::SameLine();
+                bool busy = false;
+                {
+                    std::lock_guard<std::mutex> lock(hub.folder_pick_mu);
+                    busy = hub.folder_pick_busy;
+                }
+                ImGui::BeginDisabled(busy);
+                if (ImGui::Button("…", ImVec2(browse_w, 0))) {
+                    hub.folder_pick_install_index = i;
+                    begin_folder_pick(hub, window, FolderPickTarget::InstallRoot, row.path);
+                }
+                ImGui::EndDisabled();
+            }
+            ImGui::TableNextColumn();
+            if (ImGui::Button("X")) {
+                hub.settings.install_roots.erase(hub.settings.install_roots.begin() + i);
+                if (hub.settings.default_install_root_index >=
+                    static_cast<int>(hub.settings.install_roots.size())) {
+                    hub.settings.default_install_root_index =
+                        std::max(0, static_cast<int>(hub.settings.install_roots.size()) - 1);
+                } else if (hub.settings.default_install_root_index > i) {
+                    --hub.settings.default_install_root_index;
+                }
+                hub.settings.dirty = true;
+                ImGui::PopID();
+                break;
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    if (ImGui::Button("Add Install Location", ImVec2(200, 0)))
+        hub.add_install_root_row();
 
     ImGui::Dummy(ImVec2(0, 12));
     ImGui::Separator();
@@ -2914,6 +2966,60 @@ int main(int argc, char** argv) {
             } else if (ImGui::GetTime() >= toast_until) {
                 toast_text.clear();
             }
+        }
+
+        if (hub.show_install_root_prompt) {
+            ImGui::OpenPopup("Install location###install_root_prompt");
+            hub.show_install_root_prompt = false;
+        }
+        if (ImGui::BeginPopupModal("Install location###install_root_prompt", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            const std::string tid = hub.install_root_prompt_id;
+            const TitleRow* prow = nullptr;
+            for (const auto& r : hub.rows) {
+                if (r.id == tid) {
+                    prow = &r;
+                    break;
+                }
+            }
+            const auto roots = retcomm::effective_install_roots(hub.cfg, hub.paths);
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 420.f);
+            ImGui::TextWrapped("%s", prow ? prow->name.c_str() : tid.c_str());
+            ImGui::Dummy(ImVec2(0, 6));
+            ImGui::TextWrapped("Choose where to install this game.");
+            ImGui::PopTextWrapPos();
+            ImGui::Dummy(ImVec2(0, 8));
+            if (roots.empty()) {
+                ImGui::TextColored(th.warn, "No install locations configured.");
+            } else {
+                for (int i = 0; i < static_cast<int>(roots.size()); ++i) {
+                    ImGui::PushID(i);
+                    const auto& e = roots[static_cast<size_t>(i)];
+                    char label[1152];
+                    std::snprintf(label, sizeof(label), "%s\n%s",
+                                  e.label.empty() ? "Install" : e.label.c_str(),
+                                  e.path.string().c_str());
+                    if (ImGui::RadioButton(label, &hub.install_root_prompt_index, i)) {
+                        // index updated by RadioButton
+                    }
+                    ImGui::PopID();
+                }
+            }
+            ImGui::Dummy(ImVec2(0, 10));
+            const bool busy = hub.job_running.load() || tid.empty() || roots.empty();
+            ImGui::BeginDisabled(busy);
+            if (good_button("Confirm", th, ImVec2(-1, 0))) {
+                hub.confirm_install_root_and_continue();
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            if (ImGui::Button("Cancel", ImVec2(-1, 0))) {
+                hub.install_root_prompt_id.clear();
+                hub.job_apps_dir.clear();
+                ImGui::CloseCurrentPopup();
+            }
+            close_modal_on_outside_click();
+            ImGui::EndPopup();
         }
 
         if (hub.show_missing_rom_prompt) {

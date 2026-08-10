@@ -104,7 +104,66 @@ AppConfig normalize_config(AppConfig cfg) {
     }
     if (cfg.exclude_dirs.empty()) cfg.exclude_dirs = default_exclude_dirs();
     if (cfg.netplay.lobby_url.empty()) cfg.netplay.lobby_url = kDefaultNetplayLobbyUrl;
+
+    // Drop empty install-root rows; keep first label for a path.
+    {
+        std::vector<InstallRootEntry> cleaned;
+        for (auto& e : cfg.install_roots) {
+            if (e.path.empty()) continue;
+            bool dup = false;
+            for (const auto& c : cleaned) {
+                if (c.path == e.path) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup) continue;
+            if (e.label.empty()) e.label = e.path.filename().string();
+            if (e.label.empty()) e.label = e.path.string();
+            cleaned.push_back(std::move(e));
+        }
+        cfg.install_roots = std::move(cleaned);
+    }
     return cfg;
+}
+
+fs::path builtin_apps_dir(const Paths& paths) {
+    return paths.data_dir / "apps";
+}
+
+std::vector<InstallRootEntry> effective_install_roots(const AppConfig& cfg, const Paths& paths) {
+    if (cfg.install_roots.empty())
+        return {InstallRootEntry{"Default", builtin_apps_dir(paths)}};
+    return cfg.install_roots;
+}
+
+std::vector<InstallRootEntry> scan_install_roots(const AppConfig& cfg, const Paths& paths) {
+    std::vector<InstallRootEntry> out = effective_install_roots(cfg, paths);
+    const fs::path builtin = builtin_apps_dir(paths);
+    bool has_builtin = false;
+    for (const auto& e : out) {
+        if (e.path == builtin) {
+            has_builtin = true;
+            break;
+        }
+    }
+    if (!has_builtin) out.insert(out.begin(), InstallRootEntry{"Default", builtin});
+    return out;
+}
+
+fs::path resolve_default_install_root(const AppConfig& cfg, const Paths& paths) {
+    const auto roots = effective_install_roots(cfg, paths);
+    if (!cfg.default_install_root.empty()) {
+        for (const auto& e : roots) {
+            if (e.path == cfg.default_install_root) return e.path;
+        }
+    }
+    return roots.empty() ? builtin_apps_dir(paths) : roots.front().path;
+}
+
+Paths with_apps_dir(Paths paths, const fs::path& apps_dir) {
+    if (!apps_dir.empty()) paths.apps_dir = apps_dir;
+    return paths;
 }
 
 std::string AppConfig::resolve_netplay_lobby_url(const std::string& title_lobby_url) const {
@@ -194,6 +253,22 @@ AppConfig load_app_config(const fs::path& config_path) {
         if (j.contains("auto_clean_build_dirs"))
             cfg.auto_clean_build_dirs = j.value("auto_clean_build_dirs", false);
 
+        if (j.contains("default_install_root") && j.at("default_install_root").is_string())
+            cfg.default_install_root = j.at("default_install_root").get<std::string>();
+        if (j.contains("install_roots") && j.at("install_roots").is_array()) {
+            cfg.install_roots.clear();
+            for (const auto& item : j.at("install_roots")) {
+                InstallRootEntry e;
+                if (item.is_string()) {
+                    e.path = item.get<std::string>();
+                } else if (item.is_object()) {
+                    e.label = item.value("label", "");
+                    e.path = item.value("path", "");
+                }
+                if (!e.path.empty()) cfg.install_roots.push_back(std::move(e));
+            }
+        }
+
         if (j.contains("catalog") && j.at("catalog").is_object()) {
             const auto& c = j.at("catalog");
             cfg.catalog.url = c.value("url", "");
@@ -237,9 +312,17 @@ bool save_app_config(const fs::path& config_path, const AppConfig& cfg, std::str
         folders[plat] = names;
     }
 
+    json roots = json::array();
+    for (const auto& e : cfg.install_roots) {
+        if (e.path.empty()) continue;
+        roots.push_back({{"label", e.label}, {"path", e.path.string()}});
+    }
+
     json j = {{"library_root", cfg.library_root.string()},
               {"bios_root", cfg.bios_root.string()},
               {"saves_root", cfg.saves_root.string()},
+              {"install_roots", roots},
+              {"default_install_root", cfg.default_install_root.string()},
               {"platform_folders", folders},
               {"exclude_dirs", cfg.exclude_dirs},
               {"prefer_local_boxart", cfg.prefer_local_boxart},

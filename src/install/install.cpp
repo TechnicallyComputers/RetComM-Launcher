@@ -1189,9 +1189,11 @@ size_t prune_old_release_dirs(const fs::path& install_root, const std::string& k
 OldReleaseCleanupResult cleanup_old_release_dirs(const Paths& paths, const Catalog& catalog) {
     OldReleaseCleanupResult result;
     std::error_code ec;
+    const AppConfig cfg = load_app_config(paths.config_path);
     for (const auto& title : catalog.titles) {
         if (title.install_dir_name.empty()) continue;
-        const fs::path install_root = paths.apps_dir / title.install_dir_name;
+        InstallPlan plan = inspect_install_any(paths, cfg, title);
+        const fs::path install_root = plan.install_root;
         const fs::path releases = install_root / "releases";
         if (!fs::is_directory(releases, ec)) continue;
 
@@ -1203,7 +1205,6 @@ OldReleaseCleanupResult cleanup_old_release_dirs(const Paths& paths, const Catal
         if (release_count <= 1) continue;
 
         ++result.titles_scanned;
-        InstallPlan plan = inspect_install(paths, title);
         std::string keep_tag = plan.installed_tag;
         if (plan.record && !plan.record->tag.empty()) keep_tag = plan.record->tag;
         if (keep_tag.empty()) {
@@ -1277,7 +1278,11 @@ void restore_user_state(const fs::path& install_root, const fs::path& release_di
 }
 
 void stash_user_state_for_update(const Paths& paths, const Title& title, std::string* note) {
-    const fs::path install_root = paths.apps_dir / title.install_dir_name;
+    const AppConfig cfg = load_app_config(paths.config_path);
+    const InstallPlan plan = inspect_install_any(paths, cfg, title);
+    const fs::path install_root = plan.install_root.empty()
+                                      ? (paths.apps_dir / title.install_dir_name)
+                                      : plan.install_root;
     const fs::path preserved = install_root / "preserved";
     const auto globs = save_globs_for_title(title);
     std::error_code ec;
@@ -1298,7 +1303,6 @@ void stash_user_state_for_update(const Paths& paths, const Title& title, std::st
             if (it->is_directory(ec)) add_root(it->path());
         }
     }
-    const InstallPlan plan = inspect_install(paths, title);
     if (!plan.binary_path.empty()) add_root(plan.binary_path.parent_path());
 
     size_t n = 0;
@@ -1465,16 +1469,37 @@ std::string install_release_compare_tag(const InstallPlan& plan) {
 }
 
 InstallPlan inspect_install(const Paths& paths, const Title& title) {
+    return inspect_install(paths, title, paths.apps_dir);
+}
+
+InstallPlan inspect_install(const Paths& paths, const Title& title, const fs::path& apps_dir) {
     InstallPlan plan;
     plan.title = &title;
-    plan.install_root = paths.apps_dir / title.install_dir_name;
+    const fs::path apps = apps_dir.empty() ? paths.apps_dir : apps_dir;
+    plan.install_root = apps / title.install_dir_name;
     plan.current_link = plan.install_root / "current";
     fill_from_disk(plan);
     return plan;
 }
 
+InstallPlan inspect_install_any(const Paths& paths, const AppConfig& cfg, const Title& title) {
+    InstallPlan best;
+    bool have_partial = false;
+    for (const auto& root : scan_install_roots(cfg, paths)) {
+        auto plan = inspect_install(paths, title, root.path);
+        if (plan.installed) return plan;
+        if (!have_partial && (plan.install_dir_present || plan.has_preserved_state)) {
+            best = std::move(plan);
+            have_partial = true;
+        }
+    }
+    if (have_partial) return best;
+    return inspect_install(paths, title, resolve_default_install_root(cfg, paths));
+}
+
 InstallPlan plan_install(const Paths& paths, const Title& title, const InstallOptions& opts) {
-    InstallPlan plan = inspect_install(paths, title);
+    Paths job_paths = with_apps_dir(paths, opts.apps_dir);
+    InstallPlan plan = inspect_install(job_paths, title);
     const bool use_wine = opts.use_wine;
     const std::string target_os = use_wine ? "windows" : host_os_key();
     std::ostringstream oss;
@@ -1775,7 +1800,9 @@ PrefetchResult prefetch_title_release(const Paths& paths, const Title& title,
     return result;
 }
 
-InstallResult install_title(const Paths& paths, const Title& title, const InstallOptions& opts) {
+InstallResult install_title(const Paths& paths_in, const Title& title, const InstallOptions& opts) {
+    Paths paths = with_apps_dir(paths_in, opts.apps_dir);
+    ensure_apps_dir(paths);
     InstallResult result;
     result.plan = inspect_install(paths, title);
 
@@ -1949,8 +1976,11 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
     return result;
 }
 
-InstallResult update_title(const Paths& paths, const Title& title, const InstallOptions& opts) {
+InstallResult update_title(const Paths& paths_in, const Title& title, const InstallOptions& opts) {
+    Paths paths = with_apps_dir(paths_in, opts.apps_dir);
+    ensure_apps_dir(paths);
     InstallOptions o = opts;
+    o.apps_dir = paths.apps_dir;
     o.check_latest = true;
     // Preserve Wine runtime across updates unless the caller forced native.
     if (!o.use_wine) {
@@ -2125,8 +2155,14 @@ UninstallResult uninstall_install_root(const Paths& /*paths*/, const fs::path& i
     return result;
 }
 
-UninstallResult uninstall_title(const Paths& paths, const Title& title,
+UninstallResult uninstall_title(const Paths& paths_in, const Title& title,
                                 const UninstallOptions& opts) {
+    // Prefer the root that actually holds this title when callers pass default paths.
+    const AppConfig cfg = load_app_config(paths_in.config_path);
+    const InstallPlan plan = inspect_install_any(paths_in, cfg, title);
+    const fs::path apps =
+        plan.install_root.empty() ? paths_in.apps_dir : plan.install_root.parent_path();
+    Paths paths = with_apps_dir(paths_in, apps);
     return uninstall_install_root(paths, paths.apps_dir / title.install_dir_name, opts, title.id,
                                   save_globs_for_title(title));
 }
@@ -2141,31 +2177,35 @@ std::vector<OrphanInstall> list_orphan_installs(const Paths& paths, const Catalo
 
     std::vector<OrphanInstall> out;
     std::error_code ec;
-    if (!fs::is_directory(paths.apps_dir, ec)) return out;
+    const AppConfig cfg = load_app_config(paths.config_path);
+    for (const auto& apps_root : scan_install_roots(cfg, paths)) {
+        if (!fs::is_directory(apps_root.path, ec)) continue;
+        for (auto it = fs::directory_iterator(apps_root.path, ec);
+             !ec && it != fs::directory_iterator(); it.increment(ec)) {
+            if (!it->is_directory(ec)) continue;
+            const fs::path root = it->path();
+            const std::string dir_name = root.filename().string();
+            if (dir_name.empty() || dir_name[0] == '.') continue;
+            if (claimed.count(dir_name)) continue;
 
-    for (auto it = fs::directory_iterator(paths.apps_dir, ec); !ec && it != fs::directory_iterator();
-         it.increment(ec)) {
-        if (!it->is_directory(ec)) continue;
-        const fs::path root = it->path();
-        const std::string dir_name = root.filename().string();
-        if (dir_name.empty() || dir_name[0] == '.') continue;
-        if (claimed.count(dir_name)) continue;
-
-        OrphanInstall o;
-        o.install_root = root;
-        o.dir_name = dir_name;
-        const InstallRecord rec = load_install_record(root);
-        o.has_install_record = !rec.title_id.empty() || !rec.tag.empty() || !rec.binary.empty();
-        o.title_id = !rec.title_id.empty() ? rec.title_id : dir_name;
-        o.tag = rec.tag;
-        bool has_preserved = false, other = false;
-        classify_install_root_leftovers(root, &has_preserved, &other);
-        o.has_preserved_only = has_preserved && !other && !o.has_install_record;
-        out.push_back(std::move(o));
+            OrphanInstall o;
+            o.install_root = root;
+            o.dir_name = dir_name;
+            const InstallRecord rec = load_install_record(root);
+            o.has_install_record =
+                !rec.title_id.empty() || !rec.tag.empty() || !rec.binary.empty();
+            o.title_id = !rec.title_id.empty() ? rec.title_id : dir_name;
+            o.tag = rec.tag;
+            bool has_preserved = false, other = false;
+            classify_install_root_leftovers(root, &has_preserved, &other);
+            o.has_preserved_only = has_preserved && !other && !o.has_install_record;
+            out.push_back(std::move(o));
+        }
     }
 
     std::sort(out.begin(), out.end(), [](const OrphanInstall& a, const OrphanInstall& b) {
-        return a.dir_name < b.dir_name;
+        if (a.dir_name != b.dir_name) return a.dir_name < b.dir_name;
+        return a.install_root.string() < b.install_root.string();
     });
     return out;
 }
