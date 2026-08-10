@@ -75,7 +75,7 @@ void print_help(const char* argv0) {
         << "  help                         This message\n\n"
         << "ROM scan uses config library_root (platform folders only).\n"
         << "BIOS scan uses config bios_root (flat + per-system folders).\n"
-        << "Game saves use config saves_root/<platform>/ when set (else install saves/).\n"
+        << "Game saves use config saves_root/<platform>/<title_id>/ when set (else install saves/).\n"
         << "--full ignores the hash cache and rebuilds the index from disk\n"
         << "(drops missing files; recomputes digests for everything scanned).\n"
         << "Indexes: ~/.local/share/retcomm/library-index.json and bios-index.json.\n";

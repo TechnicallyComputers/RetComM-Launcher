@@ -40,7 +40,7 @@ struct InstallRootEntry {
 struct AppConfig {
     fs::path library_root;
     fs::path bios_root;  // RomM/ES-DE style BIOS tree (flat + per-system folders)
-    fs::path saves_root; // Shared native saves (SRAM / memcard) library tree
+    fs::path saves_root; // Native saves library (SRAM / memcard), per-title under platform
     // Optional extra (or replacement) game install roots. Empty → only the
     // RetComM data_dir/apps default. When 2+ effective roots exist, Install asks.
     std::vector<InstallRootEntry> install_roots;
@@ -81,6 +81,7 @@ struct AppConfig {
     std::vector<fs::path> bios_roots_for_platform(const std::string& platform) const;
 
     // Preferred per-platform folder under saves_root (created when create=true).
+    // Title quarantine lives one level deeper: <this>/<title_id>/.
     // Empty when saves_root is unset.
     fs::path saves_dir_for_platform(const std::string& platform, bool create = false) const;
 };

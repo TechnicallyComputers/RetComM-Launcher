@@ -25,9 +25,8 @@ struct RommSaveSyncResult {
 
 // Bidirectional sync of native game saves (SRAM / memcard — not emulator savestates)
 // with RomM /api/saves. Promotes install→library first when saves_root is set,
-// then syncs against the library. For a shared platform pool (PSX memcards, etc.)
-// only the title's preferred save(s) — or title-named fallbacks — are uploaded;
-// remote saves for that rom_id still download into the pool. Newer wins.
+// then syncs against the per-title library folder
+// (saves_root/<platform>/<title_id>/). Newer wins.
 RommSaveSyncResult sync_saves_with_romm(const Paths& paths, const AppConfig& cfg,
                                         const Title& title, RommProgressFn on_progress = {});
 
@@ -53,12 +52,13 @@ struct CanonicalSaveResult {
     ManagedSave save; // primary (cart battery or memcard 1)
 };
 
-// Library saves_root/<platform>/ when configured, else apps/<title>/…/saves.
+// Library saves_root/<platform>/<title_id>/ when configured, else
+// apps/<title>/…/saves.
 fs::path title_saves_dir(const Paths& paths, const AppConfig& cfg, const Title& title,
                          bool create = false);
 
-// Enumerate native battery / memcard files for the title (library saves_root when
-// set, else install saves/). Empty when nothing is available yet.
+// Enumerate native battery / memcard files for the title (per-title library when
+// saves_root is set, else install saves/). Empty when nothing is available yet.
 std::vector<ManagedSave> list_managed_saves(const Paths& paths, const AppConfig& cfg,
                                             const Title& title);
 
@@ -66,15 +66,17 @@ std::vector<ManagedSave> list_managed_saves(const Paths& paths, const AppConfig&
 fs::path resolve_managed_save(const Paths& paths, const AppConfig& cfg, const Title& title,
                               const std::string& save_id);
 
-// Copy install/preserved native saves into saves_root/<platform>/ when configured.
-// Renames generic slot files (save.*, card1.*) to a ROM/title stem. Returns count.
+// Copy install/preserved native saves into saves_root/<platform>/<title_id>/
+// when configured. Also migrates matching files out of a legacy flat
+// saves_root/<platform>/ pool. Renames generic slot files (save.*, card1.*) to
+// a ROM/title stem. Returns count.
 int promote_install_saves_to_library(const Paths& paths, const AppConfig& cfg,
                                      const Title& title, const fs::path& rom_hint = {});
 
 // Ensure a canonical library (or install) save exists: promote → title-named
-// match → mint `<rom-or-title-stem>.mcd/.srm`. Never adopts an unrelated file
-// from a shared platform pool. Memcard titles default slot 2 to blank when unset.
-// Persists preferred_save / preferred_save_card2 in state.json as needed.
+// match → mint `<rom-or-title-stem>.mcd/.srm`. Memcard titles default slot 2 to
+// blank when unset. Persists preferred_save / preferred_save_card2 in
+// state.json as needed.
 // rom_hint: preferred ROM path used for ES-DE-friendly naming.
 CanonicalSaveResult ensure_canonical_save(const Paths& paths, const AppConfig& cfg,
                                           const Title& title, const fs::path& rom_hint = {},
@@ -93,7 +95,7 @@ struct RecompSaveBindResult {
     fs::path active_save; // preferred / activated cart save when set
 };
 
-// Point the installed recomp at the shared saves folder (library or install):
+// Point the installed recomp at the title saves folder (library or install):
 // - ensures the library/install saves dir exists
 // - upserts settings.toml [memcard] dir/card1/card2 (psxrecomp)
 // - for cart SRAM, links install saves/save.* → preferred library file when needed

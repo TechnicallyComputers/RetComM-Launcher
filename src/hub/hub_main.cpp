@@ -365,6 +365,7 @@ enum class TileStatusIcon : int {
     Installed,  // checkmark
     NeedsSetup, // partial install
     Update,     // small up-chevron (center update overlay still shown)
+    Queued,     // pause mark — waiting in Install/Update backlog
 };
 
 TileStatusIcon tile_status_icon(const TitleRow& r) {
@@ -412,6 +413,17 @@ void draw_status_badge_glyph(ImDrawList* dl, const ImVec2& c, float rad, TileSta
         const float w = rad * 0.40f;
         dl->AddTriangleFilled(ImVec2(c.x, c.y - h), ImVec2(c.x - w, c.y + h * 0.35f),
                               ImVec2(c.x + w, c.y + h * 0.35f), ink);
+        break;
+    }
+    case TileStatusIcon::Queued: {
+        // Pause bars (download waiting in queue).
+        const float bw = rad * 0.22f;
+        const float bh = rad * 0.55f;
+        const float gap = rad * 0.18f;
+        dl->AddRectFilled(ImVec2(c.x - gap - bw, c.y - bh * 0.5f),
+                          ImVec2(c.x - gap, c.y + bh * 0.5f), ink, 1.4f);
+        dl->AddRectFilled(ImVec2(c.x + gap, c.y - bh * 0.5f),
+                          ImVec2(c.x + gap + bw, c.y + bh * 0.5f), ink, 1.4f);
         break;
     }
     case TileStatusIcon::RomReady:
@@ -582,6 +594,27 @@ void draw_marquee(HubModel& hub, const Theme& th, float width) {
         dl->AddRect(c0, c1, ImGui::ColorConvertFloat4ToU32(chip_col), 6.f, 0, 1.5f);
         dl->AddText(ImVec2(chip_x + chip_pad_x, chip_y + chip_pad_y),
                     ImGui::ColorConvertFloat4ToU32(chip_col), chip.c_str());
+
+        // Second chip: waiting Install/Update queue (only when non-empty).
+        const std::size_t qn = hub.queued_job_count();
+        if (qn > 0) {
+            char qbuf[48];
+            if (qn == 1)
+                std::snprintf(qbuf, sizeof(qbuf), "1 queued");
+            else
+                std::snprintf(qbuf, sizeof(qbuf), "%zu queued", qn);
+            const ImVec2 qsz = ImGui::CalcTextSize(qbuf);
+            const float qw = qsz.x + chip_pad_x * 2.f;
+            const float qh = qsz.y + chip_pad_y * 2.f;
+            const float qx = chip_x + chip_w + 8.f;
+            const float qy = p0.y + (h - qh) * 0.5f;
+            const ImVec2 q0(qx, qy);
+            const ImVec2 q1(qx + qw, qy + qh);
+            dl->AddRectFilled(q0, q1, ImGui::ColorConvertFloat4ToU32(th.background2), 6.f);
+            dl->AddRect(q0, q1, ImGui::ColorConvertFloat4ToU32(th.focus), 6.f, 0, 1.5f);
+            dl->AddText(ImVec2(qx + chip_pad_x, qy + chip_pad_y),
+                        ImGui::ColorConvertFloat4ToU32(th.focus), qbuf);
+        }
     }
 
     // Top-right: Add/Scan Files + Check for Updates + Menu, or Back when editing settings.
@@ -689,11 +722,33 @@ void draw_busy_spinner(ImDrawList* dl, const ImVec2& art0, const ImVec2& art1, c
     }
 }
 
+void draw_queued_overlay(ImDrawList* dl, const ImVec2& art0, const ImVec2& art1, const Theme& th) {
+    // Soft “paused download” disc — waiting in the Install/Update backlog.
+    const ImVec2 c((art0.x + art1.x) * 0.5f, (art0.y + art1.y) * 0.5f);
+    const float s = std::min(art1.x - art0.x, art1.y - art0.y);
+    const float rad = s * 0.20f;
+    dl->AddCircleFilled(c, rad, IM_COL32(12, 16, 28, 230), 36);
+    dl->AddCircle(c, rad, ImGui::ColorConvertFloat4ToU32(th.focus), 36, 2.2f);
+    const ImU32 ink = ImGui::ColorConvertFloat4ToU32(th.focus);
+    // Pause bars.
+    const float bw = rad * 0.20f;
+    const float bh = rad * 0.52f;
+    const float gap = rad * 0.16f;
+    dl->AddRectFilled(ImVec2(c.x - gap - bw, c.y - bh * 0.55f),
+                      ImVec2(c.x - gap, c.y + bh * 0.35f), ink, 2.f);
+    dl->AddRectFilled(ImVec2(c.x + gap, c.y - bh * 0.55f),
+                      ImVec2(c.x + gap + bw, c.y + bh * 0.35f), ink, 2.f);
+    // Slim download tray under the pause — “download held”.
+    dl->AddLine(ImVec2(c.x - rad * 0.42f, c.y + rad * 0.52f),
+                ImVec2(c.x + rad * 0.42f, c.y + rad * 0.52f), ink, 2.0f);
+}
+
 float draw_grid_tile(const ImVec2& tile_min, float tile_w, bool selected, const Theme& th,
                      const BoxartTexture* tex, float art_aspect_wh, const char* title,
                      const char* subtitle, const ImVec4* badge_col, bool busy_spinner = false,
                      bool dim_art = false, bool update_overlay = false,
-                     TileStatusIcon status_icon = TileStatusIcon::None) {
+                     TileStatusIcon status_icon = TileStatusIcon::None,
+                     bool queued_overlay = false) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     constexpr float kArtPad = 8.f;
     constexpr float kLabelGap = 4.f;
@@ -729,11 +784,14 @@ float draw_grid_tile(const ImVec2& tile_min, float tile_w, bool selected, const 
                      ImVec2(ix + fit.x, iy + fit.y));
     }
 
-    if (dim_art || busy_spinner) draw_art_dim(dl, art0, art1, th.radius_sm);
+    if (dim_art || busy_spinner || queued_overlay) draw_art_dim(dl, art0, art1, th.radius_sm);
     if (busy_spinner) draw_busy_spinner(dl, art0, art1, th);
 
-    // Update-available: centered soft disc + up arrow over dimmed cover.
-    if (update_overlay && !busy_spinner) {
+    // Queued Install/Update: pause-download disc (wins over update chevron).
+    if (queued_overlay && !busy_spinner) {
+        draw_queued_overlay(dl, art0, art1, th);
+    } else if (update_overlay && !busy_spinner) {
+        // Update-available: centered soft disc + up arrow over dimmed cover.
         const ImVec2 c((art0.x + art1.x) * 0.5f, (art0.y + art1.y) * 0.5f);
         const float s = std::min(art1.x - art0.x, art1.y - art0.y);
         const float rad = s * 0.20f;
@@ -865,6 +923,14 @@ void draw_library(HubModel& hub, BoxartCache& boxart, const Theme& th) {
 
     std::lock_guard<std::mutex> lock(hub.mu);
 
+    // Snapshot while mu is held — do not call is_title_queued() here (it locks mu
+    // again and deadlocks on a non-recursive mutex when entering a title grid).
+    std::unordered_set<std::string> queued_titles;
+    for (const auto& q : hub.job_queue) {
+        if (!q.title_id.empty() && retcomm::hub::hub_job_is_queueable(q.job))
+            queued_titles.insert(q.title_id);
+    }
+
     constexpr float kGap = 12.f;
     const float avail_w = ImGui::GetContentRegionAvail().x;
 
@@ -965,15 +1031,20 @@ void draw_library(HubModel& hub, BoxartCache& boxart, const Theme& th) {
             const ImVec2 tile_min = ImGui::GetCursorScreenPos();
             const bool selected = (hub.selected == i);
             const bool title_busy = install_busy && r.id == busy_title_id;
+            const bool title_queued = !title_busy && queued_titles.count(r.id) > 0;
             const bool needs_update = r.update_available;
-            const bool dim_art = !r.installed || needs_update;
+            const bool dim_art = !r.installed || needs_update || title_queued;
             const BoxartTexture* tex =
                 r.boxart_path.empty() ? nullptr : boxart.get(r.id, r.boxart_path);
-            const ImVec4 badge = chip_color(r, th);
-            const TileStatusIcon status = tile_status_icon(r);
-            const float tile_h =
-                draw_grid_tile(tile_min, tile_w, selected, th, tex, aspect, r.name.c_str(),
-                               nullptr, &badge, title_busy, dim_art, needs_update, status);
+            ImVec4 badge = chip_color(r, th);
+            TileStatusIcon status = tile_status_icon(r);
+            if (title_queued) {
+                badge = th.focus;
+                status = TileStatusIcon::Queued;
+            }
+            const float tile_h = draw_grid_tile(
+                tile_min, tile_w, selected, th, tex, aspect, r.name.c_str(), nullptr, &badge,
+                title_busy, dim_art, needs_update && !title_queued, status, title_queued);
 
             ImGui::SetCursorScreenPos(tile_min);
             if (ImGui::InvisibleButton("##row", ImVec2(tile_w, tile_h))) {
@@ -983,7 +1054,7 @@ void draw_library(HubModel& hub, BoxartCache& boxart, const Theme& th) {
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip("%s\n%s · %s\n%s", r.name.c_str(),
                                   platform_display_name(r.platform), r.kind.c_str(),
-                                  chip_label(r));
+                                  title_queued ? "QUEUED" : chip_label(r));
             }
 
             row_h = (std::max)(row_h, tile_h);
@@ -1820,14 +1891,23 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
         }
         ImGui::EndDisabled();
         ImGui::SameLine(0, 8);
-        ImGui::BeginDisabled(block_title_mutate);
-        if (row.update_available) {
-            if (good_button("Update", th, ImVec2(btn_w, 0)))
-                hub.start_job(HubJob::Update, row.id);
-        } else if (ImGui::Button("Update", ImVec2(btn_w, 0))) {
-            hub.start_job(HubJob::Update, row.id);
+        {
+            const bool upd_active =
+                job_busy && hub.job == HubJob::Update && hub.job_title_id == row.id;
+            const bool upd_queued = hub.is_job_queued(HubJob::Update, row.id);
+            const char* upd_label =
+                upd_active  ? "Updating…"
+                : upd_queued ? "Queued"
+                : job_busy   ? "Queue Update"
+                             : "Update";
+            ImGui::BeginDisabled(upd_active || upd_queued ||
+                                 (!job_busy && block_title_mutate));
+            const bool upd_click = row.update_available
+                                       ? good_button(upd_label, th, ImVec2(btn_w, 0))
+                                       : ImGui::Button(upd_label, ImVec2(btn_w, 0));
+            if (upd_click) hub.start_job(HubJob::Update, row.id);
+            ImGui::EndDisabled();
         }
-        ImGui::EndDisabled();
     } else if (row.supports_local_build) {
         // Prefer prebuilt zip when available — ROM only required for build-only titles.
         const bool zip_first = row.can_prebuilt_install;
@@ -1845,15 +1925,35 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
             }
             ImGui::PopStyleColor();
         }
-        ImGui::BeginDisabled(block_title_mutate ||
-                             (!zip_first && !row.has_rom && !row.has_rom_identity));
-        if (good_button(row.install_dir_present ? "Reinstall" : "Install", th, ImVec2(-1, 0)))
-            hub.begin_install(row.id);
+        const bool need_rom = !zip_first && !row.has_rom && !row.has_rom_identity;
+        const bool inst_active =
+            job_busy && retcomm::hub::hub_job_is_install(hub.job) &&
+            hub.job_title_id == row.id && hub.job != HubJob::Update;
+        const bool inst_queued = hub.is_job_queued(HubJob::Install, row.id);
+        const char* inst_label =
+            inst_active ? (row.install_dir_present ? "Reinstalling…" : "Installing…")
+            : inst_queued ? "Queued"
+            : job_busy
+                ? (row.install_dir_present ? "Queue Reinstall" : "Queue Install")
+                : (row.install_dir_present ? "Reinstall" : "Install");
+        ImGui::BeginDisabled(inst_active || inst_queued || need_rom ||
+                             (!job_busy && block_title_mutate));
+        if (good_button(inst_label, th, ImVec2(-1, 0))) hub.begin_install(row.id);
         ImGui::EndDisabled();
     } else {
-        ImGui::BeginDisabled(block_title_mutate);
-        if (good_button(row.install_dir_present ? "Reinstall" : "Install", th, ImVec2(-1, 0)))
-            hub.begin_install(row.id);
+        const bool inst_active =
+            job_busy && retcomm::hub::hub_job_is_install(hub.job) &&
+            hub.job_title_id == row.id && hub.job != HubJob::Update;
+        const bool inst_queued = hub.is_job_queued(HubJob::Install, row.id);
+        const char* inst_label =
+            inst_active ? (row.install_dir_present ? "Reinstalling…" : "Installing…")
+            : inst_queued ? "Queued"
+            : job_busy
+                ? (row.install_dir_present ? "Queue Reinstall" : "Queue Install")
+                : (row.install_dir_present ? "Reinstall" : "Install");
+        ImGui::BeginDisabled(inst_active || inst_queued ||
+                             (!job_busy && block_title_mutate));
+        if (good_button(inst_label, th, ImVec2(-1, 0))) hub.begin_install(row.id);
         ImGui::EndDisabled();
     }
 
@@ -2025,8 +2125,9 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
         hub.settings.dirty = true;
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
     ImGui::TextWrapped(
-        "Native SRAM / memcard files (RomM sync + launch). Per-platform folders under this "
-        "root (e.g. …/saves/snes). Leave empty to keep saves inside each install.");
+        "Native SRAM / memcard files (RomM sync + launch). Each game gets "
+        "…/<platform>/<title_id>/ under this root (e.g. …/saves/ps/masters-of-teras-kasi-psx). "
+        "Leave empty to keep saves inside each install.");
     ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0, 6));
@@ -2516,8 +2617,8 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
             hub.settings.dirty = true;
         ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
         ImGui::TextWrapped(
-            "Recommended — shared SRAM / memcard library (e.g. …/saves). RomM sync and "
-            "launches use per-platform folders under this root.");
+            "Recommended — SRAM / memcard library (e.g. …/saves). RomM sync and launches "
+            "quarantine each game under …/<platform>/<title_id>/.");
         ImGui::PopStyleColor();
 
         ImGui::Dummy(ImVec2(0, 14));
@@ -3017,6 +3118,9 @@ int main(int argc, char** argv) {
             }
             if (!launch_id.empty()) hub.start_job(HubJob::Launch, launch_id);
         }
+        // Drain Install/Update queue when the main worker is free.
+        if (!hub.job_running.load() && hub.queued_job_count() > 0)
+            hub.start_next_queued_job();
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();
@@ -3422,16 +3526,21 @@ int main(int argc, char** argv) {
             if (n == 1) {
                 ImGui::TextWrapped(
                     "1 installed game has an update available.\n\n"
-                    "Open the title and use Update when you want to install it.");
+                    "Queue it to download/install when the worker is free, or dismiss "
+                    "for now.");
             } else {
                 ImGui::TextWrapped(
                     "%d installed games have updates available.\n\n"
-                    "Open a title and use Update when you want to install it.",
+                    "Queue all updates to run one after another, or dismiss for now.",
                     n);
             }
             ImGui::PopTextWrapPos();
             ImGui::Dummy(ImVec2(0, 10));
-            if (ImGui::Button("OK", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+            if (good_button("Queue All Updates", th, ImVec2(-1, 0))) {
+                hub.queue_all_updates();
+                ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::Button("Not Right Now", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
             close_modal_on_outside_click();
             ImGui::EndPopup();
         }

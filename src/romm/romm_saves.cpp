@@ -483,56 +483,26 @@ RommSaveSyncResult fail(const std::string& msg) {
 }
 
 bool save_name_matches_title(const std::string& file_name, const Title& title) {
-    const std::string stem = lower_copy(fs::path(file_name).stem().string());
-    if (stem.empty()) return false;
+    // Alphanumeric-only keys. Require a meaningful overlap so short stems like
+    // "ps" / "a" / "usa" do not false-match every PSX title id.
+    const std::string key = normalize_key(fs::path(file_name).stem().string());
+    if (key.size() < 6) return false;
     auto overlaps = [&](const std::string& other) {
-        const std::string o = lower_copy(other);
-        if (o.empty()) return false;
-        return stem.find(o) != std::string::npos || o.find(stem) != std::string::npos;
+        const std::string o = normalize_key(other);
+        if (o.size() < 6) return false;
+        if (key == o) return true;
+        // Longer side must contain the shorter; reject tiny substring hits.
+        const std::string& a = key.size() >= o.size() ? key : o;
+        const std::string& b = key.size() >= o.size() ? o : key;
+        if (b.size() < 6) return false;
+        return a.find(b) != std::string::npos;
     };
     if (!title.name.empty() && overlaps(title.name)) return true;
     if (!title.id.empty() && overlaps(title.id)) return true;
     for (const auto& fn : title.rom_identity.filenames) {
-        const std::string rs = fs::path(fn).stem().string();
-        if (overlaps(rs)) return true;
+        if (overlaps(fs::path(fn).stem().string())) return true;
     }
     return false;
-}
-
-// Shared saves_root/<platform>/ holds every title's cards. RomM is per-rom_id —
-// only upload this title's preferred file(s), or title-named fallbacks. Never the
-// whole pool.
-std::vector<LocalSave> scope_shared_library_saves_for_romm(const Paths& paths,
-                                                           const AppConfig& cfg,
-                                                           const Title& title,
-                                                           std::vector<LocalSave> local) {
-    if (local.empty()) return local;
-
-    const AppState st = load_app_state(paths.state_path);
-    std::unordered_set<std::string> want; // lowercased filenames
-    auto add_resolved = [&](const std::string& save_id) {
-        if (save_id.empty() || save_id == kBlankMemcardId) return;
-        const fs::path p = resolve_managed_save(paths, cfg, title, save_id);
-        if (p.empty()) return;
-        want.insert(lower_copy(p.filename().string()));
-    };
-    add_resolved(preferred_save_for(st, title.id));
-    add_resolved(preferred_save_card2_for(st, title.id));
-
-    std::vector<LocalSave> out;
-    out.reserve(local.size());
-    if (!want.empty()) {
-        for (auto& s : local) {
-            if (want.count(lower_copy(s.file_name))) out.push_back(std::move(s));
-        }
-        return out;
-    }
-
-    // No preference yet — only files that look like they belong to this title.
-    for (auto& s : local) {
-        if (save_name_matches_title(s.file_name, title)) out.push_back(std::move(s));
-    }
-    return out;
 }
 
 RommSaveSyncResult sync_assets_with_romm(const Paths& paths, const AppConfig& cfg,
@@ -560,32 +530,23 @@ RommSaveSyncResult sync_assets_with_romm(const Paths& paths, const AppConfig& cf
     if (!resolve_rom_id(cfg, title, on_progress, &rom_id, &how, &err))
         return fail(std::string("RomM ") + label + ": " + err);
 
-    // Native saves prefer the shared library tree; savestates stay install-local.
+    // Native saves prefer the per-title library tree; savestates stay install-local.
     fs::path library_saves;
     if (kind == SyncKind::Saves && !cfg.saves_root.empty()) {
-        library_saves = cfg.saves_dir_for_platform(title.platform, true);
-        if (library_saves.empty())
-            return fail("cannot create saves folder under " + cfg.saves_root.string());
-        // Install/preserved → library before RomM sees anything.
+        // Install/preserved (+ legacy flat platform files) → title library first.
         const int promoted = promote_install_saves_to_library(paths, cfg, title, {});
         if (promoted > 0)
             progress(on_progress, "RomM saves: promoted " + std::to_string(promoted) +
                                       " local file(s) into save library…");
+        library_saves = title_saves_dir(paths, cfg, title, true);
+        if (library_saves.empty())
+            return fail("cannot create saves folder under " + cfg.saves_root.string());
     }
 
     progress(on_progress, std::string("RomM ") + label + ": collecting local files…");
     std::vector<LocalSave> local;
     if (kind == SyncKind::Saves && !library_saves.empty()) {
-        // Shared platform pool: collect then scope to this title's preferred /
-        // title-named files so we do not upload every PSX memcard to one rom_id.
         local = collect_local_assets(library_saves, title, kind);
-        const size_t before = local.size();
-        local = scope_shared_library_saves_for_romm(paths, cfg, title, std::move(local));
-        if (before > local.size()) {
-            progress(on_progress, "RomM saves: scoped " + std::to_string(local.size()) +
-                                      " of " + std::to_string(before) +
-                                      " library file(s) for this title…");
-        }
     } else if (kind == SyncKind::Saves) {
         local = collect_local_assets(game_root / "saves", title, kind);
         const fs::path preserved = plan.install_root / "preserved";
@@ -627,11 +588,11 @@ RommSaveSyncResult sync_assets_with_romm(const Paths& paths, const AppConfig& cf
                                   ? library_saves
                                   : (game_root / ((kind == SyncKind::Saves) ? "saves" : "states"));
 
-    // When landing new files into a shared pool, adopt the first as preferred if unset.
-    const bool shared_saves_pool = (kind == SyncKind::Saves && !library_saves.empty());
+    // When landing new files into the title library, adopt the first as preferred if unset.
+    const bool title_library_saves = (kind == SyncKind::Saves && !library_saves.empty());
     bool wrote_pref = false;
     auto maybe_adopt_preferred = [&](const std::string& file_name) {
-        if (!shared_saves_pool || wrote_pref || file_name.empty()) return;
+        if (!title_library_saves || wrote_pref || file_name.empty()) return;
         AppState st = load_app_state(paths.state_path);
         if (!preferred_save_for(st, title.id).empty()) {
             wrote_pref = true;
@@ -1128,13 +1089,130 @@ int promote_files_into_library(const fs::path& src_dir, const fs::path& library_
     return promoted;
 }
 
+std::string title_library_folder_name(const Title& title) {
+    if (!title.id.empty()) return sanitize_save_stem(title.id);
+    if (!title.name.empty()) return sanitize_save_stem(title.name);
+    return "unknown";
+}
+
+// Older RetComM builds used a flat saves_root/<platform>/ pool. Quarantine this
+// title's preferred / title-named files into saves_root/<platform>/<title_id>/.
+// Only called from promote/ensure/sync — never from hub refresh listing.
+int migrate_legacy_flat_library_saves(const Paths& paths, const AppConfig& cfg,
+                                      const Title& title, const fs::path& rom_hint,
+                                      const fs::path& title_dir) {
+    if (cfg.saves_root.empty() || title_dir.empty()) return 0;
+    const fs::path platform_dir = cfg.saves_dir_for_platform(title.platform, false);
+    if (platform_dir.empty() || platform_dir == title_dir) return 0;
+
+    std::error_code ec;
+    if (!fs::is_directory(platform_dir, ec)) return 0;
+
+    // Snapshot flat-pool files first (no rename during iteration; fast empty bail).
+    std::vector<fs::path> flat_files;
+    for (auto it = fs::directory_iterator(platform_dir, ec);
+         !ec && it != fs::directory_iterator(); it.increment(ec)) {
+        if (it->is_regular_file(ec) || it->is_symlink(ec)) flat_files.push_back(it->path());
+    }
+    if (flat_files.empty()) return 0;
+
+    const AppState st = load_app_state(paths.state_path);
+    std::unordered_set<std::string> want; // lowercased filenames to claim
+    auto add_save_id = [&](const std::string& save_id) {
+        if (save_id.empty() || save_id == kBlankMemcardId) return;
+        want.insert(lower_copy(fs::path(save_id).filename().string()));
+    };
+    add_save_id(preferred_save_for(st, title.id));
+    add_save_id(preferred_save_card2_for(st, title.id));
+
+    const std::string want_stem = lower_copy(save_stem_for_title(title, rom_hint));
+    const auto exts = native_exts_for_title(title);
+
+    auto claimed_by_other = [&](const std::string& file_name_lower) {
+        auto hit = [&](const std::unordered_map<std::string, std::string>& map) {
+            for (const auto& [tid, sid] : map) {
+                if (tid == title.id || sid.empty() || sid == kBlankMemcardId) continue;
+                if (lower_copy(fs::path(sid).filename().string()) == file_name_lower)
+                    return true;
+            }
+            return false;
+        };
+        return hit(st.preferred_save) || hit(st.preferred_save_card2);
+    };
+
+    int relocated = 0;
+    for (const fs::path& src : flat_files) {
+        if (!fs::exists(src, ec)) continue; // already claimed by an earlier title
+        const std::string name = src.filename().string();
+        const std::string name_l = lower_copy(name);
+        const std::string rel = "saves/" + name;
+        if (!path_matches_native_glob(rel, title, exts) &&
+            !path_matches_native_glob(name, title, exts))
+            continue;
+
+        const std::string stem = lower_copy(src.stem().string());
+        const bool preferred = want.count(name_l) > 0;
+        // Exact ROM/title stem, or a strict alphanumeric name match — never
+        // short fuzzy hits that steal unrelated cards.
+        const bool named =
+            (!want_stem.empty() && stem == want_stem) || save_name_matches_title(name, title);
+        if (!preferred && !named) continue;
+
+        const bool shared = claimed_by_other(name_l);
+        // Non-preferred name matches that other titles still point at stay put.
+        if (!preferred && shared) continue;
+
+        fs::create_directories(title_dir, ec);
+        if (ec) continue;
+        fs::path dest = title_dir / name;
+        if (fs::exists(dest, ec)) {
+            // Avoid MD5 on the refresh/promote path — size match is enough to
+            // treat as already quarantined.
+            const auto src_sz = fs::file_size(src, ec);
+            const auto dst_sz = fs::file_size(dest, ec);
+            if (!ec && src_sz == dst_sz) {
+                if (!shared) fs::remove(src, ec);
+                continue;
+            }
+            dest = unique_library_dest(title_dir, sanitize_save_stem(src.stem().string()),
+                                       lower_copy(src.extension().string()));
+        }
+
+        // Shared preferred cards: copy so other titles keep the flat original.
+        // Exclusive: rename (fall back to copy+remove).
+        ec.clear();
+        if (shared) {
+            fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
+            if (ec) continue;
+        } else {
+            fs::rename(src, dest, ec);
+            if (ec) {
+                ec.clear();
+                fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
+                if (ec) continue;
+                fs::remove(src, ec);
+            }
+        }
+        ++relocated;
+    }
+    return relocated;
+}
+
 } // namespace
 
 fs::path title_saves_dir(const Paths& paths, const AppConfig& cfg, const Title& title,
                          bool create) {
     if (!cfg.saves_root.empty()) {
-        const fs::path lib = cfg.saves_dir_for_platform(title.platform, create);
-        if (!lib.empty()) return lib;
+        // Ensure the platform folder exists when creating the title quarantine.
+        const fs::path plat = cfg.saves_dir_for_platform(title.platform, create);
+        if (plat.empty()) return {};
+        const fs::path dir = plat / title_library_folder_name(title);
+        if (create) {
+            std::error_code ec;
+            fs::create_directories(dir, ec);
+            if (ec) return {};
+        }
+        return dir;
     }
     const fs::path game_root = resolve_game_root(paths, title);
     if (game_root.empty()) return {};
@@ -1154,6 +1232,7 @@ int promote_install_saves_to_library(const Paths& paths, const AppConfig& cfg, c
     if (library.empty()) return 0;
     const std::string stem = save_stem_for_title(title, rom_hint);
     int n = 0;
+    n += migrate_legacy_flat_library_saves(paths, cfg, title, rom_hint, library);
     const fs::path game_root = resolve_game_root(paths, title);
     if (!game_root.empty())
         n += promote_files_into_library(game_root / "saves", library, title, stem, true);
@@ -1168,13 +1247,10 @@ std::vector<ManagedSave> list_managed_saves(const Paths& paths, const AppConfig&
                                             const Title& title) {
     std::vector<ManagedSave> out;
     const auto exts = native_exts_for_title(title);
-    // When a shared library is configured it is the only listing source (install
-    // leftovers are promoted via ensure/sync). Without saves_root, use install.
+    // Listing only — never migrate here (hub refresh calls this for every title).
+    // Play / ensure / promote / RomM sync pull leftovers out of the flat pool.
     const fs::path primary = title_saves_dir(paths, cfg, title, false);
     append_managed_from_dir(out, primary, title, exts);
-    if (cfg.saves_root.empty()) {
-        // primary already is install saves/; nothing else.
-    }
     std::sort(out.begin(), out.end(), [](const ManagedSave& a, const ManagedSave& b) {
         const int ka = managed_save_sort_key(a);
         const int kb = managed_save_sort_key(b);
@@ -1243,7 +1319,6 @@ CanonicalSaveResult ensure_canonical_save(const Paths& paths, const AppConfig& c
     }
 
     auto saves = list_managed_saves(paths, cfg, title);
-    // Shared pool: never silently adopt an unrelated title's memcard / SRAM.
     // Prefer a file named for this game; otherwise mint a title-stem file.
     if (const ManagedSave* named = find_title_named_save(saves, title, rom_hint)) {
         r.ok = true;
@@ -1322,6 +1397,10 @@ fs::path resolve_managed_save(const Paths& paths, const AppConfig& cfg, const Ti
     fs::path hit = resolve_preferred_under_saves(primary, save_id);
     if (!hit.empty()) return hit;
     if (!cfg.saves_root.empty()) {
+        // Legacy flat saves_root/<platform>/ before quarantine migrate runs.
+        const fs::path legacy = cfg.saves_dir_for_platform(title.platform, false);
+        hit = resolve_preferred_under_saves(legacy, save_id);
+        if (!hit.empty()) return hit;
         const fs::path game_root = resolve_game_root(paths, title);
         if (!game_root.empty())
             return resolve_preferred_under_saves(game_root / "saves", save_id);
@@ -1364,7 +1443,12 @@ RecompSaveBindResult bind_recomp_save_paths(const Paths& paths, const AppConfig&
     fs::create_directories(install_saves, ec);
 
     fs::path preferred = resolve_save_arg(saves_dir, preferred_save);
+    if (preferred.empty() && !preferred_save.empty())
+        preferred = resolve_managed_save(paths, cfg, title, preferred_save.generic_string());
     fs::path preferred_card2 = resolve_save_arg(saves_dir, preferred_save_card2);
+    if (preferred_card2.empty() && !preferred_save_card2.empty())
+        preferred_card2 =
+            resolve_managed_save(paths, cfg, title, preferred_save_card2.generic_string());
 
     std::vector<fs::path> memcards;
     std::vector<fs::path> batteries;
@@ -1470,7 +1554,7 @@ RecompSaveBindResult bind_recomp_save_paths(const Paths& paths, const AppConfig&
         if (card2.empty()) {
             // No explicit card2 preference — keep a prior valid card2 only if it is
             // still under the saves dir; otherwise leave slot 2 blank (card2.mcd).
-            // Do not auto-assign another title's memcard from the shared pool.
+            // Do not auto-assign an unrelated memcard when the title dir is empty.
             card2 = still_valid(prev_card2);
             if (card2.empty() || card2 == card1) card2 = saves_dir / "card2.mcd";
         }

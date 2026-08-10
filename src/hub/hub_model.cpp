@@ -524,17 +524,27 @@ void HubModel::refresh_rows(bool check_updates, bool force_github_tags) {
                 const std::string want_name = to_lower_ascii(t.name);
                 const std::string want_id = to_lower_ascii(t.id);
                 auto label_matches = [&](const std::string& label) {
-                    const std::string stem = to_lower_ascii(fs::path(label).stem().string());
-                    if (stem.empty()) return false;
-                    if (!want_name.empty() &&
-                        (stem.find(want_name) != std::string::npos ||
-                         want_name.find(stem) != std::string::npos))
-                        return true;
-                    if (!want_id.empty() &&
-                        (stem.find(want_id) != std::string::npos ||
-                         want_id.find(stem) != std::string::npos))
-                        return true;
-                    return false;
+                    // Alphanumeric fold + min length — avoid "ps"/"a" false hits.
+                    auto fold = [](std::string s) {
+                        std::string out;
+                        for (char c : s) {
+                            const unsigned char u = static_cast<unsigned char>(c);
+                            if (std::isalnum(u))
+                                out.push_back(static_cast<char>(std::tolower(u)));
+                        }
+                        return out;
+                    };
+                    const std::string stem = fold(fs::path(label).stem().string());
+                    if (stem.size() < 6) return false;
+                    auto overlaps = [&](const std::string& other) {
+                        const std::string o = fold(other);
+                        if (o.size() < 6) return false;
+                        if (stem == o) return true;
+                        const std::string& a = stem.size() >= o.size() ? stem : o;
+                        const std::string& b = stem.size() >= o.size() ? o : stem;
+                        return b.size() >= 6 && a.find(b) != std::string::npos;
+                    };
+                    return overlaps(want_name) || overlaps(want_id);
                 };
                 for (size_t i = 0; i < row.save_labels.size(); ++i) {
                     if (label_matches(row.save_labels[i])) {
@@ -699,6 +709,84 @@ void HubModel::fetch_boxart_for_catalog(bool force) {
     set_status(oss.str());
 }
 
+std::size_t HubModel::queued_job_count() const {
+    std::lock_guard<std::mutex> lock(mu);
+    return job_queue.size();
+}
+
+bool HubModel::is_job_queued(HubJob j, const std::string& title_id) const {
+    std::lock_guard<std::mutex> lock(mu);
+    for (const auto& q : job_queue) {
+        if (q.job == j && q.title_id == title_id) return true;
+    }
+    return false;
+}
+
+bool HubModel::is_title_queued(const std::string& title_id) const {
+    if (title_id.empty()) return false;
+    std::lock_guard<std::mutex> lock(mu);
+    for (const auto& q : job_queue) {
+        if (q.title_id == title_id && hub_job_is_queueable(q.job)) return true;
+    }
+    return false;
+}
+
+static bool enqueue_hub_job(HubModel* hub, HubJob j, const std::string& title_id,
+                            bool force_boxart, bool fetch_romm_first) {
+    if (!hub || !hub_job_is_queueable(j) || title_id.empty()) return false;
+    std::string note;
+    {
+        std::lock_guard<std::mutex> lock(hub->mu);
+        if (hub->job_running.load() && hub->job == j && hub->job_title_id == title_id)
+            return true;
+        for (const auto& q : hub->job_queue) {
+            if (q.job == j && q.title_id == title_id) return true;
+        }
+        hub->job_queue.push_back(QueuedHubJob{j, title_id, force_boxart, fetch_romm_first});
+        const char* kind = (j == HubJob::Update)             ? "Update"
+                           : (j == HubJob::GenerateRebuild) ? "Rebuild"
+                                                             : "Install";
+        note = std::string("Queued ") + kind + ": " + title_id + " (" +
+               std::to_string(hub->job_queue.size()) + " in queue)";
+    }
+    if (!note.empty()) hub->append_log(note);
+    return true;
+}
+
+int HubModel::queue_all_updates() {
+    std::vector<std::string> ids;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        for (const auto& r : rows) {
+            if (r.installed && r.update_available) ids.push_back(r.id);
+        }
+    }
+    int n = 0;
+    for (const auto& id : ids) {
+        if (enqueue_hub_job(this, HubJob::Update, id, false, false)) ++n;
+    }
+    if (!job_running.load()) start_next_queued_job();
+    if (n > 0) set_status("Queued " + std::to_string(n) + " update(s)");
+    return n;
+}
+
+bool HubModel::start_next_queued_job() {
+    if (job_running.load()) return false;
+    QueuedHubJob next;
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        if (job_queue.empty()) return false;
+        next = job_queue.front();
+        job_queue.pop_front();
+    }
+    // start_job will claim the worker; if a race loses the slot, re-queue.
+    if (start_job(next.job, next.title_id, next.force_boxart, next.fetch_romm_first))
+        return true;
+    std::lock_guard<std::mutex> lock(mu);
+    job_queue.push_front(next);
+    return false;
+}
+
 bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxart,
                          bool fetch_romm_first) {
     // Play (+ optional per-title update preflight) overlaps Build & Install /
@@ -823,7 +911,17 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
         return true;
     }
 
-    if (job_running.exchange(true)) return false;
+    if (job_running.load()) {
+        if (hub_job_is_queueable(j))
+            return enqueue_hub_job(this, j, title_id, force_boxart, fetch_romm_first);
+        return false;
+    }
+    if (job_running.exchange(true)) {
+        // Lost the race to another starter — queue Install/Update instead of failing.
+        if (hub_job_is_queueable(j))
+            return enqueue_hub_job(this, j, title_id, force_boxart, fetch_romm_first);
+        return false;
+    }
     if (worker.joinable()) worker.join();
     job = j;
     job_title_id = title_id;

@@ -11,6 +11,8 @@
 #include "retcomm/romm_fetch.hpp"
 
 #include <atomic>
+#include <cstddef>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -87,6 +89,27 @@ inline bool hub_job_is_install(HubJob j) {
         return false;
     }
 }
+
+// Jobs that may wait behind the current main-worker job (Install/Update queue).
+inline bool hub_job_is_queueable(HubJob j) {
+    switch (j) {
+    case HubJob::Install:
+    case HubJob::InstallPrebuilt:
+    case HubJob::InstallWine:
+    case HubJob::Update:
+    case HubJob::GenerateRebuild:
+        return true;
+    default:
+        return false;
+    }
+}
+
+struct QueuedHubJob {
+    HubJob job = HubJob::None;
+    std::string title_id;
+    bool force_boxart = false;
+    bool fetch_romm_first = false;
+};
 
 // ROM / BIOS / RomM library index scans — mutually exclusive with install jobs.
 inline bool hub_job_is_scan(HubJob j) {
@@ -349,7 +372,7 @@ struct HubModel {
     RommSettingsDraft romm_settings;
     NetplayLobbyState netplay;
 
-    std::mutex mu;
+    mutable std::mutex mu;
     std::string status; // last job/status line (also mirrored into log_lines)
     std::vector<LogLine> log_lines;
     std::string log; // plain joined text for clipboard / legacy callers
@@ -363,6 +386,8 @@ struct HubModel {
     bool job_fetch_romm_first = false;
     std::thread worker;
     std::thread launch_worker;
+    // Install/Update backlog while the main worker is busy (guarded by mu).
+    std::deque<QueuedHubJob> job_queue;
     std::string launcher_version; // display: running binary version (RETCOMM_VERSION)
 
     // Shared cmake-clang-v1 toolchain update prompt (launch / Check Updates).
@@ -441,8 +466,19 @@ struct HubModel {
     void fetch_boxart_for_catalog(bool force = false);
     // fetch_romm_first: Install/Build searches RomM + rescans before building when
     // the library has no verified ROM (set by the hub confirm modal).
+    // Queueable jobs (Install/Update/…) enqueue when the main worker is busy.
     bool start_job(HubJob j, const std::string& title_id = {}, bool force_boxart = false,
                    bool fetch_romm_first = false);
+    // Waiting Install/Update jobs (not including the one currently running).
+    std::size_t queued_job_count() const;
+    bool is_job_queued(HubJob j, const std::string& title_id) const;
+    // True if any queueable job for this title is waiting in the backlog.
+    bool is_title_queued(const std::string& title_id) const;
+    // Enqueue Update for every installed title with update_available; starts the
+    // first when the worker is idle.
+    int queue_all_updates();
+    // Pop the next queued job and start it (no-op if busy or empty).
+    bool start_next_queued_job();
     void join_worker();
     // Download pending game update zips into the release cache (non-blocking job slot).
     // empty ids → all rows with update_available. Safe to call from worker or UI thread.

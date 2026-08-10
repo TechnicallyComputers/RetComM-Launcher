@@ -109,9 +109,13 @@ sizes/filenames from catalog `bios_identity` (including
 ## Game saves
 
 Config `saves_root` (optional, prompted in first-time setup / Library Settings)
-is the **canonical** native-save library (ES-DE / other frontend layout:
-`saves_root/<platform folder>/`). First-time setup also accepts optional RomM
-`base_url` + Client API token (same fields as RomM Sync Settings).
+is the **canonical** native-save library. Each title is quarantined under
+`saves_root/<platform folder>/<title_id>/` (e.g. `…/saves/ps/masters-of-teras-kasi-psx/`).
+Legacy flat `saves_root/<platform>/` files that match a title’s preferred or
+title-named stem are migrated into that folder on promote / ensure / sync /
+Play (not on hub refresh listing). Shared preferred cards are copied, not moved.
+First-time setup also accepts optional RomM `base_url` + Client API token
+(same fields as RomM Sync Settings).
 
 The hub wizard runs when `retcomm-setup.done` is missing **and**
 `library_root` is unset. Markers live under the data dir (and best-effort next
@@ -123,14 +127,17 @@ wizard (pre-filled from any partial `config.json`).
 Flow:
 
 1. **Promote** — install `current/saves/` and `preserved/` native files are
-   copied into the library (generic `save.*` / `card1.*` renamed to the ROM
-   stem). Bridge symlinks are skipped.
+   copied into the title’s library folder (generic `save.*` / `card1.*`
+   renamed to the ROM stem). Matching leftovers in a legacy flat
+   `saves_root/<platform>/` pool are moved into the title folder. Bridge
+   symlinks are skipped.
 2. **Mint / Create Save** — if none exist, Play or **Create Save** creates an
-   empty `<rom-stem>.srm` / `.mcd` in the library and sets `preferred_save`.
+   empty `<rom-stem>.srm` / `.mcd` in the title library and sets
+   `preferred_save`.
 3. **Bind** — launch points cart `--save-path` / PSX `[memcard]` at library
    files and bridges `apps/<title>/current/saves/save.*` for fixed-cwd hosts.
-4. **RomM sync** — after promote, bidirectional newer-wins only against the
-   library (not the install tree).
+4. **RomM sync** — after promote, bidirectional newer-wins only against that
+   title’s library folder (not the install tree).
 
 When `saves_root` is unset, behavior stays install-local `…/current/saves/`.
 Savestate sync remains install-local either way.
