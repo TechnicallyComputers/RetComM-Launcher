@@ -51,7 +51,7 @@ enum class HubJob : int {
     FullScanBios,
     PurgeMissingFiles,
     CheckUpdates,
-    CheckLaunchUpdate, // Play → check this title, then launch or prompt
+    CheckLaunchUpdate, // Play preflight on launch_worker (overlaps Install)
     FetchBoxart,
     FetchRommRom,
     FetchRommBios,
@@ -127,6 +127,9 @@ struct TitleRow {
     bool needs_bios = false;
     bool has_bios = false;
     bool supports_openbios = false; // psxrecomp titles can generate MIT OpenBIOS
+    // Local build used OpenBIOS only (no SCPH1001 backend). Selecting a retail
+    // dump flips Play → "Reinstall w BIOS".
+    bool built_with_openbios = false;
     std::string rom_path;
     std::string suggested_rom; // catalog basename hint when unmatched
     std::string bios_path;
@@ -351,7 +354,7 @@ struct HubModel {
     std::vector<LogLine> log_lines;
     std::string log; // plain joined text for clipboard / legacy callers
     std::atomic<bool> job_running{false};
-    // Launch runs on its own thread so Play stays usable during Build & Install.
+    // Launch / CheckLaunchUpdate share a thread so Play works during Install.
     std::atomic<bool> launch_running{false};
     std::atomic<bool> request_exit{false}; // set after self-update schedules restart
     HubJob job = HubJob::None;

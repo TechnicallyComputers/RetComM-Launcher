@@ -24,8 +24,11 @@ struct BuildOptions {
     bool force_generate = false;
     fs::path rom_path;  // required verified ROM (library preferred_rom)
     // Retail BIOS dump for psxrecomp generate (--bios). Empty + use_openbios → OpenBIOS.
+    // When bios_path is set, generate still regenerates OpenBIOS as well (CLI).
     fs::path bios_path;
     bool use_openbios = false;
+    // Pass --force-bios so SCPH1001 + OpenBIOS C are regenerated (not skipped).
+    bool force_bios = false;
     // Optional overrides (also accepted via RETCOMM_TOOLCHAIN_DIR / RETCOMM_SDK_DIR /
     // RETCOMM_SOURCE_DIR).
     fs::path toolchain_dir;

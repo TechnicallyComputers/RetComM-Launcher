@@ -951,15 +951,16 @@ const GhAsset* pick_asset(const GhRelease& rel, const std::string& glob) {
 
 void set_current_symlink(const fs::path& install_root, const std::string& tag) {
     const fs::path link = install_root / "current";
+    const fs::path ptr_path = install_root / "current.path";
     const fs::path target = fs::path("releases") / tag;
     std::error_code ec;
     if (fs::exists(link, ec) || fs::is_symlink(link, ec)) fs::remove(link, ec);
+    fs::remove(ptr_path, ec);
 #if defined(_WIN32)
-    // Directory junction / symlink — may require privileges; fall back to copy marker.
+    // Directory junction / symlink — may require privileges; fall back to text pointer.
     fs::create_directory_symlink(install_root / target, link, ec);
     if (ec) {
-        // Last resort: write a text pointer (inspect will still use install.json).
-        std::ofstream ptr(install_root / "current.path");
+        std::ofstream ptr(ptr_path);
         ptr << target.string();
     }
 #else
@@ -1023,6 +1024,133 @@ bool classify_install_root_leftovers(const fs::path& install_root, bool* has_pre
     return true;
 }
 
+// Playable release under apps/<title>/releases/<tag>/ (never src/).
+struct ReleaseCandidate {
+    fs::path release_dir;
+    fs::path binary;
+    std::string tag; // releases/ folder name
+    std::string resolved_name;
+    int score = 0;
+    std::filesystem::file_time_type mtime{};
+};
+
+bool tag_looks_like_local_build(const std::string& tag) {
+    const std::string t = to_lower(tag);
+    return t.rfind("build-", 0) == 0 || t.rfind("build_", 0) == 0;
+}
+
+int score_release_candidate(const ReleaseCandidate& c, const InstallRecord* rec,
+                            bool any_build_tag) {
+    int score = 0;
+    const bool build_tag = tag_looks_like_local_build(c.tag);
+    if (build_tag) score += 1000;
+    if (rec && !rec->tag.empty() && sanitize_tag(rec->tag) == c.tag) {
+        score += 200;
+        if (rec->method == "build") score += 400;
+        if (rec->method == "zip" && any_build_tag && !build_tag)
+            score -= 300; // prefer a sibling build-* over the recorded zip pin
+    }
+    if (rec && rec->method == "build" && build_tag) score += 100;
+    // Setup-host GitHub zips share the launch name; demote non-build tags when a
+    // local build release exists so Play does not open the wizard by accident.
+    if (any_build_tag && !build_tag) score -= 500;
+    return score;
+}
+
+bool release_candidate_better(const ReleaseCandidate& a, const ReleaseCandidate& b) {
+    if (a.score != b.score) return a.score > b.score;
+    if (a.mtime != b.mtime) return a.mtime > b.mtime;
+    return a.tag > b.tag; // stable lexicographic tie-break
+}
+
+std::vector<ReleaseCandidate> collect_release_candidates(const fs::path& install_root,
+                                                         const std::string& bin,
+                                                         const std::string& target_os,
+                                                         const InstallRecord* rec) {
+    std::vector<ReleaseCandidate> out;
+    std::error_code ec;
+    const fs::path releases = install_root / "releases";
+    if (!fs::is_directory(releases, ec) || bin.empty()) return out;
+
+    bool any_build_tag = false;
+    for (auto it = fs::directory_iterator(releases, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        const std::string tag = it->path().filename().string();
+        if (tag.empty() || tag[0] == '.') continue;
+        if (tag_looks_like_local_build(tag)) any_build_tag = true;
+    }
+
+    for (auto it = fs::directory_iterator(releases, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        const fs::path root = it->path();
+        const std::string tag = root.filename().string();
+        if (tag.empty() || tag[0] == '.') continue;
+        std::string resolved;
+        fs::path hit = resolve_launch_binary(root, bin, target_os, &resolved);
+        if (hit.empty() && rec && !rec->binary.empty()) {
+            const fs::path from_rec = root / rec->binary;
+            if (fs::is_regular_file(from_rec, ec)) {
+                hit = from_rec;
+                resolved = fs::path(rec->binary).filename().string();
+            }
+        }
+        if (hit.empty()) continue;
+        ReleaseCandidate c;
+        c.release_dir = root;
+        c.binary = hit;
+        c.tag = tag;
+        c.resolved_name = resolved.empty() ? hit.filename().string() : resolved;
+        c.mtime = fs::last_write_time(hit, ec);
+        c.score = score_release_candidate(c, rec, any_build_tag);
+        out.push_back(std::move(c));
+    }
+    std::sort(out.begin(), out.end(), [](const ReleaseCandidate& a, const ReleaseCandidate& b) {
+        return release_candidate_better(a, b);
+    });
+    return out;
+}
+
+void apply_release_candidate(InstallPlan& plan, const ReleaseCandidate& best, bool heal) {
+    std::error_code ec;
+    plan.binary_path = best.binary;
+    plan.installed = true;
+    plan.install_dir_present = true;
+    plan.installed_tag = best.tag;
+    if (heal) {
+        plan.message = "installed (healed current → " + best.tag + "): " + best.binary.string();
+    } else {
+        plan.message = "installed: " + best.binary.string() + " [" + best.tag + "]";
+    }
+    if (plan.record && plan.record->runtime == "wine") plan.message += " [wine]";
+
+    InstallRecord rec = plan.record ? *plan.record : InstallRecord{};
+    if (rec.title_id.empty() && plan.title) rec.title_id = plan.title->id;
+    const fs::path rel_bin = fs::relative(best.binary, best.release_dir, ec);
+    const std::string rel = ec ? best.resolved_name : rel_bin.generic_string();
+    const bool record_stale =
+        rec.tag != best.tag || rec.binary != rel ||
+        (tag_looks_like_local_build(best.tag) && rec.method != "build");
+    if (heal || record_stale || !plan.record) {
+        rec.tag = best.tag;
+        rec.binary = rel;
+        if (tag_looks_like_local_build(best.tag)) rec.method = "build";
+        if (rec.host_os.empty()) rec.host_os = host_os_key();
+        if (rec.target_os.empty()) rec.target_os = host_os_key();
+        if (rec.runtime.empty()) rec.runtime = "native";
+        save_install_record(plan.install_root, rec);
+    }
+    plan.record = rec;
+    if (heal) {
+        try {
+            set_current_symlink(plan.install_root, best.tag);
+        } catch (...) {
+            // Launch still works via binary_path; current heal is best-effort.
+        }
+    }
+}
+
 void fill_from_disk(InstallPlan& plan) {
     plan.record.reset();
     plan.installed = false;
@@ -1045,18 +1173,49 @@ void fill_from_disk(InstallPlan& plan) {
         plan.installed_tag = rec.tag;
     }
 
-    const fs::path current = resolve_current_dir(plan.install_root);
     const std::string bin = launch_name_for_plan(plan);
     plan.expected_binary = bin;
+    const std::string target_os =
+        (plan.record && !plan.record->target_os.empty()) ? plan.record->target_os
+                                                        : host_os_key();
 
+    // Accept only a finished install layout — never the setup host vendored
+    // inside src/<tag>/ from a release/source zip (that falsely enables Play).
+    auto candidates =
+        collect_release_candidates(plan.install_root, bin, target_os,
+                                   plan.record ? &*plan.record : nullptr);
+
+    const fs::path current = resolve_current_dir(plan.install_root);
+    const ReleaseCandidate* current_hit = nullptr;
+    if (!current.empty() && !candidates.empty()) {
+        const fs::path cur_canon = fs::weakly_canonical(current, ec);
+        for (const auto& c : candidates) {
+            const fs::path rel_canon = fs::weakly_canonical(c.release_dir, ec);
+            if (!cur_canon.empty() && !rel_canon.empty() && cur_canon == rel_canon) {
+                current_hit = &c;
+                break;
+            }
+        }
+    }
+
+    if (!candidates.empty()) {
+        const ReleaseCandidate& best = candidates.front();
+        const bool current_is_best =
+            current_hit && current_hit->tag == best.tag && current_hit->score == best.score;
+        const bool need_heal = !current_is_best;
+        apply_release_candidate(plan, best, need_heal);
+        return;
+    }
+
+    // current/ present but no scored release candidate (broken link / empty releases).
     if (!current.empty()) {
         fs::path candidate;
         if (plan.record && !plan.record->binary.empty())
             candidate = current / plan.record->binary;
-        if (candidate.empty() || !fs::exists(candidate))
+        if (candidate.empty() || !fs::exists(candidate, ec))
             candidate = find_named_file(current, bin);
         if (candidate.empty() && !bin.empty()) candidate = current / bin;
-        if (!candidate.empty() && fs::exists(candidate)) {
+        if (!candidate.empty() && fs::exists(candidate, ec)) {
             plan.binary_path = candidate;
             plan.installed = true;
             plan.install_dir_present = true;
@@ -1068,65 +1227,17 @@ void fill_from_disk(InstallPlan& plan) {
             return;
         }
         plan.install_dir_present = true;
-        plan.message = "current/ present but binary missing";
-        if (!bin.empty()) plan.message += ": " + bin;
-        return;
+        // Fall through — may still find a flat binary.
     }
 
-    // Accept only a finished install layout — never the setup host vendored
-    // inside src/<tag>/ from a release/source zip (that falsely enables Play).
-    {
-        const std::string target_os =
-            (plan.record && !plan.record->target_os.empty()) ? plan.record->target_os
-                                                            : host_os_key();
-        if (!bin.empty()) {
-            const fs::path top = plan.install_root / bin;
-            if (fs::is_regular_file(top, ec)) {
-                plan.binary_path = top;
-                plan.installed = true;
-                plan.install_dir_present = true;
-                plan.message = "installed (flat): " + top.string();
-                return;
-            }
-        }
-        const fs::path releases = plan.install_root / "releases";
-        if (fs::is_directory(releases, ec)) {
-            // Prefer the tagged release dir when known.
-            std::vector<fs::path> search_roots;
-            if (plan.record && !plan.record->tag.empty()) {
-                const fs::path tagged =
-                    releases / sanitize_tag(plan.record->tag);
-                if (fs::is_directory(tagged, ec)) search_roots.push_back(tagged);
-            }
-            if (search_roots.empty()) {
-                for (auto it = fs::directory_iterator(releases, ec);
-                     !ec && it != fs::directory_iterator(); it.increment(ec)) {
-                    if (it->is_directory(ec)) search_roots.push_back(it->path());
-                }
-            }
-            for (const auto& root : search_roots) {
-                std::string resolved;
-                fs::path hit = resolve_launch_binary(root, bin, target_os, &resolved);
-                if (hit.empty()) continue;
-                plan.binary_path = hit;
-                plan.installed = true;
-                plan.install_dir_present = true;
-                plan.message = "installed: " + hit.string();
-                if (!plan.installed_tag.empty())
-                    plan.message += " [" + plan.installed_tag + "]";
-                // Heal install.json so later launches don't re-guess.
-                if (plan.record &&
-                    (plan.record->binary.empty() ||
-                     !filename_eq_ci(fs::path(plan.record->binary).filename().string(),
-                                     resolved))) {
-                    InstallRecord rec = *plan.record;
-                    const fs::path rel_bin = fs::relative(hit, root, ec);
-                    rec.binary = ec ? resolved : rel_bin.generic_string();
-                    save_install_record(plan.install_root, rec);
-                    plan.record = rec;
-                }
-                return;
-            }
+    if (!bin.empty()) {
+        const fs::path top = plan.install_root / bin;
+        if (fs::is_regular_file(top, ec)) {
+            plan.binary_path = top;
+            plan.installed = true;
+            plan.install_dir_present = true;
+            plan.message = "installed (flat): " + top.string();
+            return;
         }
     }
 
@@ -1347,6 +1458,7 @@ InstallRecord load_install_record(const fs::path& install_root) {
         rec.source_ref = j.value("source_ref", "");
         rec.sdk_tag = j.value("sdk_tag", "");
         rec.toolchain_tag = j.value("toolchain_tag", "");
+        rec.bios_source = j.value("bios_source", "");
         // Legacy installs: infer Wine from a Windows .exe on a non-Windows host.
         if (rec.runtime.empty()) {
             const std::string& b = rec.binary;
@@ -1387,6 +1499,7 @@ bool save_install_record(const fs::path& install_root, const InstallRecord& rec)
     if (!rec.source_ref.empty()) j["source_ref"] = rec.source_ref;
     if (!rec.sdk_tag.empty()) j["sdk_tag"] = rec.sdk_tag;
     if (!rec.toolchain_tag.empty()) j["toolchain_tag"] = rec.toolchain_tag;
+    if (!rec.bios_source.empty()) j["bios_source"] = rec.bios_source;
     std::ofstream out(path);
     if (!out) return false;
     out << j.dump(2) << "\n";
@@ -1454,6 +1567,47 @@ std::string fetch_latest_release_tag(const std::string& github_slug, std::string
     return rel.tag;
 }
 
+bool install_built_with_openbios(const InstallPlan& plan) {
+    if (plan.record && !plan.record->bios_source.empty())
+        return plan.record->bios_source == "openbios";
+    if (!plan.record || plan.record->method != "build") return false;
+    if (plan.install_root.empty()) return false;
+
+    std::error_code ec;
+    const fs::path src_base = plan.install_root / "src";
+    std::vector<fs::path> roots;
+    const fs::path current = src_base / "current";
+    if (fs::is_directory(current, ec)) roots.push_back(current);
+    if (fs::is_directory(src_base, ec)) {
+        for (auto it = fs::directory_iterator(src_base, ec); !ec && it != fs::directory_iterator();
+             it.increment(ec)) {
+            if (!it->is_directory(ec)) continue;
+            if (it->path().filename() == "current") continue;
+            roots.push_back(it->path());
+        }
+    }
+
+    for (const auto& root : roots) {
+        const fs::path stamp = root / ".retcomm-codegen.json";
+        if (fs::is_regular_file(stamp, ec)) {
+            try {
+                std::ifstream in(stamp);
+                const json meta = json::parse(in);
+                const std::string bios = meta.value("bios", "");
+                if (bios == "openbios") return true;
+                if (!bios.empty() && bios != "openbios" && bios != "bios-missing") return false;
+            } catch (...) {
+            }
+        }
+        const fs::path bios_gen = root / "psxrecomp" / "generated";
+        const bool has_open = fs::is_regular_file(bios_gen / "OpenBIOS_dispatch.c", ec);
+        const bool has_scph = fs::is_regular_file(bios_gen / "SCPH1001_dispatch.c", ec);
+        if (has_open && !has_scph) return true;
+        if (has_scph) return false;
+    }
+    return false;
+}
+
 std::string install_release_compare_tag(const InstallRecord& rec) {
     if (rec.method == "build") {
         if (!rec.source_ref.empty()) return rec.source_ref;
@@ -1483,18 +1637,42 @@ InstallPlan inspect_install(const Paths& paths, const Title& title, const fs::pa
 }
 
 InstallPlan inspect_install_any(const Paths& paths, const AppConfig& cfg, const Title& title) {
-    InstallPlan best;
+    InstallPlan best_installed;
+    bool have_installed = false;
+    InstallPlan best_partial;
     bool have_partial = false;
+    const fs::path preferred_root = resolve_default_install_root(cfg, paths);
+
+    auto prefer_installed = [&](const InstallPlan& a, const InstallPlan& b) -> bool {
+        const bool a_build = a.record && a.record->method == "build";
+        const bool b_build = b.record && b.record->method == "build";
+        if (a_build != b_build) return a_build;
+        const bool a_build_tag = tag_looks_like_local_build(a.installed_tag);
+        const bool b_build_tag = tag_looks_like_local_build(b.installed_tag);
+        if (a_build_tag != b_build_tag) return a_build_tag;
+        if (a.installed_tag != b.installed_tag) return a.installed_tag > b.installed_tag;
+        if (a.install_root == preferred_root && b.install_root != preferred_root) return true;
+        if (b.install_root == preferred_root && a.install_root != preferred_root) return false;
+        return false;
+    };
+
     for (const auto& root : scan_install_roots(cfg, paths)) {
         auto plan = inspect_install(paths, title, root.path);
-        if (plan.installed) return plan;
+        if (plan.installed) {
+            if (!have_installed || prefer_installed(plan, best_installed)) {
+                best_installed = std::move(plan);
+                have_installed = true;
+            }
+            continue;
+        }
         if (!have_partial && (plan.install_dir_present || plan.has_preserved_state)) {
-            best = std::move(plan);
+            best_partial = std::move(plan);
             have_partial = true;
         }
     }
-    if (have_partial) return best;
-    return inspect_install(paths, title, resolve_default_install_root(cfg, paths));
+    if (have_installed) return best_installed;
+    if (have_partial) return best_partial;
+    return inspect_install(paths, title, preferred_root);
 }
 
 InstallPlan plan_install(const Paths& paths, const Title& title, const InstallOptions& opts) {

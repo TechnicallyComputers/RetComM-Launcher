@@ -32,6 +32,9 @@ struct InstallRecord {
     std::string source_ref;     // build.source.ref when method=build
     std::string sdk_tag;        // snesrecomp tools pack tag
     std::string toolchain_tag;  // toolchain pack tag
+    // Local build BIOS backend: "openbios" | "retail". Empty on zip installs /
+    // legacy records (hub may infer from codegen stamp / generated C).
+    std::string bios_source;
 };
 
 struct InstallPlan {
@@ -83,6 +86,10 @@ bool save_install_record(const fs::path& install_root, const InstallRecord& rec)
 // tag as "build-<ref>"; prefer source_ref (or strip the build- prefix).
 std::string install_release_compare_tag(const InstallRecord& rec);
 std::string install_release_compare_tag(const InstallPlan& plan);
+
+// True when a local build was generated with OpenBIOS only (no retail SCPH
+// backend). Uses install.json bios_source, else codegen stamp / generated C.
+bool install_built_with_openbios(const InstallPlan& plan);
 
 InstallPlan inspect_install(const Paths& paths, const Title& title);
 // Same as inspect_install but with an explicit apps/ root.

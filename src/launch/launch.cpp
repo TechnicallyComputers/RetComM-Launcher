@@ -9,12 +9,15 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <map>
 #include <sstream>
+#include <utility>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <cwctype>
 #include <windows.h>
 #else
 #include <cstring>
@@ -399,6 +402,36 @@ std::string format_argv(const std::vector<std::string>& argv) {
     return oss.str();
 }
 
+// RetComM local-build tree: apps/<title>/src/current (game.toml + SDK CLI).
+// Staged Play binaries live under releases/<tag>/, so the game must be told
+// where Generate & rebuild can find the project (PSXRECOMP_PROJECT_ROOT).
+fs::path retcomm_src_current_root(const fs::path& install_root) {
+    if (install_root.empty()) return {};
+    std::error_code ec;
+    const fs::path root = install_root / "src" / "current";
+    if (!fs::is_regular_file(root / "game.toml", ec)) return {};
+    return root;
+}
+
+void append_psx_codegen_launch_env(LaunchPlan& lp, const Title& title,
+                                   const fs::path& install_root) {
+    const bool psx = title.platform == "psx" ||
+                     title.build.generate.engine == "psxrecomp" ||
+                     (title.build.generate.engine.empty() && title.platform == "psx");
+    if (!psx || !title.supports_local_build()) return;
+    const fs::path project = retcomm_src_current_root(install_root);
+    if (project.empty()) return;
+
+    lp.env.emplace_back("PSXRECOMP_PROJECT_ROOT", path_utf8(project));
+    const fs::path build_rel = title.build.cmake.build_dir.empty()
+                                   ? fs::path("build")
+                                   : fs::path(title.build.cmake.build_dir);
+    std::error_code ec;
+    const fs::path build_dir = project / build_rel;
+    if (fs::is_directory(build_dir, ec))
+        lp.env.emplace_back("PSXRECOMP_BUILD_DIR", path_utf8(build_dir));
+}
+
 #if defined(_WIN32)
 
 std::wstring utf8_to_wide(const std::string& s) {
@@ -438,6 +471,39 @@ std::wstring win_quote_arg(const std::wstring& arg) {
     return out;
 }
 
+std::wstring build_launch_env_block(
+    const std::vector<std::pair<std::string, std::string>>& env_extra) {
+    if (env_extra.empty()) return {};
+    std::map<std::wstring, std::wstring, std::less<>> vars;
+    LPWCH strings = GetEnvironmentStringsW();
+    if (strings) {
+        for (LPCWSTR p = strings; *p;) {
+            const std::wstring entry(p);
+            p += entry.size() + 1;
+            const size_t eq = entry.find(L'=');
+            if (eq == std::wstring::npos || eq == 0) continue;
+            std::wstring key = entry.substr(0, eq);
+            for (wchar_t& c : key) c = static_cast<wchar_t>(towlower(c));
+            vars[key] = entry;
+        }
+        FreeEnvironmentStringsW(strings);
+    }
+    for (const auto& [k, v] : env_extra) {
+        if (k.empty()) continue;
+        const std::wstring wk = utf8_to_wide(k);
+        std::wstring key_l = wk;
+        for (wchar_t& c : key_l) c = static_cast<wchar_t>(towlower(c));
+        vars[key_l] = wk + L"=" + utf8_to_wide(v);
+    }
+    std::wstring block;
+    for (const auto& [_, entry] : vars) {
+        block += entry;
+        block.push_back(L'\0');
+    }
+    block.push_back(L'\0');
+    return block;
+}
+
 bool spawn_process(const LaunchPlan& plan, bool detach, int* exit_code, std::string* error) {
     std::wstring cmdline;
     for (size_t i = 0; i < plan.argv.size(); ++i) {
@@ -450,13 +516,16 @@ bool spawn_process(const LaunchPlan& plan, bool detach, int* exit_code, std::str
     std::wstring cwd;
     if (!plan.cwd.empty()) cwd = plan.cwd.wstring();
 
+    std::wstring env_block = build_launch_env_block(plan.env);
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi{};
     DWORD flags = detach ? DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP : 0;
+    if (!env_block.empty()) flags |= CREATE_UNICODE_ENVIRONMENT;
     const BOOL ok = CreateProcessW(
         nullptr, mutable_cmd.data(), nullptr, nullptr, FALSE, flags,
-        nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si, &pi);
+        env_block.empty() ? nullptr : env_block.data(),
+        cwd.empty() ? nullptr : cwd.c_str(), &si, &pi);
     if (!ok) {
         if (error) *error = "CreateProcess failed (" + std::to_string(GetLastError()) + ")";
         return false;
@@ -490,6 +559,10 @@ bool spawn_process(const LaunchPlan& plan, bool detach, int* exit_code, std::str
     }
     if (pid == 0) {
         sanitize_env_for_external_child();
+        for (const auto& [k, v] : plan.env) {
+            if (k.empty()) continue;
+            ::setenv(k.c_str(), v.c_str(), 1);
+        }
         if (!plan.cwd.empty()) {
             if (chdir(plan.cwd.c_str()) != 0) {
                 // Still try exec — titles usually anchor on exe dir.
@@ -575,6 +648,7 @@ LaunchPlan plan_launch(const Paths& paths, const Title& title, const LaunchOptio
     }
 
     lp.cwd = lp.binary.parent_path();
+    append_psx_codegen_launch_env(lp, title, inst.install_root);
     lp.media_path = prefer_media_path(title, opts.rom_path);
     if (is_disc_platform(title.platform)) {
         if (!opts.rom_path.empty() && lp.media_path.empty()) {
@@ -667,6 +741,8 @@ LaunchPlan plan_launch(const Paths& paths, const Title& title, const LaunchOptio
     if (!lp.staged_cfg.empty()) oss << "  stage:  " << lp.staged_cfg.string() << "\n";
     if (!lp.staged_settings.empty())
         oss << "  stage:  " << lp.staged_settings.string() << " ([bios]/[disc])\n";
+    for (const auto& [k, v] : lp.env)
+        oss << "  env:    " << k << "=" << v << "\n";
     oss << "  argv:   " << format_argv(lp.argv) << "\n";
     lp.message = oss.str();
     return lp;

@@ -361,6 +361,8 @@ void HubModel::refresh_rows(bool check_updates, bool force_github_tags) {
             host_supports_wine() && t.supports_wine_install() && host_os_key() != "windows";
         row.supports_local_build = t.supports_local_build();
         row.can_prebuilt_install = t.supports_prebuilt_install();
+        row.built_with_openbios =
+            row.installed && row.supports_local_build && install_built_with_openbios(plan);
         row.has_cmake_build_data = false;
         if (row.supports_local_build && !plan.install_root.empty()) {
             const fs::path src_base = plan.install_root / "src";
@@ -699,41 +701,106 @@ void HubModel::fetch_boxart_for_catalog(bool force) {
 
 bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxart,
                          bool fetch_romm_first) {
-    // Play can overlap Build & Install / scans — dedicated thread.
-    if (j == HubJob::Launch) {
+    // Play (+ optional per-title update preflight) overlaps Build & Install /
+    // scans on a dedicated thread so Install can keep the main worker.
+    if (j == HubJob::Launch || j == HubJob::CheckLaunchUpdate) {
         if (launch_running.exchange(true)) {
             append_log("Launch already in progress");
             return false;
         }
         if (launch_worker.joinable()) launch_worker.join();
-        launch_worker = std::thread([this, title_id] {
+        launch_worker = std::thread([this, j, title_id] {
             try {
                 ensure_dirs(paths);
                 cfg = load_app_config(paths.config_path);
-                set_status("Launching " + title_id + "…");
                 const Title* t = catalog.find(title_id);
                 if (!t) {
                     append_log("unknown title: " + title_id);
-                } else {
+                    launch_running = false;
+                    return;
+                }
+
+                bool do_launch = (j == HubJob::Launch);
+                if (j == HubJob::CheckLaunchUpdate) {
+                    set_status("Checking for updates…");
+                    if (t->release.github.empty()) {
+                        do_launch = true;
+                    } else {
+                        const auto plan = inspect_install_any(paths, cfg, *t);
+                        std::string err;
+                        ReleaseTagCache tag_cache(release_tags_cache_path(paths));
+                        std::string latest = tag_cache.latest_tag(
+                            t->release.github, t->release.allow_prerelease,
+                            /*force=*/false, &err);
+                        const std::string have = install_release_compare_tag(plan);
+                        // Installed ahead of stale TTL cache → promote, don't block launch.
+                        if (!have.empty() && !latest.empty() &&
+                            release_tag_cmp(have, latest) > 0) {
+                            tag_cache.note_latest_tag_if_newer(
+                                t->release.github, t->release.allow_prerelease, have);
+                            latest = have;
+                        }
+                        tag_cache.save_if_dirty();
+                        const bool upd = !latest.empty() && !have.empty() &&
+                                         release_tag_cmp(have, latest) < 0;
+                        if (!latest.empty())
+                            append_log(title_id + ": installed " + have + ", latest " +
+                                       latest);
+                        else if (!err.empty())
+                            append_log(title_id + ": update check failed (" + err +
+                                       ") — launching");
+                        {
+                            std::lock_guard<std::mutex> lock(mu);
+                            for (auto& r : rows) {
+                                if (r.id != title_id) continue;
+                                r.installed_tag = plan.installed_tag;
+                                r.release_compare_tag = have;
+                                if (!latest.empty()) r.latest_tag = latest;
+                                r.update_available = upd;
+                                break;
+                            }
+                            if (upd) {
+                                launch_update_prompt_id = title_id;
+                                launch_update_from = have;
+                                launch_update_to = latest;
+                                launch_update_prompt_pending.store(true);
+                                status = "Update available for " + title_id;
+                            }
+                        }
+                        if (upd) {
+                            start_prefetch_updates({title_id});
+                            launch_running = false;
+                            return;
+                        }
+                        do_launch = true;
+                    }
+                }
+
+                if (do_launch) {
+                    set_status("Launching " + title_id + "…");
                     LaunchOptions opts;
                     opts.mode = LaunchMode::Default;
                     opts.detach = true;
                     opts.rom_path = library.preferred_rom(title_id);
                     {
-                        auto ensured = ensure_canonical_save(paths, cfg, *t, opts.rom_path, true);
+                        auto ensured =
+                            ensure_canonical_save(paths, cfg, *t, opts.rom_path, true);
                         if (!ensured.message.empty()) append_log(ensured.message);
                         app_state = load_app_state(paths.state_path);
                         apply_bios_choice_to_launch(*t, bios, app_state, opts);
                         if (ensured.ok) opts.save_path = ensured.save.host_path;
                         else {
-                            const std::string save_id = preferred_save_for(app_state, title_id);
+                            const std::string save_id =
+                                preferred_save_for(app_state, title_id);
                             if (!save_id.empty()) {
-                                opts.save_path = resolve_managed_save(paths, cfg, *t, save_id);
+                                opts.save_path =
+                                    resolve_managed_save(paths, cfg, *t, save_id);
                                 if (opts.save_path.empty()) opts.save_path = save_id;
                             }
                         }
                         if (title_uses_memcards(*t)) {
-                            const std::string card2_id = preferred_save_card2_for(app_state, title_id);
+                            const std::string card2_id =
+                                preferred_save_card2_for(app_state, title_id);
                             if (card2_id == kBlankMemcardId) {
                                 opts.save_path_card2_blank = true;
                             } else if (!card2_id.empty()) {
@@ -744,7 +811,8 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     }
                     auto r = launch_title(paths, *t, opts);
                     append_log(r.message);
-                    set_status(r.ok ? ("Launched " + title_id) : ("Launch failed: " + title_id));
+                    set_status(r.ok ? ("Launched " + title_id)
+                                    : ("Launch failed: " + title_id));
                 }
             } catch (const std::exception& e) {
                 append_log(std::string("error: ") + e.what());
@@ -1017,7 +1085,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 break;
             }
             case HubJob::GenerateRebuild: {
-                set_status("Reinstall " + title_id + "…");
+                set_status("Reinstalling with BIOS…");
                 const auto* t = find_title();
                 if (!t) {
                     append_log("unknown title: " + title_id);
@@ -1025,24 +1093,38 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 }
                 if (!t->supports_local_build()) {
                     append_log("catalog has no local build recipe for " + title_id);
-                    set_status("Reinstall unavailable: " + title_id);
+                    set_status("Reinstall w BIOS unavailable: " + title_id);
                     break;
                 }
                 BuildOptions bopts;
                 bopts.force = true;
                 bopts.force_generate = true;
+                bopts.force_bios = true; // regenerate SCPH1001 + OpenBIOS backends
                 bopts.rom_path = library.preferred_rom(title_id);
                 if (bopts.rom_path.empty()) {
-                    append_log("Reinstall needs a matched .cue in the library");
-                    set_status("Reinstall failed: no disc");
+                    append_log("Reinstall w BIOS needs a matched .cue in the library");
+                    set_status("Reinstall w BIOS failed: no disc");
                     break;
+                }
+                {
+                    const InstallPlan plan = inspect_install_any(paths, cfg, *t);
+                    if (!plan.install_root.empty())
+                        bopts.apps_dir = plan.install_root.parent_path();
                 }
                 app_state = load_app_state(paths.state_path);
                 apply_bios_choice_to_build(*t, bios, app_state, bopts);
+                if (bopts.use_openbios || bopts.bios_path.empty()) {
+                    append_log("Reinstall w BIOS needs a retail BIOS dump selected");
+                    set_status("Reinstall w BIOS failed: select SCPH1001.bin");
+                    break;
+                }
                 wire_build_activity(this, bopts);
+                append_log("Reinstall w BIOS: " + bopts.bios_path.string() +
+                           " (+ OpenBIOS regen)");
                 auto r = build_title(paths, *t, bopts);
                 append_log(r.message);
-                set_status(r.ok ? ("Reinstalled " + title_id) : ("Reinstall failed: " + title_id));
+                set_status(r.ok ? ("Reinstalled with BIOS: " + title_id)
+                                : ("Reinstall w BIOS failed: " + title_id));
                 break;
             }
             case HubJob::Uninstall:
@@ -1470,63 +1552,9 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 job = HubJob::None;
                 return;
             }
-            case HubJob::CheckLaunchUpdate: {
-                set_status("Checking for updates…");
-                const auto* t = find_title();
-                if (!t) {
-                    append_log("unknown title: " + title_id);
-                    break;
-                }
-                if (t->release.github.empty()) {
-                    std::lock_guard<std::mutex> lock(mu);
-                    pending_launch_title_id = title_id;
-                    set_status("Launching " + title_id + "…");
-                    break;
-                }
-                const auto plan = inspect_install_any(paths, cfg, *t);
-                std::string err;
-                ReleaseTagCache tag_cache(release_tags_cache_path(paths));
-                std::string latest =
-                    tag_cache.latest_tag(t->release.github, t->release.allow_prerelease,
-                                         /*force=*/false, &err);
-                const std::string have = install_release_compare_tag(plan);
-                // Installed ahead of stale TTL cache → promote, don't block launch.
-                if (!have.empty() && !latest.empty() && release_tag_cmp(have, latest) > 0) {
-                    tag_cache.note_latest_tag_if_newer(t->release.github,
-                                                      t->release.allow_prerelease, have);
-                    latest = have;
-                }
-                tag_cache.save_if_dirty();
-                const bool upd =
-                    !latest.empty() && !have.empty() && release_tag_cmp(have, latest) < 0;
-                if (!latest.empty())
-                    append_log(title_id + ": installed " + have + ", latest " + latest);
-                else if (!err.empty())
-                    append_log(title_id + ": update check failed (" + err + ") — launching");
-                {
-                    std::lock_guard<std::mutex> lock(mu);
-                    for (auto& r : rows) {
-                        if (r.id != title_id) continue;
-                        r.installed_tag = plan.installed_tag;
-                        r.release_compare_tag = have;
-                        if (!latest.empty()) r.latest_tag = latest;
-                        r.update_available = upd;
-                        break;
-                    }
-                    if (upd) {
-                        launch_update_prompt_id = title_id;
-                        launch_update_from = have;
-                        launch_update_to = latest;
-                        launch_update_prompt_pending.store(true);
-                        status = "Update available for " + title_id;
-                    } else {
-                        pending_launch_title_id = title_id;
-                        status = "Up to date — launching " + title_id;
-                    }
-                }
-                if (upd) start_prefetch_updates({title_id});
+            case HubJob::CheckLaunchUpdate:
+                // Handled on launch_worker via start_job (overlaps Install).
                 break;
-            }
             case HubJob::CheckToolchainUpdate: {
                 set_status("Checking toolchain updates…");
                 auto tc = check_toolchain_update(paths);

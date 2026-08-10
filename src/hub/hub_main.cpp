@@ -548,7 +548,8 @@ void draw_marquee(HubModel& hub, const Theme& th, float width) {
             if (chip.size() > 42) chip = chip.substr(0, 39) + "…";
             chip_col = th.accent;
         } else if (hub.launch_running.load()) {
-            chip = "Launching…";
+            chip = (!st.empty() && st != "Ready") ? st : "Launching…";
+            if (chip.size() > 42) chip = chip.substr(0, 39) + "…";
             chip_col = th.accent;
         } else if (hub.launcher_update_prompt_pending.load() ||
                    hub.toolchain_prompt_pending.load() || hub.toolchain_update_available ||
@@ -1348,39 +1349,62 @@ void draw_detail_manage_game_popup(HubModel& hub, const TitleRow& row, const The
 
     const bool can_uninstall =
         row.installed || row.install_dir_present || row.has_preserved_state;
+    // Keep-saves uninstall left only apps/<title>/preserved/ — second action is a purge.
+    const bool preserved_only =
+        row.has_preserved_state && !row.installed && !row.install_dir_present;
     if (can_uninstall) {
         ImGui::Dummy(ImVec2(0, 6));
-        static bool keep_saves = true;
-        static std::string keep_saves_for_id;
-        if (keep_saves_for_id != row.id) {
-            keep_saves_for_id = row.id;
-            keep_saves = true;
-        }
-        ImGui::Checkbox("Keep save data", &keep_saves);
-        ImGui::Dummy(ImVec2(0, 4));
-        if (ImGui::Button("Uninstall", ImVec2(-1, 0))) {
-            hub.start_job(keep_saves ? HubJob::Uninstall : HubJob::UninstallPurge, row.id);
-            ImGui::CloseCurrentPopup();
-        }
-        if (row.supports_local_build &&
-            (row.installed || row.install_dir_present || row.install_method == "build")) {
+        if (preserved_only) {
+            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+            ImGui::TextWrapped(
+                "Game files are already removed. Preserved saves/config remain under "
+                "preserved/ for the next install.");
+            ImGui::PopStyleColor();
             ImGui::Dummy(ImVec2(0, 4));
-            ImGui::BeginDisabled(!row.has_cmake_build_data);
-            if (ImGui::Button("Delete Build Data", ImVec2(-1, 0))) {
-                hub.start_job(HubJob::DeleteBuildData, row.id);
+            if (ImGui::Button("Remove Saves & Config", ImVec2(-1, 0))) {
+                hub.start_job(HubJob::UninstallPurge, row.id);
                 ImGui::CloseCurrentPopup();
             }
-            ImGui::EndDisabled();
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal |
-                                     ImGuiHoveredFlags_AllowWhenDisabled)) {
-                if (row.has_cmake_build_data) {
-                    ImGui::SetTooltip(
-                        "Deletes cmake build intermediates (src/*/build/) to free disk space.\n"
-                        "The next app update will need a full rebuild instead of an incremental "
-                        "one.\n"
-                        "Does not remove the installed game, saves, or ROM library.");
-                } else {
-                    ImGui::SetTooltip("No cmake build data on disk.");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "Deletes preserved/ (saves, settings, keybinds stashed from the last "
+                    "uninstall).\n"
+                    "Library ROMs and managed saves_root files are not deleted.");
+            }
+        } else {
+            static bool keep_saves = true;
+            static std::string keep_saves_for_id;
+            if (keep_saves_for_id != row.id) {
+                keep_saves_for_id = row.id;
+                keep_saves = true;
+            }
+            ImGui::Checkbox("Keep save data", &keep_saves);
+            ImGui::Dummy(ImVec2(0, 4));
+            if (ImGui::Button("Uninstall", ImVec2(-1, 0))) {
+                hub.start_job(keep_saves ? HubJob::Uninstall : HubJob::UninstallPurge, row.id);
+                ImGui::CloseCurrentPopup();
+            }
+            if (row.supports_local_build &&
+                (row.installed || row.install_dir_present || row.install_method == "build")) {
+                ImGui::Dummy(ImVec2(0, 4));
+                ImGui::BeginDisabled(!row.has_cmake_build_data);
+                if (ImGui::Button("Delete Build Data", ImVec2(-1, 0))) {
+                    hub.start_job(HubJob::DeleteBuildData, row.id);
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::EndDisabled();
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal |
+                                         ImGuiHoveredFlags_AllowWhenDisabled)) {
+                    if (row.has_cmake_build_data) {
+                        ImGui::SetTooltip(
+                            "Deletes cmake build intermediates (src/*/build/) to free disk "
+                            "space.\n"
+                            "The next app update will need a full rebuild instead of an "
+                            "incremental one.\n"
+                            "Does not remove the installed game, saves, or ROM library.");
+                    } else {
+                        ImGui::SetTooltip("No cmake build data on disk.");
+                    }
                 }
             }
         }
@@ -1760,15 +1784,31 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
     // Primary actions under the title.
     const float btn_w = (ImGui::GetContentRegionAvail().x - 8.f) * 0.5f;
     if (row.installed) {
-        // Play stays available during Build & Install / scans (own worker thread).
-        const bool play_blocked = hub.launch_running.load() ||
-                                  (hub.job_running.load() && hub.job == HubJob::CheckLaunchUpdate);
+        // OpenBIOS-only build + retail dump selected → rebuild with SCPH + OpenBIOS.
+        const bool reinstall_w_bios =
+            row.built_with_openbios && row.supports_local_build &&
+            row.bios_choice != retcomm::kOpenBiosChoice && !row.bios_choice.empty();
+        // Play (+ update preflight) uses launch_worker — stays free during Install.
+        const bool play_blocked =
+            reinstall_w_bios ? block_title_mutate : hub.launch_running.load();
         ImGui::BeginDisabled(play_blocked);
-        const bool play_clicked =
-            row.update_available ? ImGui::Button("Play", ImVec2(btn_w, 0))
-                                 : good_button("Play", th, ImVec2(btn_w, 0));
+        bool play_clicked = false;
+        if (reinstall_w_bios) {
+            play_clicked = good_button("Reinstall w BIOS", th, ImVec2(btn_w, 0));
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "This install was built with OpenBIOS only.\n"
+                    "Regenerate and rebuild with your selected retail BIOS "
+                    "(SCPH1001) and OpenBIOS.");
+            }
+        } else {
+            play_clicked = row.update_available ? ImGui::Button("Play", ImVec2(btn_w, 0))
+                                                : good_button("Play", th, ImVec2(btn_w, 0));
+        }
         if (play_clicked) {
-            if (hub.cfg.check_updates_before_launch) {
+            if (reinstall_w_bios) {
+                hub.start_job(HubJob::GenerateRebuild, row.id);
+            } else if (hub.cfg.check_updates_before_launch) {
                 const auto* t = hub.catalog.find(row.id);
                 if (t && !t->release.github.empty())
                     hub.start_job(HubJob::CheckLaunchUpdate, row.id);
@@ -1867,6 +1907,9 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
             if (row.bios_choice == retcomm::kOpenBiosChoice) {
                 ImGui::TextColored(th.text_muted,
                                    "OpenBIOS regenerates at Install (no dump needed).");
+            } else if (row.built_with_openbios && row.installed) {
+                ImGui::TextColored(th.warn,
+                                   "Install used OpenBIOS — Play becomes Reinstall w BIOS.");
             }
         } else if (dump_count == 1) {
             const char* label =
@@ -1875,6 +1918,11 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
                     ? row.bios_choice_labels[static_cast<size_t>(row.preferred_bios_index)].c_str()
                     : "matched";
             ImGui::TextColored(th.good, "Using %s", label);
+            if (row.built_with_openbios && row.installed &&
+                row.bios_choice != retcomm::kOpenBiosChoice) {
+                ImGui::TextColored(th.warn,
+                                   "Install used OpenBIOS — Play becomes Reinstall w BIOS.");
+            }
         } else if (has_openbios_opt) {
             ImGui::TextColored(th.good, "Using OpenBIOS");
             ImGui::TextColored(th.text_muted, "Regenerates at Install (no dump needed).");
@@ -2959,8 +3007,8 @@ int main(int argc, char** argv) {
             hub.pending_startup_update_check = false;
             if (hub.cfg.check_updates_on_startup) hub.start_job(HubJob::CheckUpdates);
         }
-        // Play preflight finished with no update → start Launch on the main thread.
-        if (!hub.job_running.load() && !hub.launch_running.load()) {
+        // Legacy pending_launch (CheckLaunchUpdate now launches on its own worker).
+        if (!hub.launch_running.load()) {
             std::string launch_id;
             {
                 std::lock_guard<std::mutex> lock(hub.mu);
@@ -3281,12 +3329,21 @@ int main(int argc, char** argv) {
                 from.empty() ? "?" : from.c_str(), to.empty() ? "?" : to.c_str());
             ImGui::PopTextWrapPos();
             ImGui::Dummy(ImVec2(0, 10));
-            const bool busy = hub.job_running.load() || hub.launch_running.load();
-            ImGui::BeginDisabled(busy || tid.empty());
+            const bool job_busy = hub.job_running.load();
+            const bool launch_busy = hub.launch_running.load();
+            // Update needs the main worker — disabled while Install/etc. runs.
+            ImGui::BeginDisabled(job_busy || launch_busy || tid.empty());
             if (good_button("Update", th, ImVec2(-1, 0))) {
                 hub.start_job(HubJob::Update, tid);
                 ImGui::CloseCurrentPopup();
             }
+            ImGui::EndDisabled();
+            if (job_busy && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("Wait for the current install/job to finish, or play "
+                                  "without updating.");
+            }
+            // Play uses launch_worker — OK while another title installs.
+            ImGui::BeginDisabled(launch_busy || tid.empty());
             if (ImGui::Button("Play Without Updating", ImVec2(-1, 0))) {
                 hub.start_job(HubJob::Launch, tid);
                 ImGui::CloseCurrentPopup();

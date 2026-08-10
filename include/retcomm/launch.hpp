@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace retcomm {
@@ -50,6 +51,8 @@ struct LaunchPlan {
     fs::path staged_bios_cfg; // bios.cfg
     fs::path staged_settings; // settings.toml ([bios]/[disc] for psxrecomp)
     std::vector<std::string> argv;
+    // Extra env for the child (e.g. PSXRECOMP_PROJECT_ROOT → src/current).
+    std::vector<std::pair<std::string, std::string>> env;
     bool use_wine = false;
     bool ready = false;
     std::string message;

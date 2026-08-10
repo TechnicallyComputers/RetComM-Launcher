@@ -1909,6 +1909,23 @@ bool stage_build_output(const fs::path& src_root, const fs::path& build_dir,
     const fs::path exe_dir = binary.parent_path();
     if (!copy_tree_if_exists(exe_dir / "assets", release_dir / "assets", error)) return false;
     if (!copy_tree_if_exists(src_root / "VERSION", release_dir / "VERSION", error)) return false;
+    // Bundled OpenBIOS: runtime resolves bios/openbios.bin beside the Play exe.
+    // CMake POST_BUILD stages it next to the build binary — ship that unit into
+    // the release dir. Prefer the staged tree (openbios.bin + MIT notice only);
+    // do not copy a title-root bios/ wholesale (may contain retail dumps).
+    if (!copy_tree_if_exists(exe_dir / "bios", release_dir / "bios", error)) return false;
+    if (!fs::is_regular_file(release_dir / "bios" / "openbios.bin", ec)) {
+        for (const fs::path& cand :
+             {src_root / "psxrecomp" / "bios", src_root / "bios"}) {
+            const fs::path src_bin = cand / "openbios.bin";
+            if (!fs::is_regular_file(src_bin, ec)) continue;
+            if (!copy_tree_if_exists(src_bin, release_dir / "bios" / "openbios.bin", error))
+                return false;
+            copy_tree_if_exists(cand / "OpenBIOS.LICENSE",
+                                release_dir / "bios" / "OpenBIOS.LICENSE", error);
+            break;
+        }
+    }
     // game.toml (or catalog generate.config) drives [game] players=N and disc paths.
     // Without it the host defaults to 1 player and hides local/netplay pad UI.
     {
@@ -2603,10 +2620,12 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
             gen_args.push_back("--json-progress");
             // Prefer a retail dump from the BIOS index / hub dropdown; OpenBIOS is
             // the fallback when use_openbios is set or no dump was provided.
+            // With --bios, the CLI also regenerates OpenBIOS (when allowed).
             if (!opts.use_openbios && !opts.bios_path.empty()) {
                 gen_args.push_back("--bios");
                 gen_args.push_back(opts.bios_path.string());
             }
+            if (opts.force_bios) gen_args.push_back("--force-bios");
         } else if (engine == "gbarecomp") {
             const std::string cfg =
                 title.build.generate.config.empty()
@@ -2885,6 +2904,8 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
     rec.source_ref = src.tag.empty() ? title.build.source.ref : src.tag;
     rec.sdk_tag = sdk.tag;
     rec.toolchain_tag = tc.tag;
+    rec.bios_source =
+        (opts.use_openbios || opts.bios_path.empty()) ? "openbios" : "retail";
     if (!save_install_record(install_root, rec)) {
         result.message = "built but failed to write install.json";
         return result;
