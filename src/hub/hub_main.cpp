@@ -355,6 +355,96 @@ ImVec4 chip_color(const TitleRow& r, const Theme& th) {
     return th.text_muted;
 }
 
+// Corner glyph on library boxart (drawn inside the status badge).
+enum class TileStatusIcon : int {
+    None = 0,
+    Catalog,    // installable / catalog-only (no ROM gate)
+    NoRom,      // local build needs a ROM; none matched
+    RomReady,   // verified ROM on disk — ready to install
+    OnRomm,     // RomM match (download) — same download glyph as RomReady
+    Installed,  // checkmark
+    NeedsSetup, // partial install
+    Update,     // small up-chevron (center update overlay still shown)
+};
+
+TileStatusIcon tile_status_icon(const TitleRow& r) {
+    if (r.update_available) return TileStatusIcon::Update;
+    if (r.installed) return TileStatusIcon::Installed;
+    if (r.install_dir_present) return TileStatusIcon::NeedsSetup;
+    if (r.has_rom) return TileStatusIcon::RomReady;
+    if (r.has_romm) return TileStatusIcon::OnRomm;
+    // Prebuilt zip (or no local-build ROM requirement) → not blocked.
+    const bool needs_rom = r.supports_local_build && !r.can_prebuilt_install;
+    if (needs_rom) return TileStatusIcon::NoRom;
+    return TileStatusIcon::Catalog;
+}
+
+// Glyph ink on the badge fill (dark on bright accents, light on muted).
+ImU32 status_glyph_ink(const ImVec4& badge_col, const Theme& th) {
+    const float lum = 0.2126f * badge_col.x + 0.7152f * badge_col.y + 0.0722f * badge_col.z;
+    if (lum > 0.55f) return ImGui::ColorConvertFloat4ToU32(th.background);
+    return IM_COL32(245, 247, 252, 255);
+}
+
+void draw_status_badge_glyph(ImDrawList* dl, const ImVec2& c, float rad, TileStatusIcon icon,
+                             ImU32 ink) {
+    switch (icon) {
+    case TileStatusIcon::None:
+        break;
+    case TileStatusIcon::Installed: {
+        // Checkmark.
+        const ImVec2 a(c.x - rad * 0.45f, c.y + rad * 0.02f);
+        const ImVec2 b(c.x - rad * 0.08f, c.y + rad * 0.38f);
+        const ImVec2 d(c.x + rad * 0.48f, c.y - rad * 0.36f);
+        dl->AddLine(a, b, ink, 2.1f);
+        dl->AddLine(b, d, ink, 2.1f);
+        break;
+    }
+    case TileStatusIcon::NeedsSetup: {
+        // Exclamation.
+        dl->AddLine(ImVec2(c.x, c.y - rad * 0.42f), ImVec2(c.x, c.y + rad * 0.08f), ink, 2.2f);
+        dl->AddCircleFilled(ImVec2(c.x, c.y + rad * 0.38f), rad * 0.14f, ink, 8);
+        break;
+    }
+    case TileStatusIcon::Update: {
+        // Up chevron.
+        const float h = rad * 0.42f;
+        const float w = rad * 0.40f;
+        dl->AddTriangleFilled(ImVec2(c.x, c.y - h), ImVec2(c.x - w, c.y + h * 0.35f),
+                              ImVec2(c.x + w, c.y + h * 0.35f), ink);
+        break;
+    }
+    case TileStatusIcon::RomReady:
+    case TileStatusIcon::OnRomm: {
+        // Download: arrow into tray.
+        const float h = rad * 0.36f;
+        const float w = rad * 0.34f;
+        const ImVec2 tip(c.x, c.y + h * 0.55f);
+        dl->AddTriangleFilled(tip, ImVec2(c.x - w, c.y - h * 0.15f),
+                              ImVec2(c.x + w, c.y - h * 0.15f), ink);
+        const float stem_w = w * 0.38f;
+        dl->AddRectFilled(ImVec2(c.x - stem_w * 0.5f, c.y - h * 0.70f),
+                          ImVec2(c.x + stem_w * 0.5f, c.y - h * 0.05f), ink, 1.2f);
+        dl->AddLine(ImVec2(c.x - rad * 0.48f, c.y + rad * 0.55f),
+                    ImVec2(c.x + rad * 0.48f, c.y + rad * 0.55f), ink, 1.8f);
+        break;
+    }
+    case TileStatusIcon::NoRom: {
+        // Slash-circle (unavailable).
+        dl->AddCircle(c, rad * 0.55f, ink, 16, 1.8f);
+        dl->AddLine(ImVec2(c.x - rad * 0.38f, c.y + rad * 0.38f),
+                    ImVec2(c.x + rad * 0.38f, c.y - rad * 0.38f), ink, 1.8f);
+        break;
+    }
+    case TileStatusIcon::Catalog: {
+        // Soft disc / catalog mark.
+        dl->AddCircle(c, rad * 0.48f, ink, 16, 1.7f);
+        dl->AddCircleFilled(c, rad * 0.14f, ink, 10);
+        break;
+    }
+    }
+}
+
 bool accent_button(const char* label, const Theme& th, const ImVec2& size = ImVec2(0, 0)) {
     ImGui::PushStyleColor(ImGuiCol_Button, th.accent_button);
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, th.accent_button_hovered);
@@ -601,7 +691,8 @@ void draw_busy_spinner(ImDrawList* dl, const ImVec2& art0, const ImVec2& art1, c
 float draw_grid_tile(const ImVec2& tile_min, float tile_w, bool selected, const Theme& th,
                      const BoxartTexture* tex, float art_aspect_wh, const char* title,
                      const char* subtitle, const ImVec4* badge_col, bool busy_spinner = false,
-                     bool dim_art = false, bool update_overlay = false) {
+                     bool dim_art = false, bool update_overlay = false,
+                     TileStatusIcon status_icon = TileStatusIcon::None) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     constexpr float kArtPad = 8.f;
     constexpr float kLabelGap = 4.f;
@@ -660,10 +751,13 @@ float draw_grid_tile(const ImVec2& tile_min, float tile_w, bool selected, const 
     }
 
     if (badge_col) {
-        const float r = 7.f;
-        const ImVec2 c(art1.x - 12.f, art0.y + 12.f);
-        dl->AddCircleFilled(c, r, ImGui::ColorConvertFloat4ToU32(*badge_col), 16);
-        dl->AddCircle(c, r, ImGui::ColorConvertFloat4ToU32(th.background), 16, 1.5f);
+        // Slightly larger when carrying a glyph so the mark stays legible.
+        const float r = (status_icon != TileStatusIcon::None) ? 10.f : 7.f;
+        const ImVec2 c(art1.x - (12.f + (r - 7.f)), art0.y + (12.f + (r - 7.f)));
+        dl->AddCircleFilled(c, r, ImGui::ColorConvertFloat4ToU32(*badge_col), 20);
+        dl->AddCircle(c, r, ImGui::ColorConvertFloat4ToU32(th.background), 20, 1.5f);
+        if (status_icon != TileStatusIcon::None)
+            draw_status_badge_glyph(dl, c, r, status_icon, status_glyph_ink(*badge_col, th));
     }
 
     ImGui::SetCursorScreenPos(ImVec2(tile_min.x + 4.f, tile_min.y + art_box_h + kLabelGap));
@@ -875,9 +969,10 @@ void draw_library(HubModel& hub, BoxartCache& boxart, const Theme& th) {
             const BoxartTexture* tex =
                 r.boxart_path.empty() ? nullptr : boxart.get(r.id, r.boxart_path);
             const ImVec4 badge = chip_color(r, th);
+            const TileStatusIcon status = tile_status_icon(r);
             const float tile_h =
                 draw_grid_tile(tile_min, tile_w, selected, th, tex, aspect, r.name.c_str(),
-                               nullptr, &badge, title_busy, dim_art, needs_update);
+                               nullptr, &badge, title_busy, dim_art, needs_update, status);
 
             ImGui::SetCursorScreenPos(tile_min);
             if (ImGui::InvisibleButton("##row", ImVec2(tile_w, tile_h))) {
@@ -1971,6 +2066,17 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
 
     ImGui::Dummy(ImVec2(0, 10));
     ImGui::Separator();
+    if (ImGui::Checkbox("Always Check For Updates On Startup",
+                        &hub.settings.check_updates_on_startup))
+        hub.settings.dirty = true;
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextWrapped(
+        "When enabled, RetComM checks for launcher, game, and toolchain updates after the hub "
+        "starts. Turn off to skip the startup prompt (Check Updates in the menu still works). "
+        "Save to apply.");
+    ImGui::PopStyleColor();
+
+    ImGui::Dummy(ImVec2(0, 8));
     if (ImGui::Checkbox("Always Check For Updates Before Game Launch",
                         &hub.settings.check_updates_before_launch))
         hub.settings.dirty = true;
@@ -2045,6 +2151,20 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
             "When enabled, RetComM deletes each title's src/current/build/ after a successful "
             "local build to free disk space. Leave off for faster package updates (incremental "
             "Ninja). Save to apply.");
+        ImGui::PopStyleColor();
+        ImGui::Dummy(ImVec2(0, 6));
+        {
+            const bool busy = hub.job_running.load();
+            ImGui::BeginDisabled(busy);
+            if (ImGui::Button("Clean All Cmake Build Directories", ImVec2(280, 0)))
+                hub.start_job(HubJob::CleanupCmakeBuildDirs);
+            ImGui::EndDisabled();
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Immediately delete cmake build/ trees under every game install's src/ "
+            "(Play binary, saves, and generated C are kept). The next Update or Generate & "
+            "Rebuild will reconfigure from scratch.");
         ImGui::PopStyleColor();
     }
 
@@ -2817,7 +2937,7 @@ int main(int argc, char** argv) {
     // After a real catalog download, pull covers for titles missing from cache.
     if (catalog_updated) hub.start_job(HubJob::FetchBoxart);
     // Defer game + toolchain update checks until idle (after catalog boxart job).
-    hub.pending_startup_update_check = true;
+    hub.pending_startup_update_check = hub.cfg.check_updates_on_startup;
 
     retcomm::hub::BoxartCache boxart;
     bool running = true;
@@ -2837,7 +2957,7 @@ int main(int argc, char** argv) {
 
         if (hub.pending_startup_update_check && !hub.job_running.load()) {
             hub.pending_startup_update_check = false;
-            hub.start_job(HubJob::CheckUpdates);
+            if (hub.cfg.check_updates_on_startup) hub.start_job(HubJob::CheckUpdates);
         }
         // Play preflight finished with no update → start Launch on the main thread.
         if (!hub.job_running.load() && !hub.launch_running.load()) {

@@ -288,7 +288,7 @@ size_t HubModel::refresh_orphan_installs() {
     return n;
 }
 
-void HubModel::refresh_rows(bool check_updates) {
+void HubModel::refresh_rows(bool check_updates, bool force_github_tags) {
     // Keep last GitHub check results across refresh_rows(false) so one Update /
     // scan job does not clear UPDATE badges for every other title.
     struct CachedUpdate {
@@ -582,9 +582,10 @@ void HubModel::refresh_rows(bool check_updates) {
         if (row.installed && !t.release.github.empty()) {
             if (check_updates) {
                 std::string err;
-                // One network fetch per unique repo (TTL 4h); shared repos reuse.
+                // One network fetch per unique repo; shared repos reuse in-session.
+                // TTL (4h) applies unless force_github_tags (manual Check for Updates).
                 row.latest_tag = tag_cache.latest_tag(t.release.github, t.release.allow_prerelease,
-                                                      /*force=*/false, &err);
+                                                      force_github_tags, &err);
             } else if (const auto it = prev_updates.find(row.id); it != prev_updates.end()) {
                 row.latest_tag = it->second.latest_tag;
             }
@@ -1388,9 +1389,13 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
             case HubJob::CheckUpdates: {
                 set_status("Checking updates…");
                 // Catalog → launcher → games → toolchain (prompt order matches).
+                // Catalog sync always asks GitHub for the latest catalog release
+                // (downloads only when newer). Game tags use force_github_tags so
+                // the 4h release-tag TTL cannot hide a new title release — GitHub
+                // latest is authoritative for installed versions.
                 {
                     set_status("Checking catalog…");
-                    auto cr = sync_remote_catalog(paths, cfg, false);
+                    auto cr = sync_remote_catalog(paths, cfg, /*force=*/false);
                     append_log(cr.message);
                     if (cr.ok && !cr.skipped) {
                         try {
@@ -1412,7 +1417,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     launcher_upd = lc.ok && lc.update_available;
                 }
                 set_status("Checking game updates…");
-                refresh_rows(true);
+                refresh_rows(/*check_updates=*/true, /*force_github_tags=*/true);
                 int game_updates = 0;
                 {
                     std::lock_guard<std::mutex> lock(mu);
@@ -1765,6 +1770,63 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 set_status(cr.message);
                 break;
             }
+            case HubJob::CleanupCmakeBuildDirs: {
+                set_status("Cleaning cmake build directories…");
+                std::unordered_map<std::string, std::string> build_dir_by_install;
+                for (const auto& t : catalog.titles) {
+                    if (t.install_dir_name.empty()) continue;
+                    build_dir_by_install[t.install_dir_name] =
+                        t.build.cmake.build_dir.empty() ? "build" : t.build.cmake.build_dir;
+                }
+                int removed = 0;
+                int failed = 0;
+                int installs_scanned = 0;
+                std::error_code ec;
+                for (const auto& root : scan_install_roots(cfg, paths)) {
+                    if (root.path.empty() || !fs::is_directory(root.path, ec)) continue;
+                    for (auto it = fs::directory_iterator(root.path, ec);
+                         !ec && it != fs::directory_iterator(); it.increment(ec)) {
+                        if (!it->is_directory(ec)) continue;
+                        const fs::path install_root = it->path();
+                        const fs::path src_base = install_root / "src";
+                        if (!fs::is_directory(src_base, ec)) continue;
+                        ++installs_scanned;
+                        const std::string install_name = install_root.filename().string();
+                        std::string build_rel = "build";
+                        if (const auto found = build_dir_by_install.find(install_name);
+                            found != build_dir_by_install.end())
+                            build_rel = found->second;
+                        auto wipe_build = [&](const fs::path& build_dir) {
+                            if (!fs::is_directory(build_dir, ec)) return;
+                            ec.clear();
+                            fs::remove_all(build_dir, ec);
+                            if (!ec) {
+                                ++removed;
+                                append_log("Removed " + build_dir.string());
+                            } else {
+                                ++failed;
+                                append_log("Failed to remove " + build_dir.string() + ": " +
+                                           ec.message());
+                            }
+                        };
+                        for (auto sit = fs::directory_iterator(src_base, ec);
+                             !ec && sit != fs::directory_iterator(); sit.increment(ec)) {
+                            if (!sit->is_directory(ec)) continue;
+                            const auto name = sit->path().filename().string();
+                            if (name.empty() || name[0] == '.') continue;
+                            wipe_build(sit->path() / build_rel);
+                            if (build_rel != "build") wipe_build(sit->path() / "build");
+                        }
+                    }
+                }
+                std::ostringstream oss;
+                oss << "Cleaned cmake build dirs: removed " << removed << " under "
+                    << installs_scanned << " install(s)";
+                if (failed > 0) oss << " (" << failed << " failed)";
+                append_log(oss.str());
+                set_status(oss.str());
+                break;
+            }
             case HubJob::None:
                 break;
             }
@@ -2000,6 +2062,7 @@ void HubModel::open_settings() {
     copy_buf(settings.exclude_dirs, sizeof(settings.exclude_dirs), join_csv(cfg.exclude_dirs));
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
+    settings.check_updates_on_startup = cfg.check_updates_on_startup;
     settings.check_updates_before_launch = cfg.check_updates_before_launch;
     settings.auto_clean_build_dirs = cfg.auto_clean_build_dirs;
     settings.install_roots.clear();
@@ -2034,6 +2097,7 @@ void HubModel::open_setup() {
     copy_buf(settings.exclude_dirs, sizeof(settings.exclude_dirs), join_csv(cfg.exclude_dirs));
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
+    settings.check_updates_on_startup = cfg.check_updates_on_startup;
     settings.check_updates_before_launch = cfg.check_updates_before_launch;
     settings.auto_clean_build_dirs = cfg.auto_clean_build_dirs;
     settings.platform_folders.clear();
@@ -2372,6 +2436,7 @@ bool HubModel::save_settings(std::string* error) {
     next.exclude_dirs = split_csv(settings.exclude_dirs);
     next.prefer_local_boxart = settings.prefer_local_boxart;
     next.filter_unsupported_titles = settings.filter_unsupported_titles;
+    next.check_updates_on_startup = settings.check_updates_on_startup;
     next.check_updates_before_launch = settings.check_updates_before_launch;
     next.auto_clean_build_dirs = settings.auto_clean_build_dirs;
     next.install_roots.clear();
@@ -2408,6 +2473,7 @@ bool HubModel::save_settings(std::string* error) {
     cfg = std::move(next);
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
+    settings.check_updates_on_startup = cfg.check_updates_on_startup;
     settings.check_updates_before_launch = cfg.check_updates_before_launch;
     settings.auto_clean_build_dirs = cfg.auto_clean_build_dirs;
     settings.dirty = false;

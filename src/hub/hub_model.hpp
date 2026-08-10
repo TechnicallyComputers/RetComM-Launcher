@@ -65,6 +65,8 @@ enum class HubJob : int {
     CleanupOrphans,
     CleanupOrphansPurge,
     CleanupOldReleases,
+    // Wipe apps/*/src/*/build/ cmake trees for every install (keeps Play + saves).
+    CleanupCmakeBuildDirs,
 };
 
 // Title install/build/update family — mutually exclusive with library scans.
@@ -254,6 +256,7 @@ struct SettingsDraft {
     char exclude_dirs[1024]{}; // comma-separated
     bool prefer_local_boxart = false;
     bool filter_unsupported_titles = false;
+    bool check_updates_on_startup = true;
     bool check_updates_before_launch = true;
     bool auto_clean_build_dirs = false;
     std::vector<PlatformFolderEdit> platform_folders;
@@ -419,7 +422,9 @@ struct HubModel {
     std::string file_pick_filter_name;
     std::string file_pick_filter_pattern;
 
-    void refresh_rows(bool check_updates);
+    // check_updates: query GitHub latest tags for installed titles.
+    // force_github_tags: ignore the 4h release-tag TTL (manual Check for Updates).
+    void refresh_rows(bool check_updates, bool force_github_tags = false);
     void append_log(const std::string& line);
     void append_log(const std::string& line, LogLevel level);
     void set_status(const std::string& s);

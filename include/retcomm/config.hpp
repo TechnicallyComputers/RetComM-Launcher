@@ -56,6 +56,8 @@ struct AppConfig {
     // Hide catalog titles with no local ROM and no cached RomM match.
     // Installed / partial installs stay visible.
     bool filter_unsupported_titles = false;
+    // On hub launch, run Check Updates (catalog → launcher → games → toolchain).
+    bool check_updates_on_startup = true;
     // When Play is pressed, query GitHub for that title and prompt if newer.
     bool check_updates_before_launch = true;
     // After a successful local generate+cmake, delete apps/<title>/src/current/build/
