@@ -5,6 +5,7 @@
 #include "retcomm/romm_fetch.hpp"
 #include "retcomm/romm_saves.hpp"
 #include "retcomm/romscan.hpp"
+#include "retcomm/release_tags.hpp"
 #include "retcomm/self_update.hpp"
 #include "retcomm/catalog_sync.hpp"
 
@@ -325,6 +326,9 @@ void HubModel::refresh_rows(bool check_updates) {
         if (gained) save_bios_index(paths.bios_index_path, bios);
     }
 
+    // Deduped + TTL-cached GitHub latest tags (only used when check_updates).
+    ReleaseTagCache tag_cache(release_tags_cache_path(paths));
+
     std::vector<TitleRow> next;
     next.reserve(catalog.titles.size());
     bool state_dirty = false;
@@ -558,8 +562,9 @@ void HubModel::refresh_rows(bool check_updates) {
         if (row.installed && !t.release.github.empty()) {
             if (check_updates) {
                 std::string err;
-                row.latest_tag = fetch_latest_release_tag(t.release.github, &err,
-                                                         t.release.allow_prerelease);
+                // One network fetch per unique repo (TTL 4h); shared repos reuse.
+                row.latest_tag = tag_cache.latest_tag(t.release.github, t.release.allow_prerelease,
+                                                      /*force=*/false, &err);
             } else if (const auto it = prev_updates.find(row.id); it != prev_updates.end()) {
                 row.latest_tag = it->second.latest_tag;
             }
@@ -572,6 +577,13 @@ void HubModel::refresh_rows(bool check_updates) {
         }
 
         next.push_back(std::move(row));
+    }
+
+    if (check_updates) {
+        tag_cache.save_if_dirty();
+        append_log("Game update check: " + std::to_string(tag_cache.network_fetches()) +
+                   " GitHub fetch(es), " + std::to_string(tag_cache.cache_hits()) +
+                   " cache hit(s)");
     }
 
     std::sort(next.begin(), next.end(), [](const TitleRow& a, const TitleRow& b) {
@@ -853,6 +865,29 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 opts.prefer_prebuilt = prebuilt;
                 BuildOptions bopts;
                 bopts.rom_path = library.preferred_rom(title_id);
+                // Reinstall (partial / NEEDS SETUP): clear apps/<title> first. Mid-setup
+                // crashes leave leftovers that a plain Install can refuse to overwrite.
+                // Keep saves/config under preserved/ (same default as Manage Game Data).
+                {
+                    const InstallPlan existing = inspect_install(paths, *t);
+                    if (existing.install_dir_present) {
+                        set_status("Clearing game data for " + title_id + "…");
+                        UninstallOptions uopts;
+                        uopts.keep_saves = true;
+                        auto ur = uninstall_title(paths, *t, uopts);
+                        append_log(ur.message);
+                        if (!ur.ok) {
+                            set_status("Reinstall failed: could not clear game data");
+                            break;
+                        }
+                        opts.force = true;
+                        bopts.force = true;
+                        set_status(std::string(wine       ? "Reinstalling (Wine) "
+                                               : prebuilt ? "Reinstalling prebuilt "
+                                                          : "Rebuilding ") +
+                                   title_id + "…");
+                    }
+                }
                 app_state = load_app_state(paths.state_path);
                 apply_bios_choice_to_build(*t, bios, app_state, bopts);
                 wire_build_activity(this, bopts);
@@ -1280,8 +1315,11 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 }
                 const auto plan = inspect_install(paths, *t);
                 std::string err;
-                const std::string latest = fetch_latest_release_tag(
-                    t->release.github, &err, t->release.allow_prerelease);
+                ReleaseTagCache tag_cache(release_tags_cache_path(paths));
+                const std::string latest =
+                    tag_cache.latest_tag(t->release.github, t->release.allow_prerelease,
+                                         /*force=*/false, &err);
+                tag_cache.save_if_dirty();
                 const std::string have = install_release_compare_tag(plan);
                 const bool upd =
                     !latest.empty() && !have.empty() && latest != have;

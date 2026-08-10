@@ -8,6 +8,7 @@
 #include "retcomm/launch.hpp"
 #include "retcomm/library_index.hpp"
 #include "retcomm/paths.hpp"
+#include "retcomm/release_tags.hpp"
 #include "retcomm/romm.hpp"
 #include "retcomm/romm_saves.hpp"
 #include "retcomm/romscan.hpp"
@@ -224,6 +225,7 @@ int cmd_library(const retcomm::Paths& paths, const retcomm::Catalog& cat,
                 bool check_updates) {
     auto idx = retcomm::load_library_index(paths.library_index_path);
     auto bios_idx = retcomm::load_bios_index(paths.bios_index_path);
+    retcomm::ReleaseTagCache tag_cache(retcomm::release_tags_cache_path(paths));
     std::cout << "Library index: " << paths.library_index_path.string() << "\n"
               << "library_root: "
               << (idx.library_root.empty() ? "(unset)" : idx.library_root) << "\n"
@@ -251,8 +253,9 @@ int cmd_library(const retcomm::Paths& paths, const retcomm::Catalog& cat,
                     std::cout << " " << plan.installed_tag;
                 if (check_updates && !t->release.github.empty()) {
                     std::string err;
-                    const std::string latest = retcomm::fetch_latest_release_tag(
-                        t->release.github, &err, t->release.allow_prerelease);
+                    const std::string latest =
+                        tag_cache.latest_tag(t->release.github, t->release.allow_prerelease,
+                                             /*force=*/false, &err);
                     const std::string have = retcomm::install_release_compare_tag(plan);
                     if (!latest.empty() && !have.empty() && latest != have)
                         std::cout << "  [update available: " << latest << "]";
@@ -273,6 +276,11 @@ int cmd_library(const retcomm::Paths& paths, const retcomm::Catalog& cat,
                     std::cout << "      bios:      missing (retcomm bios scan)\n";
             }
         }
+    }
+    if (check_updates) {
+        tag_cache.save_if_dirty();
+        std::cout << "\nUpdate check: " << tag_cache.network_fetches() << " GitHub fetch(es), "
+                  << tag_cache.cache_hits() << " cache hit(s)\n";
     }
     return 0;
 }

@@ -420,16 +420,16 @@ void draw_marquee(HubModel& hub, const Theme& th, float width) {
                                 ImGui::ColorConvertFloat4ToU32(th.background2),
                                 ImGui::ColorConvertFloat4ToU32(th.background),
                                 ImGui::ColorConvertFloat4ToU32(th.background));
-    // Neon underline
+    // Neon underline: CRT violet → icon green.
     dl->AddRectFilledMultiColor(ImVec2(p0.x, p0.y + h - 3), ImVec2(p0.x + width, p0.y + h),
                                 ImGui::ColorConvertFloat4ToU32(th.accent),
-                                ImGui::ColorConvertFloat4ToU32(th.focus),
-                                ImGui::ColorConvertFloat4ToU32(th.focus),
+                                ImGui::ColorConvertFloat4ToU32(th.good),
+                                ImGui::ColorConvertFloat4ToU32(th.good),
                                 ImGui::ColorConvertFloat4ToU32(th.accent));
 
     ImGui::Dummy(ImVec2(width, h));
     ImGui::SetCursorScreenPos(ImVec2(p0.x + 20.f, p0.y + 14.f));
-    ImGui::PushStyleColor(ImGuiCol_Text, th.accent);
+    ImGui::PushStyleColor(ImGuiCol_Text, th.good);
     ImGui::TextUnformatted("RetComM");
     ImGui::PopStyleColor();
     ImGui::SetCursorScreenPos(ImVec2(p0.x + 20.f, p0.y + 40.f));
@@ -1819,8 +1819,8 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
         if (!row.expected_binary.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
             ImGui::TextWrapped(
-                "Looking for executable \"%s\". Use Manage Game Data → Open Folder to fix "
-                "setup, then Install again.",
+                "Looking for executable \"%s\". Use Reinstall to clear the install folder "
+                "and start over, or Manage Game Data → Open Folder to fix setup manually.",
                 row.expected_binary.c_str());
             ImGui::PopStyleColor();
         }
@@ -2961,7 +2961,7 @@ int main(int argc, char** argv) {
             ImGui::BeginDisabled(plat.empty() || hub.cfg.library_root.empty());
             char open_label[96];
             std::snprintf(open_label, sizeof(open_label), "Open %s ROM Folder", plat_label);
-            if (accent_button(open_label, th, ImVec2(-1, 0))) {
+            if (ImGui::Button(open_label, ImVec2(-1, 0))) {
                 const fs::path dir =
                     retcomm::ensure_platform_dir(hub.cfg.library_root,
                                                  hub.cfg.folders_for_platform(plat));
