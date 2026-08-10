@@ -3057,9 +3057,10 @@ int main(int argc, char** argv) {
                 latest.empty() ? "?" : latest.c_str());
             ImGui::PopTextWrapPos();
             ImGui::Dummy(ImVec2(0, 10));
-            const bool busy = hub.job_running.load();
-            ImGui::BeginDisabled(busy);
+            // Never gate these on job_running — CheckUpdates used to arm this modal
+            // mid-job and left Update greyed out for the whole game/toolchain scan.
             if (accent_button("Update RetComM", th, ImVec2(160, 0))) {
+                hub.cancel_prefetch_updates();
                 hub.discard_followup_update_prompts();
                 hub.start_job(HubJob::SelfUpdate);
                 ImGui::CloseCurrentPopup();
@@ -3069,7 +3070,6 @@ int main(int argc, char** argv) {
                 hub.release_deferred_followup_updates();
                 ImGui::CloseCurrentPopup();
             }
-            ImGui::EndDisabled();
             close_modal_on_outside_click();
             ImGui::EndPopup();
         }

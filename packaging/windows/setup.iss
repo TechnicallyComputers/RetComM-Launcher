@@ -43,7 +43,8 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-CloseApplications=yes
+; Hub self-update exits before setup runs; avoid Inno trying to kill the process.
+CloseApplications=no
 RestartApplications=no
 
 [Languages]

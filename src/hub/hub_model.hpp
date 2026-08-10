@@ -360,6 +360,7 @@ struct HubModel {
     bool deferred_toolchain_prompt = false; // guarded by mu
     // Background release-zip prefetch (separate from job_running so Update still works).
     std::atomic<bool> prefetch_running{false};
+    std::atomic<bool> prefetch_cancel{false}; // SelfUpdate / exit: stop between titles
     std::thread prefetch_worker;
     // After idle: CheckUpdates (catalog → launcher → games → toolchain).
     bool pending_startup_update_check = false;
@@ -423,6 +424,8 @@ struct HubModel {
     // Download pending game update zips into the release cache (non-blocking job slot).
     // empty ids → all rows with update_available. Safe to call from worker or UI thread.
     void start_prefetch_updates(const std::vector<std::string>& title_ids = {});
+    // Ask the prefetch thread to stop between titles (does not join).
+    void cancel_prefetch_updates();
     // After dismissing RetComM update with Later: show deferred game/toolchain prompts.
     void release_deferred_followup_updates();
     // Accepting RetComM self-update / restart: drop follow-up prompts so nothing else starts.

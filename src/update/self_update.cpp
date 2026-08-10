@@ -462,16 +462,22 @@ bool schedule_run_setup_and_restart(const fs::path& setup_exe, const fs::path& i
             if (error) *error = "cannot write apply script";
             return false;
         }
+        // Wait for hub exit (with timeout). Do not use /CLOSEAPPLICATIONS — the hub
+        // exits on its own; forcing closes mid-shutdown caused hangs/failed applies.
         out << "@echo off\r\n"
+            << "setlocal EnableExtensions EnableDelayedExpansion\r\n"
             << "set PID=" << pid << "\r\n"
+            << "set W=0\r\n"
             << ":wait\r\n"
-            << "tasklist /FI \"PID eq %PID%\" 2>NUL | find \"%PID%\" >NUL\r\n"
-            << "if not errorlevel 1 (\r\n"
+            << "tasklist /FI \"PID eq !PID!\" 2>NUL | findstr /I /C:\"No tasks\" >NUL\r\n"
+            << "if errorlevel 1 (\r\n"
+            << "  set /a W+=1\r\n"
+            << "  if !W! GTR 120 exit /b 1\r\n"
             << "  timeout /t 1 /nobreak >NUL\r\n"
             << "  goto wait\r\n"
             << ")\r\n"
             << "start /wait \"\" \"" << setup_exe.string()
-            << "\" /VERYSILENT /NORESTART /SUPPRESSMSGBOXES /CLOSEAPPLICATIONS /DIR=\""
+            << "\" /VERYSILENT /NORESTART /SUPPRESSMSGBOXES /DIR=\""
             << install_dir.string() << "\"\r\n"
             << "start \"\" \"" << (install_dir / "retcomm-hub.exe").string() << "\"\r\n";
     }

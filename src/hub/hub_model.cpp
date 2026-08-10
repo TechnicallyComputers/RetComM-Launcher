@@ -1294,8 +1294,8 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     std::lock_guard<std::mutex> lock(mu);
                     launcher_current_version = lc.current_tag;
                     launcher_latest_tag = lc.latest_tag;
+                    // Do not open the modal yet — job_running would disable Update.
                     launcher_upd = lc.ok && lc.update_available;
-                    if (launcher_upd) launcher_update_prompt_pending.store(true);
                 }
                 set_status("Checking game updates…");
                 refresh_rows(true);
@@ -1324,15 +1324,19 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 if (launcher_upd) {
                     // Hold game/toolchain prompts until Later. Accepting self-update
                     // discards them so nothing else starts before restart.
-                    std::lock_guard<std::mutex> lock(mu);
-                    deferred_followup_updates = true;
-                    deferred_game_updates_count = game_updates;
-                    deferred_toolchain_prompt = toolchain_upd;
-                    game_updates_prompt_pending.store(false);
-                    toolchain_prompt_pending.store(false);
+                    // Arm the modal only after this job clears so Update is clickable.
+                    {
+                        std::lock_guard<std::mutex> lock(mu);
+                        deferred_followup_updates = true;
+                        deferred_game_updates_count = game_updates;
+                        deferred_toolchain_prompt = toolchain_upd;
+                        game_updates_prompt_pending.store(false);
+                        toolchain_prompt_pending.store(false);
+                        job_running = false;
+                        job = HubJob::None;
+                    }
                     set_status("Updates available");
-                    job_running = false;
-                    job = HubJob::None;
+                    launcher_update_prompt_pending.store(true);
                     return;
                 }
                 if (game_updates > 0) game_updates_prompt_pending.store(true);
@@ -1533,6 +1537,8 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
             }
             case HubJob::SelfUpdate: {
                 // Do not surface game/toolchain prompts while we download + restart.
+                // Stop background prefetch so exit is not blocked waiting on zip downloads.
+                cancel_prefetch_updates();
                 discard_followup_update_prompts();
                 set_status("Checking RetComM Launcher updates…");
                 const auto install = retcomm_install_info();
@@ -1657,7 +1663,15 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
 void HubModel::join_worker() {
     if (worker.joinable()) worker.join();
     if (launch_worker.joinable()) launch_worker.join();
-    if (prefetch_worker.joinable()) prefetch_worker.join();
+    if (prefetch_worker.joinable()) {
+        // Self-update apply scripts wait for this PID. Never block exit on prefetch.
+        if (request_exit.load()) {
+            cancel_prefetch_updates();
+            prefetch_worker.detach();
+        } else {
+            prefetch_worker.join();
+        }
+    }
 }
 
 void HubModel::discard_followup_update_prompts() {
@@ -1667,6 +1681,10 @@ void HubModel::discard_followup_update_prompts() {
     deferred_toolchain_prompt = false;
     game_updates_prompt_pending.store(false);
     toolchain_prompt_pending.store(false);
+}
+
+void HubModel::cancel_prefetch_updates() {
+    prefetch_cancel.store(true);
 }
 
 void HubModel::release_deferred_followup_updates() {
@@ -1698,10 +1716,12 @@ void HubModel::start_prefetch_updates(const std::vector<std::string>& title_ids)
         }
     }
     if (ids.empty()) return;
+    if (request_exit.load()) return;
     if (prefetch_running.exchange(true)) {
         // Already prefetching — a second pass can wait for the next Check Updates.
         return;
     }
+    prefetch_cancel.store(false);
     if (prefetch_worker.joinable()) prefetch_worker.join();
     prefetch_worker = std::thread([this, ids = std::move(ids)] {
         try {
@@ -1709,7 +1729,7 @@ void HubModel::start_prefetch_updates(const std::vector<std::string>& title_ids)
             append_log("Prefetching " + std::to_string(ids.size()) + " update download(s)…");
             int ready = 0;
             for (const auto& id : ids) {
-                if (request_exit.load()) break;
+                if (request_exit.load() || prefetch_cancel.load()) break;
                 const Title* t = catalog.find(id);
                 if (!t || t->release.github.empty()) continue;
                 if (!job_running.load()) set_status("Prefetching " + id + "…");
@@ -1719,9 +1739,12 @@ void HubModel::start_prefetch_updates(const std::vector<std::string>& title_ids)
                 append_log(pr.message);
                 if (pr.ok) ++ready;
             }
-            append_log("Prefetch complete (" + std::to_string(ready) + "/" +
-                       std::to_string(ids.size()) + " ready)");
-            if (!job_running.load()) set_status("Prefetch complete");
+            if (prefetch_cancel.load() || request_exit.load())
+                append_log("Prefetch cancelled");
+            else
+                append_log("Prefetch complete (" + std::to_string(ready) + "/" +
+                           std::to_string(ids.size()) + " ready)");
+            if (!job_running.load() && !request_exit.load()) set_status("Prefetch complete");
         } catch (const std::exception& e) {
             append_log(std::string("prefetch error: ") + e.what());
         }
