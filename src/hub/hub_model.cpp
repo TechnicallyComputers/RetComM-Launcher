@@ -568,8 +568,9 @@ void HubModel::refresh_rows(bool check_updates) {
             } else if (const auto it = prev_updates.find(row.id); it != prev_updates.end()) {
                 row.latest_tag = it->second.latest_tag;
             }
-            // Match update_title_auto: compare GitHub latest to source_ref for
-            // build pins (install.json tag is "build-<ref>", not the release tag).
+            // Compare GitHub latest to release_compare_tag (source_ref for build
+            // pins; install.json tag is "build-<ref>"). Update prefers zip when
+            // host release assets exist.
             const std::string& have = row.release_compare_tag.empty() ? row.installed_tag
                                                                      : row.release_compare_tag;
             if (!row.latest_tag.empty() && !have.empty() && row.latest_tag != have)
@@ -1296,6 +1297,8 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     set_status("Updates available");
                 else
                     set_status("Up to date");
+                // Warm release zip cache so Apply Update is mostly extract.
+                if (game_updates > 0) start_prefetch_updates();
                 job_running = false;
                 job = HubJob::None;
                 return;
@@ -1348,6 +1351,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                         status = "Up to date — launching " + title_id;
                     }
                 }
+                if (upd) start_prefetch_updates({title_id});
                 break;
             }
             case HubJob::CheckToolchainUpdate: {
@@ -1606,6 +1610,47 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
 void HubModel::join_worker() {
     if (worker.joinable()) worker.join();
     if (launch_worker.joinable()) launch_worker.join();
+    if (prefetch_worker.joinable()) prefetch_worker.join();
+}
+
+void HubModel::start_prefetch_updates(const std::vector<std::string>& title_ids) {
+    std::vector<std::string> ids = title_ids;
+    if (ids.empty()) {
+        std::lock_guard<std::mutex> lock(mu);
+        for (const auto& r : rows) {
+            if (r.update_available && r.installed) ids.push_back(r.id);
+        }
+    }
+    if (ids.empty()) return;
+    if (prefetch_running.exchange(true)) {
+        // Already prefetching — a second pass can wait for the next Check Updates.
+        return;
+    }
+    if (prefetch_worker.joinable()) prefetch_worker.join();
+    prefetch_worker = std::thread([this, ids = std::move(ids)] {
+        try {
+            ensure_dirs(paths);
+            append_log("Prefetching " + std::to_string(ids.size()) + " update download(s)…");
+            int ready = 0;
+            for (const auto& id : ids) {
+                if (request_exit.load()) break;
+                const Title* t = catalog.find(id);
+                if (!t || t->release.github.empty()) continue;
+                if (!job_running.load()) set_status("Prefetching " + id + "…");
+                InstallOptions opts;
+                opts.check_latest = true;
+                auto pr = prefetch_title_release(paths, *t, opts);
+                append_log(pr.message);
+                if (pr.ok) ++ready;
+            }
+            append_log("Prefetch complete (" + std::to_string(ready) + "/" +
+                       std::to_string(ids.size()) + " ready)");
+            if (!job_running.load()) set_status("Prefetch complete");
+        } catch (const std::exception& e) {
+            append_log(std::string("prefetch error: ") + e.what());
+        }
+        prefetch_running = false;
+    });
 }
 
 void HubModel::seed_setup_platform_folders() {

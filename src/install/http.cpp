@@ -31,11 +31,18 @@ size_t write_file(char* ptr, size_t size, size_t nmemb, void* userdata) {
 
 struct ProgressBridge {
     HttpProgressFn fn;
+    std::uint64_t resume_from = 0;
 };
 
 int xferinfo(void* clientp, curl_off_t dltotal, curl_off_t dlnow, curl_off_t, curl_off_t) {
     auto* b = static_cast<ProgressBridge*>(clientp);
-    if (b && b->fn) b->fn(static_cast<std::uint64_t>(dlnow), static_cast<std::uint64_t>(dltotal));
+    if (!b || !b->fn) return 0;
+    // With CURLOPT_RESUME_FROM_LARGE, dlnow/dltotal are for the current request
+    // body only — add the already-on-disk prefix for UI totals.
+    const auto got = b->resume_from + static_cast<std::uint64_t>(dlnow);
+    const auto total =
+        dltotal > 0 ? b->resume_from + static_cast<std::uint64_t>(dltotal) : std::uint64_t{0};
+    b->fn(got, total);
     return 0;
 }
 
@@ -67,7 +74,59 @@ CURL* make_easy(const std::string& url) {
 #else
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
 #endif
+#if defined(CURL_HTTP_VERSION_2TLS)
+    curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+#endif
     return curl;
+}
+
+bool http_download_once(const std::string& url, const fs::path& part, curl_off_t resume_from,
+                        const std::vector<std::pair<std::string, std::string>>& headers,
+                        HttpProgressFn on_progress, long* status_out, std::string* error) {
+    std::ofstream out;
+    if (resume_from > 0)
+        out.open(part, std::ios::binary | std::ios::app);
+    else
+        out.open(part, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        if (error) *error = "cannot write " + part.string();
+        return false;
+    }
+
+    CURL* curl = make_easy(url);
+    curl_slist* hdrs = nullptr;
+    apply_headers(curl, headers, &hdrs);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_file);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &out);
+    if (resume_from > 0)
+        curl_easy_setopt(curl, CURLOPT_RESUME_FROM_LARGE, resume_from);
+
+    ProgressBridge bridge{std::move(on_progress), static_cast<std::uint64_t>(resume_from)};
+    if (bridge.fn) {
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xferinfo);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &bridge);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    }
+
+    const CURLcode code = curl_easy_perform(curl);
+    long status = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    if (hdrs) curl_slist_free_all(hdrs);
+    curl_easy_cleanup(curl);
+    out.close();
+
+    if (status_out) *status_out = status;
+
+    if (code != CURLE_OK) {
+        if (error) *error = curl_easy_strerror(code);
+        return false;
+    }
+    // 206 Partial Content is success when resuming; 200 when not.
+    if (status < 200 || status >= 300) {
+        if (error) *error = "HTTP " + std::to_string(status);
+        return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -105,47 +164,80 @@ HttpResponse http_get(const std::string& url,
 
 bool http_download(const std::string& url, const fs::path& dest, std::string* error,
                    const std::vector<std::pair<std::string, std::string>>& headers,
-                   HttpProgressFn on_progress) {
+                   HttpProgressFn on_progress, std::uint64_t expected_size) {
     std::error_code ec;
     fs::create_directories(dest.parent_path(), ec);
-    const fs::path part = dest.string() + ".part";
-    std::ofstream out(part, std::ios::binary | std::ios::trunc);
-    if (!out) {
-        if (error) *error = "cannot write " + part.string();
-        return false;
+
+    if (expected_size > 0 && fs::is_regular_file(dest, ec)) {
+        const auto sz = fs::file_size(dest, ec);
+        if (!ec && sz == expected_size) {
+            if (on_progress) on_progress(expected_size, expected_size);
+            return true;
+        }
+        // Wrong size — treat as corrupt and replace.
+        fs::remove(dest, ec);
     }
 
-    CURL* curl = make_easy(url);
-    curl_slist* hdrs = nullptr;
-    apply_headers(curl, headers, &hdrs);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_file);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &out);
-
-    ProgressBridge bridge{std::move(on_progress)};
-    if (bridge.fn) {
-        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, xferinfo);
-        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &bridge);
-        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+    const fs::path part = fs::path(dest.string() + ".part");
+    curl_off_t resume_from = 0;
+    if (fs::is_regular_file(part, ec)) {
+        const auto psz = fs::file_size(part, ec);
+        if (!ec && psz > 0) {
+            if (expected_size > 0 && static_cast<std::uint64_t>(psz) == expected_size) {
+                fs::rename(part, dest, ec);
+                if (ec) {
+                    if (error) *error = "rename failed: " + ec.message();
+                    return false;
+                }
+                if (on_progress) on_progress(expected_size, expected_size);
+                return true;
+            }
+            if (expected_size > 0 && static_cast<std::uint64_t>(psz) > expected_size) {
+                fs::remove(part, ec);
+            } else {
+                resume_from = static_cast<curl_off_t>(psz);
+            }
+        }
     }
 
-    const CURLcode code = curl_easy_perform(curl);
     long status = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
-    if (hdrs) curl_slist_free_all(hdrs);
-    curl_easy_cleanup(curl);
-    out.close();
-
-    if (code != CURLE_OK) {
-        if (error) *error = curl_easy_strerror(code);
-        fs::remove(part, ec);
-        return false;
+    std::string err;
+    if (!http_download_once(url, part, resume_from, headers, on_progress, &status, &err)) {
+        // Stale/unsupported Range — retry from scratch once.
+        const bool range_issue =
+            resume_from > 0 && (status == 416 || status == 400 ||
+                                err.find("Range") != std::string::npos);
+        if (range_issue) {
+            fs::remove(part, ec);
+            err.clear();
+            status = 0;
+            if (!http_download_once(url, part, 0, headers, std::move(on_progress), &status,
+                                    &err)) {
+                if (error) *error = err;
+                fs::remove(part, ec);
+                return false;
+            }
+        } else {
+            if (error) *error = err;
+            // Keep .part for a later resume unless the server rejected the request body.
+            if (status >= 400 && status != 416) fs::remove(part, ec);
+            return false;
+        }
     }
-    if (status < 200 || status >= 300) {
-        if (error) *error = "HTTP " + std::to_string(status);
-        fs::remove(part, ec);
-        return false;
+
+    if (expected_size > 0) {
+        const auto sz = fs::file_size(part, ec);
+        if (ec || sz != expected_size) {
+            if (error)
+                *error = "download size mismatch (got " +
+                         (ec ? std::string("?") : std::to_string(sz)) + ", expected " +
+                         std::to_string(expected_size) + ")";
+            fs::remove(part, ec);
+            return false;
+        }
     }
 
+    fs::remove(dest, ec); // replace if present
     fs::rename(part, dest, ec);
     if (ec) {
         if (error) *error = "rename failed: " + ec.message();

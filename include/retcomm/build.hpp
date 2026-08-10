@@ -85,7 +85,8 @@ InstallResult install_title_auto(const Paths& paths, const Title& title,
                                  const InstallOptions& install_opts = {},
                                  const BuildOptions& build_opts = {});
 
-// Prefer rebuild when installed via method=build or catalog build is enabled.
+// Prefer prebuilt zip when release assets exist; otherwise rebuild when
+// method=build or catalog build is enabled. Generate & Rebuild still forces build.
 InstallResult update_title_auto(const Paths& paths, const Title& title,
                                 const InstallOptions& install_opts = {},
                                 const BuildOptions& build_opts = {});

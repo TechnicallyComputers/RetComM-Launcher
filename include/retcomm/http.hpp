@@ -25,9 +25,12 @@ HttpResponse http_get(const std::string& url,
                       const std::vector<std::pair<std::string, std::string>>& headers = {});
 
 // Stream download to a file path (creates parent dirs).
+// When expected_size > 0 and dest already has that many bytes, skips the transfer.
+// Resumes from dest.part when present (Range). Retries once without resume on
+// range errors. Progress totals include resume offsets when known.
 bool http_download(const std::string& url, const fs::path& dest, std::string* error,
                    const std::vector<std::pair<std::string, std::string>>& headers = {},
-                   HttpProgressFn on_progress = {});
+                   HttpProgressFn on_progress = {}, std::uint64_t expected_size = 0);
 
 struct HttpMultipartFile {
     std::string field;    // form field name (e.g. "saveFile")

@@ -7,6 +7,7 @@
 // cli …    → launch retcomm.exe with the remaining arguments
 //
 // Extract cache: %LOCALAPPDATA%\retcomm\portable\current\
+// Unpack via System32\tar.exe, then PowerShell Expand-Archive as fallback.
 
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -93,6 +94,98 @@ bool read_trailer(const fs::path& self, uint64_t* payload_size, uint64_t* payloa
     return true;
 }
 
+fs::path system_directory() {
+    wchar_t buf[MAX_PATH]{};
+    const UINT n = GetSystemDirectoryW(buf, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return {};
+    return fs::path(buf);
+}
+
+std::wstring win_quote(const std::wstring& path) {
+    // Paths under LOCALAPPDATA rarely contain quotes; strip if present.
+    std::wstring cleaned;
+    cleaned.reserve(path.size());
+    for (wchar_t c : path) {
+        if (c != L'"') cleaned.push_back(c);
+    }
+    return L"\"" + cleaned + L"\"";
+}
+
+std::wstring ps_single_quote(const std::wstring& path) {
+    // Inside PowerShell single-quoted strings, '' is a literal apostrophe.
+    std::wstring out;
+    out.reserve(path.size() + 8);
+    for (wchar_t c : path) {
+        if (c == L'\'') out += L"''";
+        else out.push_back(c);
+    }
+    return out;
+}
+
+// CreateProcess needs a mutable command line; include the exe as argv[0].
+bool run_hidden(const fs::path& exe, const std::wstring& args, DWORD* exit_code, std::wstring* err) {
+    std::error_code ec;
+    if (!fs::is_regular_file(exe, ec)) {
+        *err = L"Missing helper: " + exe.filename().wstring();
+        return false;
+    }
+    std::wstring cmd = win_quote(exe.wstring());
+    if (!args.empty()) {
+        cmd.push_back(L' ');
+        cmd += args;
+    }
+    std::vector<wchar_t> cmdline(cmd.begin(), cmd.end());
+    cmdline.push_back(L'\0');
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(exe.wstring().c_str(), cmdline.data(), nullptr, nullptr, FALSE,
+                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        *err = L"Failed to start " + exe.filename().wstring() + L" (Win32 " +
+               std::to_wstring(GetLastError()) + L").";
+        return false;
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    if (exit_code) *exit_code = code;
+    return true;
+}
+
+bool extract_zip_tar(const fs::path& zip_path, const fs::path& dest, std::wstring* err) {
+    // Windows 10+ ships bsdtar as System32\tar.exe; it unpacks .zip.
+    const fs::path tar = system_directory() / L"tar.exe";
+    const std::wstring args =
+        L"-xf " + win_quote(zip_path.wstring()) + L" -C " + win_quote(dest.wstring());
+    DWORD code = 1;
+    if (!run_hidden(tar, args, &code, err)) return false;
+    if (code != 0) {
+        *err = L"tar extract failed (exit " + std::to_wstring(code) + L").";
+        return false;
+    }
+    return true;
+}
+
+bool extract_zip_powershell(const fs::path& zip_path, const fs::path& dest, std::wstring* err) {
+    const fs::path ps =
+        system_directory() / L"WindowsPowerShell" / L"v1.0" / L"powershell.exe";
+    const std::wstring args =
+        L"-NoProfile -ExecutionPolicy Bypass -Command \"Expand-Archive -LiteralPath '" +
+        ps_single_quote(zip_path.wstring()) + L"' -DestinationPath '" +
+        ps_single_quote(dest.wstring()) + L"' -Force\"";
+    DWORD code = 1;
+    if (!run_hidden(ps, args, &code, err)) return false;
+    if (code != 0) {
+        *err = L"Expand-Archive failed while unpacking RetComM (exit " +
+               std::to_wstring(code) + L").";
+        return false;
+    }
+    return true;
+}
+
 bool extract_payload(const fs::path& self, uint64_t offset, uint64_t size, const fs::path& dest,
                      std::wstring* err) {
     std::error_code ec;
@@ -131,33 +224,21 @@ bool extract_payload(const fs::path& self, uint64_t offset, uint64_t size, const
         }
     }
 
-    // Expand-Archive is available on supported Windows 10/11 images.
-    const std::wstring ps = L"powershell.exe";
-    std::wstring cmd = L"-NoProfile -ExecutionPolicy Bypass -Command \"Expand-Archive -LiteralPath '" +
-                       zip_path.wstring() + L"' -DestinationPath '" + dest.wstring() + L"' -Force\"";
-    std::vector<wchar_t> cmdline(cmd.begin(), cmd.end());
-    cmdline.push_back(L'\0');
+    std::wstring tar_err;
+    if (extract_zip_tar(zip_path, dest, &tar_err)) {
+        fs::remove(zip_path, ec);
+        return true;
+    }
 
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
-    const BOOL ok = CreateProcessW(ps.c_str(), cmdline.data(), nullptr, nullptr, FALSE,
-                                   CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
-    if (!ok) {
-        *err = L"Failed to start PowerShell to extract the portable payload.";
-        return false;
+    std::wstring ps_err;
+    if (extract_zip_powershell(zip_path, dest, &ps_err)) {
+        fs::remove(zip_path, ec);
+        return true;
     }
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    DWORD code = 1;
-    GetExitCodeProcess(pi.hProcess, &code);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
+
     fs::remove(zip_path, ec);
-    if (code != 0) {
-        *err = L"Expand-Archive failed while unpacking RetComM.";
-        return false;
-    }
-    return true;
+    *err = L"Could not unpack portable payload.\n" + tar_err + L"\n" + ps_err;
+    return false;
 }
 
 std::string json_escape(std::string s) {

@@ -183,6 +183,22 @@ std::string fetch_latest_release_tag(const std::string& github_slug, std::string
 // Extract zip/tar/7z into dest (creates dest). Used by install + self-update.
 bool extract_archive_to(const fs::path& archive, const fs::path& dest, std::string* error = nullptr);
 
+// Durable release zip cache: data_dir/cache/releases/<owner_repo>/<tag>/<asset>.
+fs::path release_download_cache_path(const Paths& paths, const std::string& github_slug,
+                                    const std::string& tag, const std::string& asset_name);
+
+struct PrefetchResult {
+    bool ok = false;
+    bool skipped = false; // already cached, or already on latest tag
+    fs::path cached_path;
+    std::string message;
+};
+
+// Resolve the release asset and download into the cache (resume / skip if complete).
+// Does not extract or swap current/. Used to warm the cache before Update.
+PrefetchResult prefetch_title_release(const Paths& paths, const Title& title,
+                                      const InstallOptions& opts = {});
+
 // Wine helpers for Linux / macOS fallback installs.
 bool host_supports_wine();
 std::string resolve_wine_binary(std::string* error = nullptr);

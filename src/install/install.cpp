@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iostream>
 #include <cstddef>
+#include <mutex>
 #include <sstream>
 #include <system_error>
 #include <unordered_set>
@@ -1512,6 +1513,176 @@ InstallPlan plan_install(const Paths& paths, const Title& title, const InstallOp
     return plan;
 }
 
+fs::path release_download_cache_path(const Paths& paths, const std::string& github_slug,
+                                    const std::string& tag, const std::string& asset_name) {
+    auto sanitize = [](std::string s) {
+        for (char& c : s) {
+            if (c == '/' || c == '\\' || c == ':' || c == 0) c = '_';
+        }
+        if (s.empty()) s = "unknown";
+        return s;
+    };
+    const std::string file = fs::path(asset_name).filename().string();
+    return paths.data_dir / "cache" / "releases" / sanitize(github_slug) / sanitize_tag(tag) /
+           (file.empty() ? sanitize(asset_name) : file);
+}
+
+namespace {
+
+struct EnsuredReleaseAsset {
+    bool ok = false;
+    bool from_cache = false;
+    bool skipped_uptodate = false;
+    fs::path download;
+    GhRelease rel;
+    std::string asset_name;
+    std::uint64_t asset_size = 0;
+    std::string browser_download_url;
+    std::string target_os;
+    bool use_wine = false;
+    std::string message;
+};
+
+EnsuredReleaseAsset ensure_release_asset_cached(const Paths& paths, const Title& title,
+                                                const InstallOptions& opts,
+                                                bool allow_skip_uptodate,
+                                                HttpProgressFn on_progress) {
+    EnsuredReleaseAsset out;
+    if (title.release.github.empty()) {
+        out.message = "no release.github in catalog for " + title.id;
+        return out;
+    }
+
+    out.use_wine = opts.use_wine;
+    if (out.use_wine) {
+        if (host_os_key() == "windows") {
+            out.message = "Wine install is only for Linux/macOS hosts";
+            return out;
+        }
+        if (!title.supports_wine_install()) {
+            out.message = "catalog has no Windows asset_glob/launch binary for " + title.id;
+            return out;
+        }
+        std::string wine_err;
+        if (resolve_wine_binary(&wine_err).empty()) {
+            out.message = "Wine install requested but " + wine_err;
+            return out;
+        }
+    }
+
+    out.target_os = out.use_wine ? "windows" : host_os_key();
+    const std::string glob = title.asset_glob_for_os(out.target_os);
+    if (glob.empty()) {
+        out.message = "no asset_glob for target OS (" + out.target_os + ")";
+        return out;
+    }
+
+    std::string err;
+    const bool allow_pre = opts.allow_prerelease || title.release.allow_prerelease;
+    if (!fetch_latest_release(title.release.github, out.rel, &err, allow_pre)) {
+        out.message = "failed to fetch release: " + err;
+        return out;
+    }
+
+    if (allow_skip_uptodate) {
+        InstallPlan plan = inspect_install(paths, title);
+        if (plan.installed && !opts.force && plan.installed_tag == out.rel.tag) {
+            const bool same_runtime =
+                !plan.record ||
+                (out.use_wine ? plan.record->runtime == "wine"
+                              : plan.record->runtime != "wine");
+            if (same_runtime) {
+                out.ok = true;
+                out.skipped_uptodate = true;
+                out.message = "already installed at " + out.rel.tag;
+                return out;
+            }
+        }
+    }
+
+    const GhAsset* asset = pick_asset(out.rel, glob);
+    if (!asset) {
+        out.message = "no release asset matching '" + glob + "' on " + out.rel.tag +
+                      " (target " + out.target_os + ")";
+        return out;
+    }
+    out.asset_name = asset->name;
+    out.asset_size = asset->size;
+    out.browser_download_url = asset->browser_download_url;
+    out.download =
+        release_download_cache_path(paths, title.release.github, out.rel.tag, asset->name);
+
+    // Serialize cache fills so hub prefetch and Update share one .part safely.
+    static std::mutex release_cache_mu;
+    std::lock_guard<std::mutex> cache_lock(release_cache_mu);
+
+    // Migrate a leftover per-title .download if it already matches.
+    {
+        std::error_code ec;
+        const fs::path legacy =
+            paths.apps_dir / title.install_dir_name / ".download" / asset->name;
+        if (!fs::exists(out.download, ec) && fs::is_regular_file(legacy, ec) &&
+            asset->size > 0 && fs::file_size(legacy, ec) == asset->size) {
+            fs::create_directories(out.download.parent_path(), ec);
+            fs::copy_file(legacy, out.download, fs::copy_options::overwrite_existing, ec);
+        }
+    }
+
+    std::error_code ec;
+    if (asset->size > 0 && fs::is_regular_file(out.download, ec) &&
+        fs::file_size(out.download, ec) == asset->size) {
+        out.ok = true;
+        out.from_cache = true;
+        out.message = "cached " + asset->name + " (" + out.rel.tag + ")";
+        return out;
+    }
+
+    ensure_dirs(paths);
+    fs::create_directories(out.download.parent_path(), ec);
+
+    auto headers = github_http_headers();
+    // browser_download_url wants a normal Accept for the binary body.
+    headers.erase(std::remove_if(headers.begin(), headers.end(),
+                                 [](const auto& h) { return h.first == "Accept"; }),
+                  headers.end());
+    headers.emplace_back("Accept", "application/octet-stream");
+
+    if (!http_download(asset->browser_download_url, out.download, &err, headers,
+                       std::move(on_progress), asset->size)) {
+        out.message = "download failed: " + err;
+        return out;
+    }
+    out.ok = true;
+    out.message = "downloaded " + asset->name + " (" + out.rel.tag + ")";
+    return out;
+}
+
+} // namespace
+
+PrefetchResult prefetch_title_release(const Paths& paths, const Title& title,
+                                      const InstallOptions& opts) {
+    PrefetchResult result;
+    InstallOptions o = opts;
+    if (!o.use_wine) {
+        InstallPlan existing = inspect_install(paths, title);
+        if (existing.record && existing.record->runtime == "wine") o.use_wine = true;
+    }
+    auto ensured = ensure_release_asset_cached(paths, title, o, /*allow_skip_uptodate=*/true,
+                                               {});
+    result.ok = ensured.ok;
+    result.skipped = ensured.skipped_uptodate || ensured.from_cache;
+    result.cached_path = ensured.download;
+    if (ensured.skipped_uptodate)
+        result.message = title.id + ": " + ensured.message + " — prefetch skipped\n";
+    else if (ensured.from_cache)
+        result.message = title.id + ": " + ensured.message + " — already prefetched\n";
+    else if (ensured.ok)
+        result.message = title.id + ": " + ensured.message + " — ready for update\n";
+    else
+        result.message = title.id + ": prefetch failed — " + ensured.message + "\n";
+    return result;
+}
+
 InstallResult install_title(const Paths& paths, const Title& title, const InstallOptions& opts) {
     InstallResult result;
     result.plan = inspect_install(paths, title);
@@ -1530,96 +1701,52 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
     }
 #endif
 
-    const bool use_wine = opts.use_wine;
-    if (use_wine) {
-        if (host_os_key() == "windows") {
-            result.message = "Wine install is only for Linux/macOS hosts";
-            return result;
-        }
-        if (!title.supports_wine_install()) {
-            result.message = "catalog has no Windows asset_glob/launch binary for " + title.id;
-            return result;
-        }
-        std::string wine_err;
-        if (resolve_wine_binary(&wine_err).empty()) {
-            result.message = "Wine install requested but " + wine_err;
-            return result;
-        }
+    auto ensured = ensure_release_asset_cached(
+        paths, title, opts, /*allow_skip_uptodate=*/true,
+        [](std::uint64_t got, std::uint64_t total) {
+            if (total == 0) {
+                std::cerr << "\r  " << got << " bytes" << std::flush;
+            } else {
+                const int pct = static_cast<int>((got * 100) / total);
+                std::cerr << "\r  " << pct << "%  (" << got << "/" << total << ")" << std::flush;
+            }
+        });
+    if (ensured.skipped_uptodate) {
+        result.ok = true;
+        result.skipped = true;
+        result.plan.latest_tag = ensured.rel.tag;
+        result.plan.update_available = false;
+        result.message = "already installed at " + ensured.rel.tag + " — use --force to reinstall\n";
+        return result;
     }
-
-    const std::string target_os = use_wine ? "windows" : host_os_key();
-    const std::string glob = title.asset_glob_for_os(target_os);
-    if (glob.empty()) {
-        result.message = "no asset_glob for target OS (" + target_os + ")";
+    if (!ensured.ok) {
+        result.message = ensured.message;
         return result;
     }
 
-    std::string err;
-    GhRelease rel;
-    const bool allow_pre = opts.allow_prerelease || title.release.allow_prerelease;
-    if (!fetch_latest_release(title.release.github, rel, &err, allow_pre)) {
-        result.message = "failed to fetch release: " + err;
-        return result;
-    }
+    const bool use_wine = ensured.use_wine;
+    const std::string& target_os = ensured.target_os;
+    const GhRelease& rel = ensured.rel;
     result.plan.latest_tag = rel.tag;
+    const fs::path download = ensured.download;
 
-    if (result.plan.installed && !opts.force && result.plan.installed_tag == rel.tag) {
-        const bool same_runtime =
-            !result.plan.record ||
-            (use_wine ? result.plan.record->runtime == "wine"
-                      : result.plan.record->runtime != "wine");
-        if (same_runtime) {
-            result.ok = true;
-            result.skipped = true;
-            result.plan.update_available = false;
-            result.message = "already installed at " + rel.tag + " — use --force to reinstall\n";
-            return result;
-        }
-    }
-
-    const GhAsset* asset = pick_asset(rel, glob);
-    if (!asset) {
-        result.message = "no release asset matching '" + glob + "' on " + rel.tag +
-                         " (target " + target_os + ")";
-        return result;
-    }
+    if (ensured.from_cache)
+        std::cerr << "Using cached " << ensured.asset_name << " (" << rel.tag << ")…\n";
+    else
+        std::cerr << "\n";
+    std::cerr << "Extracting…\n";
 
     ensure_dirs(paths);
     const std::string tag = sanitize_tag(rel.tag);
     const fs::path install_root = paths.apps_dir / title.install_dir_name;
     const fs::path release_dir = install_root / "releases" / tag;
     const fs::path staging = install_root / ".staging";
-    const fs::path download = install_root / ".download" / asset->name;
 
     std::error_code ec;
     fs::remove_all(staging, ec);
     fs::create_directories(staging, ec);
-    fs::create_directories(download.parent_path(), ec);
 
-    std::cerr << "Downloading " << asset->name << " (" << rel.tag << ")…\n";
-    auto headers = github_http_headers();
-    // browser_download_url wants a normal Accept for the binary body.
-    headers.erase(std::remove_if(headers.begin(), headers.end(),
-                                 [](const auto& h) { return h.first == "Accept"; }),
-                  headers.end());
-    headers.emplace_back("Accept", "application/octet-stream");
-
-    if (!http_download(
-            asset->browser_download_url, download, &err, headers,
-            [](std::uint64_t got, std::uint64_t total) {
-                if (total == 0) {
-                    std::cerr << "\r  " << got << " bytes" << std::flush;
-                } else {
-                    const int pct = static_cast<int>((got * 100) / total);
-                    std::cerr << "\r  " << pct << "%  (" << got << "/" << total << ")"
-                              << std::flush;
-                }
-            })) {
-        result.message = "download failed: " + err;
-        return result;
-    }
-    std::cerr << "\nExtracting…\n";
-
+    std::string err;
     if (!extract_archive(download, staging, &err)) {
         result.message = "extract failed: " + err;
         return result;
@@ -1641,8 +1768,8 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
                              "\n  (look under " + staging.string() + " if it still exists)";
             return result;
         }
-        write_partial_install_record(install_root, title, rel.tag, asset->name, rel.html_url,
-                                     target_os, use_wine, tag);
+        write_partial_install_record(install_root, title, rel.tag, ensured.asset_name,
+                                     rel.html_url, target_os, use_wine, tag);
         result.plan = inspect_install(paths, title);
         result.plan.latest_tag = rel.tag;
         result.message =
@@ -1675,8 +1802,8 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
     if (binary.empty())
         binary = resolve_launch_binary(release_dir, launch_name, target_os, &resolved_launch);
     if (binary.empty()) {
-        write_partial_install_record(install_root, title, rel.tag, asset->name, rel.html_url,
-                                     target_os, use_wine, tag);
+        write_partial_install_record(install_root, title, rel.tag, ensured.asset_name,
+                                     rel.html_url, target_os, use_wine, tag);
         result.plan = inspect_install(paths, title);
         result.plan.latest_tag = rel.tag;
         result.message = "binary missing after move (expected " + launch_name + ")\n" +
@@ -1692,7 +1819,7 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
     rec.title_id = title.id;
     rec.github = title.release.github;
     rec.tag = rel.tag;
-    rec.asset_name = asset->name;
+    rec.asset_name = ensured.asset_name;
     rec.binary = ec ? binary.filename().string() : rel_bin.generic_string();
     rec.host_os = host_os_key();
     rec.target_os = target_os;
@@ -1705,8 +1832,7 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
         return result;
     }
 
-    fs::remove(download, ec);
-    fs::remove_all(download.parent_path(), ec);
+    // Keep download cache for resume / faster reinstalls and hub prefetch.
 
     std::string restore_note;
     restore_user_state(install_root, release_dir, &restore_note);
@@ -1718,8 +1844,9 @@ InstallResult install_title(const Paths& paths, const Title& title, const Instal
     result.plan.update_available = false;
     result.ok = true;
     result.message = "installed " + title.id + " " + rel.tag +
-                     (use_wine ? " (wine)\n" : "\n") + "  asset:  " + asset->name +
+                     (use_wine ? " (wine)\n" : "\n") + "  asset:  " + ensured.asset_name +
                      "\n  binary: " + result.plan.binary_path.string() + "\n";
+    if (ensured.from_cache) result.message += "  note: used cached download\n";
     if (launch_name_guessed) {
         result.message += "  note: catalog launch." + target_os + " was '" + launch_name +
                           "'; used '" + resolved_launch + "' from the archive\n";

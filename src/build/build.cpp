@@ -2745,8 +2745,37 @@ InstallResult update_title_auto(const Paths& paths, const Title& title,
                                 const BuildOptions& build_opts) {
     const auto plan = inspect_install(paths, title);
     const bool was_build = plan.record && plan.record->method == "build";
-    if (!install_opts.prefer_prebuilt &&
-        (was_build || title.supports_local_build())) {
+    const bool can_build =
+        !install_opts.prefer_prebuilt && (was_build || title.supports_local_build());
+    const bool can_zip = title.supports_prebuilt_install();
+
+    // Prefer published release zips for Update (download + extract). Local cmake
+    // remains for Build & Install / Generate & Rebuild, and as a fallback when
+    // no matching host asset is available.
+    if (can_zip) {
+        InstallOptions zip_opts = install_opts;
+        zip_opts.prefer_prebuilt = true;
+        auto zip = update_title(paths, title, zip_opts);
+        if (zip.ok || zip.skipped) return zip;
+        if (!can_build) return zip;
+
+        BuildOptions b = build_opts;
+        if (b.rom_path.empty()) {
+            const auto idx = load_library_index(paths.library_index_path);
+            b.rom_path = idx.preferred_rom(title.id);
+        }
+        b.force = true;
+        auto built = build_title(paths, title, b);
+        std::string zip_err = zip.message;
+        while (!zip_err.empty() && (zip_err.back() == '\n' || zip_err.back() == ' '))
+            zip_err.pop_back();
+        if (zip_err.empty()) zip_err = "unknown error";
+        built.message = "prebuilt update failed (" + zip_err +
+                        ") — fell back to local rebuild:\n" + built.message;
+        return built;
+    }
+
+    if (can_build) {
         BuildOptions b = build_opts;
         if (b.rom_path.empty()) {
             const auto idx = load_library_index(paths.library_index_path);
@@ -2754,23 +2783,8 @@ InstallResult update_title_auto(const Paths& paths, const Title& title,
         }
         bool need = b.force || install_opts.force || !plan.installed;
         if (!need && plan.record) {
-            // One-zip titles: compare installed pin to latest GitHub release tag.
-            if (!title.asset_glob_for_host().empty() && !title.release.github.empty()) {
-                GhRelease rel;
-                std::string err;
-                const bool allow_pre =
-                    install_opts.allow_prerelease || title.release.allow_prerelease;
-                if (fetch_latest_release(title.release.github, rel, &err, allow_pre) &&
-                    !rel.tag.empty()) {
-                    const std::string latest = sanitize_tag(rel.tag);
-                    const std::string have = sanitize_tag(plan.record->source_ref);
-                    need = (have != latest);
-                } else {
-                    need = plan.record->source_ref != title.build.source.ref;
-                }
-            } else {
-                need = plan.record->source_ref != title.build.source.ref;
-            }
+            // Build-only titles (no host release asset): pin vs catalog source ref.
+            need = plan.record->source_ref != title.build.source.ref;
         }
         if (!need) {
             InstallResult r;

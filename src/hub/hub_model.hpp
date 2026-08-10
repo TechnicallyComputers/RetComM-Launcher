@@ -354,6 +354,9 @@ struct HubModel {
     // After launcher prompt: summary when CheckUpdates finds outdated titles.
     std::atomic<bool> game_updates_prompt_pending{false};
     int game_updates_prompt_count = 0; // guarded by mu
+    // Background release-zip prefetch (separate from job_running so Update still works).
+    std::atomic<bool> prefetch_running{false};
+    std::thread prefetch_worker;
     // After idle: CheckUpdates (catalog → launcher → games → toolchain).
     bool pending_startup_update_check = false;
     // Brief top-of-window notice (import / scan results). Main thread times display.
@@ -413,6 +416,9 @@ struct HubModel {
     bool start_job(HubJob j, const std::string& title_id = {}, bool force_boxart = false,
                    bool fetch_romm_first = false);
     void join_worker();
+    // Download pending game update zips into the release cache (non-blocking job slot).
+    // empty ids → all rows with update_available. Safe to call from worker or UI thread.
+    void start_prefetch_updates(const std::vector<std::string>& title_ids = {});
 
     // Build & Install with no local ROM → quick scan / RomM download chooser.
     bool show_missing_rom_prompt = false;
