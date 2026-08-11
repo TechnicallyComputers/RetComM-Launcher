@@ -138,14 +138,14 @@ exclude dirs, update checks, etc.).
 |---|---|
 | `RetComM-Launcher-linux-x86_64.AppImage` | Linux |
 | `RetComM-Launcher-windows-x64-setup.exe` | Windows installer |
-| `RetComM-Launcher-windows-portable.exe` | Windows portable |
+| `RetComM-Launcher-portable-windows.zip` | Windows portable (`RetComM Launcher.exe` inside) |
 | `RetComM-Launcher-macos-arm64.dmg` | macOS Apple Silicon |
 | `RetComM-Launcher-macos-x86_64.dmg` | macOS Intel |
 
 Releases are published manually via Actions → **Release**. Hub **Update RetComM**
-pulls the matching asset for your install channel. Windows portable: run with no
-args for the hub, or `…-portable.exe cli <command>` for the CLI (same idea as the
-Linux AppImage `cli` dispatch).
+pulls the matching asset for your install channel. Windows portable: unzip and run
+`RetComM Launcher.exe` (hub), or `RetComM Launcher.exe cli <command>` for the CLI
+(same idea as the Linux AppImage `cli` dispatch).
 
 ## Build from source
 

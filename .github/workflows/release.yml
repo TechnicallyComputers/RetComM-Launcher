@@ -235,7 +235,8 @@ jobs:
           }
           Get-ChildItem dist
           $need = @(
-            "RetComM-Launcher-windows-portable.exe",
+            "RetComM-Launcher-portable-windows.zip",
+            "RetComM Launcher.exe",
             "RetComM-Launcher-windows-x64-setup.exe"
           )
           foreach ($n in $need) {
@@ -247,7 +248,7 @@ jobs:
         with:
           name: windows-x64
           path: |
-            dist/RetComM-Launcher-windows-portable.exe
+            dist/RetComM-Launcher-portable-windows.zip
             dist/RetComM-Launcher-windows-x64-setup.exe
 
   macos:
@@ -318,15 +319,17 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p dist
-          find artifacts -type f \( -name '*.AppImage' -o -name '*.exe' -o -name '*.dmg' \) -exec cp -v {} dist/ \;
+          find artifacts -type f \( -name '*.AppImage' -o -name '*.exe' -o -name '*.dmg' -o -name '*.zip' \) -exec cp -v {} dist/ \;
           ls -lah dist/
           test -n "$(ls -A dist)" || { echo "No release artifacts found" >&2; exit 1; }
-          # Guaranteed end-user set (no zips). Stable names (version is the release tag).
+          # Guaranteed end-user set. Stable names (version is the release tag).
           test -f dist/RetComM-Launcher-linux-x86_64.AppImage
           test -f dist/RetComM-Launcher-windows-x64-setup.exe
-          test -f dist/RetComM-Launcher-windows-portable.exe
+          test -f dist/RetComM-Launcher-portable-windows.zip
           test -f dist/RetComM-Launcher-macos-arm64.dmg
           test -f dist/RetComM-Launcher-macos-x86_64.dmg
+          # Do not publish the loose portable stub — only the zip (friendly exe inside).
+          rm -f "dist/RetComM Launcher.exe"
 
       - name: Ensure release tag exists
         env:

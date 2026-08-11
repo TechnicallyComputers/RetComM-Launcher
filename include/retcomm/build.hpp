@@ -81,7 +81,8 @@ PackEnsureResult update_toolchain_to_latest(
     const std::string& github = "TechnicallyComputers/retcomm-toolchains");
 
 // Fetch release/zipball source into apps/<install>/src/current/ (or override).
-// Package updates overlay in place and preserve cmake build/ for incremental ninja.
+// Package updates overlay in place and preserve cmake build/, local generated/,
+// and disc work dirs (bpe/motk/disc) for incremental ninja.
 // hint_latest_tag: same offline fallback as zip install when the live API fails.
 PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
                                     const fs::path& override_dir = {}, bool force = false,

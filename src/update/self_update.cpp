@@ -300,8 +300,13 @@ const GhAsset* pick_launcher_asset(const GhRelease& rel, RetcommInstallChannel c
             if (n.find("portable") != std::string::npos) score -= 50;
             break;
         case RetcommInstallChannel::WindowsPortable:
-            if (n.find("portable") != std::string::npos && ends_with_ci(n, ".exe")) score += 40;
-            else score -= 100;
+            /* Prefer release zip (friendly exe inside); accept legacy bare .exe. */
+            if (n.find("portable") != std::string::npos && ends_with_ci(n, ".zip"))
+                score += 45;
+            else if (n.find("portable") != std::string::npos && ends_with_ci(n, ".exe"))
+                score += 40;
+            else
+                score -= 100;
             break;
         case RetcommInstallChannel::Unsupported:
         default:
@@ -362,23 +367,27 @@ std::string mshta_path_literal(const fs::path& p) {
     return s;
 }
 
-// Locale-proof PID wait: loop while tasklist still lists the PID.
-// English "No tasks" matching fails on non-English Windows and empty output.
-// Caller must have set PID=; on timeout jumps to timeout_label (must exist).
-void write_bat_wait_for_pid(std::ostream& out, int max_loops, const char* timeout_label) {
-    out << "set W=0\r\n"
-        << ":wait\r\n"
-        << "tasklist /FI \"PID eq !PID!\" /NH 2>NUL | findstr /C:\"!PID!\" >NUL\r\n"
-        << "if not errorlevel 1 (\r\n"
-        << "  set /a W+=1\r\n"
-        << "  if !W! GTR " << max_loops << " goto " << timeout_label << "\r\n"
-        << "  ping -n 2 127.0.0.1 >NUL\r\n"
-        << "  goto wait\r\n"
-        << ")\r\n";
+// Locale-proof PID wait via hidden PowerShell (no tasklist|findstr pipe).
+// That pipe spawned visible consoles titled findstr /C:"PID" and could hang
+// forever with no timeout. Caller must have set PID=; on timeout jumps to
+// timeout_label (must exist). timeout_sec is wall-clock seconds.
+void write_bat_wait_for_pid(std::ostream& out, int timeout_sec, const char* timeout_label) {
+    if (timeout_sec < 1) timeout_sec = 1;
+    // Single powershell.exe: polls Get-Process until gone or deadline.
+    // Already-exited PID is success (SilentlyContinue). exit 1 = timeout.
+    out << "powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "
+           "\"$p=!PID!; $d=(Get-Date).AddSeconds("
+        << timeout_sec
+        << "); while ((Get-Date) -lt $d) { "
+           "if (-not (Get-Process -Id $p -ErrorAction SilentlyContinue)) { exit 0 }; "
+           "Start-Sleep -Milliseconds 400 }; exit 1\"\r\n"
+        << "if errorlevel 1 goto " << timeout_label << "\r\n";
 }
 
 // Fire-and-forget a .bat with no console window. Avoid std::system / "cmd /C start"
-// — those spawn visible (or idle minimized) CMD windows while the script waits on PID.
+// — those spawn visible CMD windows. Also avoid DETACHED_PROCESS: combined with
+// CREATE_NO_WINDOW it lets console children (findstr/powershell) allocate new
+// visible consoles.
 bool schedule_bat(const fs::path& script, std::string* error) {
     wchar_t sys_dir[MAX_PATH]{};
     const UINT n = GetSystemDirectoryW(sys_dir, MAX_PATH);
@@ -400,12 +409,12 @@ bool schedule_bat(const fs::path& script, std::string* error) {
     PROCESS_INFORMATION pi{};
     const std::wstring cwd = script.parent_path().wstring();
     auto try_spawn = [&](DWORD flags) -> bool {
+        ZeroMemory(&pi, sizeof(pi));
         return CreateProcessW(cmd_exe.c_str(), mutable_cmd.data(), nullptr, nullptr, FALSE,
                               flags, nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si,
                               &pi) != 0;
     };
-    DWORD flags = CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP |
-                  CREATE_BREAKAWAY_FROM_JOB;
+    DWORD flags = CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB;
     if (!try_spawn(flags)) {
         flags &= ~static_cast<DWORD>(CREATE_BREAKAWAY_FROM_JOB);
         if (!try_spawn(flags)) {
@@ -446,11 +455,12 @@ bool schedule_replace_portable_and_restart(const fs::path& new_portable, const f
             << "echo NEW=!NEW!>> \"!LOG!\"\r\n"
             << "echo DEST=!DEST!>> \"!LOG!\"\r\n"
             << "echo Waiting for PID !PID!>> \"!LOG!\"\r\n";
+        // 120s wall clock. On timeout still try replace — the portable stub is not
+        // locked by the hub (hub runs from %LOCALAPPDATA%\retcomm\portable\current).
         write_bat_wait_for_pid(out, 120, "wait_timeout");
         out << "goto wait_done\r\n"
             << ":wait_timeout\r\n"
-            << "echo Timed out waiting for PID !PID!>> \"!LOG!\"\r\n"
-            << "goto fail\r\n"
+            << "echo Timed out waiting for PID !PID! — continuing>> \"!LOG!\"\r\n"
             << ":wait_done\r\n"
             << "if not exist \"!NEW!\" (\r\n"
             << "  echo Staged portable missing>> \"!LOG!\"\r\n"
@@ -779,7 +789,7 @@ RetcommInstallInfo retcomm_install_info() {
             info.hint.clear();
         } else {
             info.hint = "Portable channel detected but portable_exe is missing. "
-                        "Relaunch from the windows-portable.exe.";
+                        "Relaunch from RetComM Launcher.exe (portable zip).";
         }
         return info;
     }
@@ -890,7 +900,7 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
     if (!asset) {
         return fail(result, "Release " + rel.tag + " has no asset for channel " + channel_name +
                                 " (" + host_os_key() + "). Expected AppImage, macOS DMG, or "
-                                "windows-*-setup.exe / windows-portable.exe.");
+                                "windows-*-setup.exe / RetComM-Launcher-portable-windows.zip.");
     }
     result.asset_name = asset->name;
     const std::string asset_lower = to_lower(asset->name);
@@ -918,7 +928,7 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
         if (dest_portable.empty() || !fs::is_regular_file(dest_portable, ec)) {
             return fail(result,
                         "portable channel detected but portable_exe is missing. "
-                        "Relaunch from the windows-portable.exe.");
+                        "Relaunch from RetComM Launcher.exe (portable zip).");
         }
         if (!dir_is_writable(dest_portable.parent_path())) {
             return fail(result, "portable exe directory is not writable: " +
@@ -926,7 +936,37 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
         }
         const fs::path staged_portable = work / "bin" / dest_portable.filename();
         fs::create_directories(staged_portable.parent_path(), ec);
-        fs::copy_file(download, staged_portable, fs::copy_options::overwrite_existing, ec);
+
+        fs::path source_exe = download;
+        if (ends_with_ci(asset_lower, ".zip")) {
+            const fs::path unpack = work / "portable-unpack";
+            fs::create_directories(unpack, ec);
+            if (!extract_archive_to(download, unpack, &err)) {
+                return fail(result, "unpack portable zip failed: " + err);
+            }
+            source_exe.clear();
+            const fs::path preferred = unpack / "RetComM Launcher.exe";
+            if (fs::is_regular_file(preferred, ec)) {
+                source_exe = preferred;
+            } else {
+                for (auto it = fs::recursive_directory_iterator(
+                         unpack, fs::directory_options::skip_permission_denied, ec);
+                     !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+                    if (!it->is_regular_file(ec)) continue;
+                    const auto name = it->path().filename().string();
+                    const auto lower = to_lower(name);
+                    if (!ends_with_ci(lower, ".exe")) continue;
+                    if (lower.find("setup") != std::string::npos) continue;
+                    source_exe = it->path();
+                    if (lower.find("launcher") != std::string::npos) break;
+                }
+            }
+            if (source_exe.empty() || !fs::is_regular_file(source_exe, ec)) {
+                return fail(result, "portable zip has no launcher .exe: " + asset->name);
+            }
+        }
+
+        fs::copy_file(source_exe, staged_portable, fs::copy_options::overwrite_existing, ec);
         if (ec) return fail(result, "staging portable exe failed: " + ec.message());
 
         save_launcher_state(paths, rel.tag, asset->name, channel_name);

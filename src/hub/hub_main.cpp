@@ -21,6 +21,13 @@
 #include <SDL3/SDL_dialog.h>
 #include <SDL3/SDL_opengl.h>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include <set>
 #include <unordered_set>
 
@@ -3644,8 +3651,11 @@ void assign_psx_player_source(HubModel& hub, int p, int src, const char* guid, c
         const int dz = retcomm::psx_pad_binds_deadzone(hub.paths, guid);
         s.player_deadzone[static_cast<size_t>(p)] =
             std::clamp((dz * 32767 + 50) / 100, 0, 32767);
-        // Virtually all gamepads have sticks — default DualShock/analog.
-        s.player_mode[static_cast<size_t>(p)] = 1;
+        // Default DualShock/analog only when unset — do not clobber an explicit
+        // digital/analog choice (re-selecting the same pad used to wipe digital).
+        if (s.player_mode[static_cast<size_t>(p)] != 1 &&
+            s.player_mode[static_cast<size_t>(p)] != 2)
+            s.player_mode[static_cast<size_t>(p)] = 1;
     } else {
         s.player_guid[static_cast<size_t>(p)].clear();
     }
@@ -5499,6 +5509,23 @@ int main(int argc, char** argv) {
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         SDL_GL_SwapWindow(window);
+    }
+
+    // Self-update / hard-reset apply scripts wait on this PID. Prefer a fast
+    // exit over a graceful join that can hang on prefetch/launch workers and
+    // leave the apply bat stuck until timeout.
+    if (hub.request_exit.load()) {
+        hub.cancel_prefetch_updates();
+        if (hub.prefetch_worker.joinable()) hub.prefetch_worker.detach();
+        if (hub.worker.joinable()) hub.worker.detach();
+        if (hub.launch_worker.joinable()) hub.launch_worker.detach();
+        hub_close_all_gamepads();
+        SDL_Quit();
+#if defined(_WIN32)
+        ::ExitProcess(0);
+#else
+        std::_Exit(0);
+#endif
     }
 
     hub.join_worker();

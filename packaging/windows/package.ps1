@@ -15,8 +15,10 @@ $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $OutDir = Join-Path $Root "dist"
 $Stage = Join-Path $OutDir "windows-stage"
-# Stable filename (no version): self-update replaces the portable stub in place.
-$PortableName = "RetComM-Launcher-windows-portable.exe"
+# Friendly name for the desktop / unzipped portable stub (spaces OK).
+$PortableExeName = "RetComM Launcher.exe"
+# Release-page asset: zip wrapping that exe (stable name, no version).
+$PortableZipName = "RetComM-Launcher-portable-windows.zip"
 
 Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
@@ -212,7 +214,7 @@ if (-not (Test-Path (Join-Path $CtrlDst "pad_analog.png"))) {
     throw "Failed to stage hub PSX pad art into $CtrlDst"
 }
 
-# --- Portable single-exe (stub + appended zip trailer; zip is temporary only) ---
+# --- Portable: friendly-named stub+payload exe, wrapped in a release zip ---
 if (-not $PortableStub) {
     $candidates = @(
         (Join-Path $PrefixBin "retcomm-portable.exe"),
@@ -224,7 +226,7 @@ if (-not $PortableStub) {
     }
 }
 if (-not $PortableStub -or -not (Test-Path $PortableStub)) {
-    Write-Warning "retcomm-portable.exe not found — skipping windows-portable.exe"
+    Write-Warning "retcomm-portable.exe not found — skipping portable zip"
 } else {
     $PayloadZip = Join-Path $OutDir "windows-portable-payload.zip"
     if (Test-Path $PayloadZip) { Remove-Item $PayloadZip -Force }
@@ -232,12 +234,12 @@ if (-not $PortableStub -or -not (Test-Path $PortableStub)) {
     # the stub writes channel.json on extract. Still fine if present.
     Compress-Archive -Path (Join-Path $Stage "*") -DestinationPath $PayloadZip
 
-    $OutPortable = Join-Path $OutDir $PortableName
-    if (Test-Path $OutPortable) { Remove-Item $OutPortable -Force }
+    $OutPortableExe = Join-Path $OutDir $PortableExeName
+    if (Test-Path $OutPortableExe) { Remove-Item $OutPortableExe -Force }
 
     $stubBytes = [System.IO.File]::ReadAllBytes($PortableStub)
     $zipBytes = [System.IO.File]::ReadAllBytes($PayloadZip)
-    $fs = [System.IO.File]::Open($OutPortable, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+    $fs = [System.IO.File]::Open($OutPortableExe, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
     try {
         $fs.Write($stubBytes, 0, $stubBytes.Length)
         $fs.Write($zipBytes, 0, $zipBytes.Length)
@@ -249,7 +251,13 @@ if (-not $PortableStub -or -not (Test-Path $PortableStub)) {
         $fs.Close()
     }
     Remove-Item $PayloadZip -Force -ErrorAction SilentlyContinue
-    Write-Host "Portable: $OutPortable (stub $($stubBytes.Length) + payload $($zipBytes.Length))"
+    Write-Host "Portable exe: $OutPortableExe (stub $($stubBytes.Length) + payload $($zipBytes.Length))"
+
+    # Release asset users download — unzip to get "RetComM Launcher.exe" on the desktop.
+    $OutPortableZip = Join-Path $OutDir $PortableZipName
+    if (Test-Path $OutPortableZip) { Remove-Item $OutPortableZip -Force }
+    Compress-Archive -Path $OutPortableExe -DestinationPath $OutPortableZip
+    Write-Host "Portable zip: $OutPortableZip"
 }
 
 # --- Inno Setup installer ---

@@ -122,6 +122,39 @@ void upsert_toml_key(std::string& body, const std::string& table, const std::str
     body = out.str();
 }
 
+// Drop every matching key under [table] (used to strip legacy pN_analog).
+void remove_toml_key(std::string& body, const std::string& table, const std::string& key) {
+    const std::string header = "[" + table + "]";
+    std::istringstream in(body);
+    std::ostringstream out;
+    std::string line;
+    bool in_table = false;
+
+    while (std::getline(in, line)) {
+        std::string trimmed = line;
+        if (!trimmed.empty() && trimmed.back() == '\r') trimmed.pop_back();
+        const bool is_table = !trimmed.empty() && trimmed.front() == '[';
+
+        if (in_table && is_table) in_table = false;
+
+        if (!in_table && trimmed == header) {
+            in_table = true;
+            out << line << "\n";
+            continue;
+        }
+
+        if (in_table) {
+            const auto eq = trimmed.find('=');
+            if (eq != std::string::npos) {
+                std::string k = trim_copy(trimmed.substr(0, eq));
+                if (k == key) continue; // drop
+            }
+        }
+        out << line << "\n";
+    }
+    body = out.str();
+}
+
 void upsert_ini_key(std::string& body, const std::string& section, const std::string& key,
                     const std::string& value) {
     const std::string header = "[" + section + "]";
@@ -193,6 +226,8 @@ void parse_toml_settings(const std::string& body, PsxPlatformSettings& s) {
     std::istringstream in(body);
     std::string line;
     std::string table;
+    // pN_mode wins over legacy pN_analog when both appear (any order).
+    bool mode_from_string[PsxPlatformSettings::kMaxPlayers]{};
     while (std::getline(in, line)) {
         std::string t = trim_copy(line);
         if (t.empty() || t[0] == '#') continue;
@@ -265,8 +300,9 @@ void parse_toml_settings(const std::string& body, PsxPlatformSettings& s) {
             if (key == "multitap") parse_bool(val, &s.multitap_enabled);
             else if (key == "multitap_analog") parse_bool(val, &s.multitap_analog);
             else {
-                // pN_device / pN_mode / pN_deadzone (N = 1..kMaxPlayers)
-                if (key.size() >= 9 && key[0] == 'p' && std::isdigit(static_cast<unsigned char>(key[1]))) {
+                // pN_device / pN_mode / pN_deadzone (N = 1..kMaxPlayers).
+                // Shortest key is "p1_mode" (7); do not require length 9 or modes never load.
+                if (key.size() >= 7 && key[0] == 'p' && std::isdigit(static_cast<unsigned char>(key[1]))) {
                     size_t i = 1;
                     int slot1 = 0;
                     while (i < key.size() && std::isdigit(static_cast<unsigned char>(key[i]))) {
@@ -282,6 +318,7 @@ void parse_toml_settings(const std::string& body, PsxPlatformSettings& s) {
                         } else if (field == "mode") {
                             if (ieq(val, "digital")) s.player_mode[static_cast<size_t>(slot)] = 2;
                             else s.player_mode[static_cast<size_t>(slot)] = 1; // analog (+ legacy hybrid)
+                            mode_from_string[static_cast<size_t>(slot)] = true;
                         } else if (field == "deadzone") {
                             try {
                                 s.player_deadzone[static_cast<size_t>(slot)] =
@@ -289,7 +326,9 @@ void parse_toml_settings(const std::string& body, PsxPlatformSettings& s) {
                             } catch (...) {
                             }
                         } else if (field == "analog") {
-                            // Legacy boolean: true→analog, false→digital
+                            // Legacy boolean: true→analog, false→digital.
+                            // Ignored when pN_mode already set for this seat.
+                            if (mode_from_string[static_cast<size_t>(slot)]) continue;
                             bool b = true;
                             if (parse_bool(val, &b))
                                 s.player_mode[static_cast<size_t>(slot)] = b ? 1 : 2;
@@ -390,6 +429,8 @@ void write_toml_body(std::string& body, const PsxPlatformSettings& s,
     for (int i = 0; i < PsxPlatformSettings::kMaxPlayers; ++i) {
         const std::string n = std::to_string(i + 1);
         const std::string dev = s.player_device_string(i);
+        // Drop legacy boolean so it cannot override pN_mode on the next load.
+        remove_toml_key(body, "controller", "p" + n + "_analog");
         upsert_toml_key(body, "controller", "p" + n + "_device",
                         std::string("\"") + dev + "\"");
         const char* mode = (s.player_mode[static_cast<size_t>(i)] == 2) ? "digital" : "analog";
@@ -593,8 +634,9 @@ fs::path psx_platform_settings_ini_path(const Paths& paths) {
 
 PsxPlatformSettings load_psx_platform_settings(const Paths& paths) {
     PsxPlatformSettings s;
+    // Do not seed controller defaults before parse: that left P1 as keyboard/digital,
+    // and skipped pN_mode keys would keep digital after a gamepad device loaded.
     s.apply_hotkey_defaults_if_empty();
-    s.apply_controller_defaults_if_unset();
     const fs::path toml = psx_platform_settings_toml_path(paths);
     const fs::path ini = psx_platform_settings_ini_path(paths);
     std::error_code ec;

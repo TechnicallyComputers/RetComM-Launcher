@@ -25,19 +25,26 @@ counts.
 **Incremental cmake on update:** source always lives at `src/current/`. A newer
 release zip is **content-synced** into that tree (overwrite only when bytes
 change, delete paths removed upstream, leave identical files’ mtimes alone) so
-Ninja only recompiles real diffs. `src/current/build/` is never touched by the
-sync. Legacy `src/<tag>/` trees are migrated to `current` once, then pruned.
-Disk cost: the cmake tree stays after install (often hundreds of MiB) unless
-Library Settings → **Advanced** → **Auto-clean cmake build directories after
-install** is enabled (`auto_clean_build_dirs` in `config.json`). Hub
-**Generate & Rebuild** (`force_generate`) wipes `build/` and regenerates C from
-the disc.
+Ninja only recompiles real diffs. Sync never touches `src/current/build/` **or**
+local-only trees omitted from setup zips: codegen (`generated/`,
+`psxrecomp/generated/`, `src/gen/`, `variants/*/generated`,
+`gbarecomp/.../generated_bios`, `.retcomm-codegen.json`) and disc work dirs
+(`bpe/`, `motk/`, `disc/`). Deleting those used to force a full codegen-cache
+restore + Ninja rebuild of every shard. Legacy `src/<tag>/` trees are migrated
+to `current` once, then pruned. Disk cost: the cmake tree stays after install
+(often hundreds of MiB) unless Library Settings → **Advanced** → **Auto-clean
+cmake build directories after install** is enabled (`auto_clean_build_dirs` in
+`config.json`). Hub **Generate & Rebuild** (`force_generate`) wipes `build/`
+and regenerates C from the disc.
 
 **Codegen reuse on update:** after the first successful generate, RetComM keeps
-`apps/<title>/codegen-cache/` keyed by ROM/BIOS + emitter fingerprints. Updates
-that only change runtime/UI sources restore that cache (or a stamped prior
-source tree) and skip regenerate; pass `force_generate` (Hub **Generate &
-Rebuild**) to rebuild C from the disc again.
+`apps/<title>/codegen-cache/` keyed by ROM/BIOS + **content hashes** of the
+emitters (not mtimes — harvest remtimes alone must not force disc→C). Updates
+that only change runtime/UI sources skip regenerate when `src/current/generated`
+is still present (preferred) or restore from that cache with a **content-aware**
+copy (identical shards keep mtimes). SDK harvest into
+`sdks/psxrecomp-tools/<tag>/` is also content-aware. Pass `force_generate`
+(Hub **Generate & Rebuild**) to rebuild C from the disc again.
 
 **Setup-host vs raw zip:** catalog titles with `build.enabled` treat the GitHub
 release zip as *source* for generate+cmake (`install_title_auto` /

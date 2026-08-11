@@ -2,17 +2,18 @@
 
 Helpers used by [`.github/workflows/release.yml`](../.github/workflows/release.yml).
 
-Release assets (no zips):
+Release assets:
 
 | Platform | Artifact |
 |---|---|
 | Linux | `RetComM-Launcher-linux-x86_64.AppImage` |
 | macOS | `RetComM-Launcher-macos-{arm64,x86_64}.dmg` |
-| Windows | `RetComM-Launcher-windows-x64-setup.exe` + `RetComM-Launcher-windows-portable.exe` |
+| Windows | `RetComM-Launcher-windows-x64-setup.exe` + `RetComM-Launcher-portable-windows.zip` |
 
 Filenames are stable across releases (version lives in the GitHub tag / binary
-`RETCOMM_VERSION`). Self-update replaces AppImage / portable in place and keeps
-the user's path, so a versioned download name would go stale.
+`RETCOMM_VERSION`). The portable zip contains `RetComM Launcher.exe` (friendly
+desktop name). Self-update replaces AppImage / portable in place and keeps the
+user's path, so a versioned download name would go stale.
 
 ## Icons
 
@@ -115,20 +116,21 @@ Produces under `dist/`:
 
 | Artifact | Role |
 |---|---|
-| `RetComM-Launcher-windows-portable.exe` | Single-file portable (stub + zip trailer; icon embedded) |
+| `RetComM Launcher.exe` | Single-file portable stub + payload (local; not the GitHub asset) |
+| `RetComM-Launcher-portable-windows.zip` | Release zip wrapping that exe |
 | `RetComM-Launcher-windows-x64-setup.exe` | Per-user Inno Setup installer (Start Menu / desktop) |
 
-Portable usage:
+Portable usage (after unzipping the release zip):
 
 ```text
-RetComM-Launcher-windows-portable.exe           # hub UI
-RetComM-Launcher-windows-portable.exe cli list  # CLI
+RetComM Launcher.exe           # hub UI
+RetComM Launcher.exe cli list  # CLI
 ```
 
 Self-update channels (detected via `channel.json` / env from the portable stub):
 
 - **installer** (primary) → downloads `RetComM-Launcher-windows-*-setup.exe`, silent Inno into the current install dir
-- **portable** → downloads `RetComM-Launcher-windows-portable.exe`, replaces the stub, re-extracts on next launch
+- **portable** → downloads `RetComM-Launcher-portable-windows.zip`, extracts the stub, replaces the desktop exe, re-extracts on next launch
 
 Apply logs (after a failed/successful Windows self-update):
 `%LOCALAPPDATA%\retcomm\self-update\bin\apply_setup_update.log` or

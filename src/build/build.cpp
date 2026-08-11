@@ -1,5 +1,6 @@
 #include "retcomm/build.hpp"
 #include "retcomm/config.hpp"
+#include "retcomm/hash.hpp"
 #include "retcomm/http.hpp"
 #include "retcomm/library_index.hpp"
 #include "retcomm/process_env.hpp"
@@ -453,11 +454,49 @@ void add_rel_with_parents(std::set<std::string>& out, const std::string& rel) {
     }
 }
 
-bool rel_is_protected(const std::string& rel, const std::string& build_key) {
-    if (rel.empty() || build_key.empty()) return false;
-    if (rel == build_key) return true;
-    return rel.size() > build_key.size() && rel[build_key.size()] == '/' &&
-           rel.compare(0, build_key.size(), build_key) == 0;
+bool rel_under_prefix(const std::string& rel, const std::string& prefix) {
+    if (rel.empty() || prefix.empty()) return false;
+    if (rel == prefix) return true;
+    return rel.size() > prefix.size() && rel[prefix.size()] == '/' &&
+           rel.compare(0, prefix.size(), prefix) == 0;
+}
+
+/* Local emit / fingerprint trees. Release zips never ship these; sync must
+ * not delete them (that forced codegen-cache restore + full Ninja rebuild). */
+bool rel_is_codegen_artifact(const std::string& rel) {
+    if (rel == ".retcomm-codegen.json") return true;
+    if (rel_under_prefix(rel, "generated")) return true;
+    if (rel_under_prefix(rel, "psxrecomp/generated")) return true;
+    if (rel_under_prefix(rel, "src/gen")) return true;
+    if (rel_under_prefix(rel, "gbarecomp/src/runtime/generated_bios")) return true;
+    /* variants/<name>/generated[/…] (gbarecomp default out_dir). */
+    if (rel.rfind("variants/", 0) == 0) {
+        const auto pos = rel.find("/generated");
+        if (pos != std::string::npos) {
+            const auto after = pos + std::strlen("/generated");
+            if (after == rel.size() || rel[after] == '/') return true;
+        }
+    }
+    return false;
+}
+
+/* Disc working trees staged by generate / local setup. package_setup_host
+ * strips these from release zips (generated, bpe, motk, disc). */
+bool rel_is_local_work_tree(const std::string& rel) {
+    return rel_under_prefix(rel, "bpe") || rel_under_prefix(rel, "motk") ||
+           rel_under_prefix(rel, "disc");
+}
+
+bool rel_is_protected(const std::string& rel, const std::string& build_key,
+                      const std::vector<std::string>& extra_prefixes = {}) {
+    if (rel.empty()) return false;
+    if (rel_is_codegen_artifact(rel)) return true;
+    if (rel_is_local_work_tree(rel)) return true;
+    for (const std::string& p : extra_prefixes) {
+        if (rel_under_prefix(rel, p)) return true;
+    }
+    if (build_key.empty()) return false;
+    return rel_under_prefix(rel, build_key);
 }
 
 bool files_content_equal(const fs::path& a, const fs::path& b) {
@@ -485,10 +524,12 @@ bool files_content_equal(const fs::path& a, const fs::path& b) {
 }
 
 // Content-aware overlay: copy only changed files (preserve mtimes on identical
-// bytes), delete paths removed upstream, never touch cmake build_rel.
+// bytes), delete paths removed upstream, never touch cmake build_rel or local
+// codegen trees (generated/, psxrecomp/generated/, …).
 bool sync_extracted_tree_into(const fs::path& staging, const fs::path& dest,
                               const fs::path& build_rel, std::string* error,
-                              const BuildProgressFn& on_progress) {
+                              const BuildProgressFn& on_progress,
+                              const std::vector<std::string>& extra_protected = {}) {
     std::error_code ec;
     const fs::path src = unwrap_single_subdir(staging);
     if (!fs::is_directory(src, ec)) {
@@ -498,6 +539,9 @@ bool sync_extracted_tree_into(const fs::path& staging, const fs::path& dest,
     fs::create_directories(dest, ec);
 
     const std::string build_key = build_rel.empty() ? std::string() : build_rel.generic_string();
+    auto protected_rel = [&](const std::string& rel) {
+        return rel_is_protected(rel, build_key, extra_protected);
+    };
     std::set<std::string> wanted;
     std::vector<fs::path> src_files;
     for (auto it = fs::recursive_directory_iterator(
@@ -506,7 +550,11 @@ bool sync_extracted_tree_into(const fs::path& staging, const fs::path& dest,
         const fs::path p = it->path();
         const std::string rel = path_rel_key(src, p);
         if (rel.empty()) continue;
-        if (rel_is_protected(rel, build_key)) continue; // never take package build/
+        if (protected_rel(rel)) {
+            // Never take package build/ or accidental generated/ from a zip.
+            if (it->is_directory(ec)) it.disable_recursion_pending();
+            continue;
+        }
         add_rel_with_parents(wanted, rel);
         if (it->is_regular_file(ec)) src_files.push_back(p);
     }
@@ -549,7 +597,7 @@ bool sync_extracted_tree_into(const fs::path& staging, const fs::path& dest,
         const fs::path p = it->path();
         const std::string rel = path_rel_key(dest, p);
         if (rel.empty()) continue;
-        if (rel_is_protected(rel, build_key)) {
+        if (protected_rel(rel)) {
             it.disable_recursion_pending();
             continue;
         }
@@ -574,6 +622,75 @@ bool sync_extracted_tree_into(const fs::path& staging, const fs::path& dest,
     progress(on_progress, "Source sync: " + std::to_string(updated) + " updated, " +
                               std::to_string(kept) + " unchanged, " + std::to_string(removed) +
                               " removed");
+    return true;
+}
+
+/* Same content-aware rules as source sync, for codegen-cache ↔ src/generated. */
+bool sync_tree_content_aware(const fs::path& from, const fs::path& to, std::string* error) {
+    std::error_code ec;
+    if (!fs::is_directory(from, ec)) {
+        if (error) *error = "missing directory: " + from.string();
+        return false;
+    }
+    fs::create_directories(to, ec);
+
+    std::set<std::string> wanted;
+    std::vector<fs::path> src_files;
+    for (auto it = fs::recursive_directory_iterator(
+             from, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        const fs::path p = it->path();
+        const std::string rel = path_rel_key(from, p);
+        if (rel.empty()) continue;
+        add_rel_with_parents(wanted, rel);
+        if (it->is_regular_file(ec)) src_files.push_back(p);
+    }
+    if (ec) {
+        if (error) *error = "scan " + from.string() + ": " + ec.message();
+        return false;
+    }
+
+    for (const fs::path& src_file : src_files) {
+        const std::string rel = path_rel_key(from, src_file);
+        if (rel.empty()) continue;
+        const fs::path dst_file = to / fs::path(rel);
+        std::error_code tec;
+        if (fs::is_regular_file(dst_file, tec) && files_content_equal(src_file, dst_file))
+            continue;
+        fs::create_directories(dst_file.parent_path(), tec);
+        fs::copy_file(src_file, dst_file, fs::copy_options::overwrite_existing, tec);
+        if (tec) {
+            if (error) *error = "sync copy " + rel + ": " + tec.message();
+            return false;
+        }
+    }
+
+    for (const std::string& rel : wanted) {
+        if (!fs::is_directory(from / fs::path(rel), ec)) continue;
+        fs::create_directories(to / fs::path(rel), ec);
+    }
+
+    std::vector<fs::path> stale;
+    for (auto it = fs::recursive_directory_iterator(
+             to, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        const fs::path p = it->path();
+        const std::string rel = path_rel_key(to, p);
+        if (rel.empty() || wanted.count(rel)) continue;
+        stale.push_back(p);
+    }
+    if (ec) {
+        if (error) *error = "scan " + to.string() + ": " + ec.message();
+        return false;
+    }
+    std::sort(stale.begin(), stale.end(), [](const fs::path& a, const fs::path& b) {
+        return a.native().size() > b.native().size();
+    });
+    for (const fs::path& p : stale) {
+        ec.clear();
+        if (!fs::exists(p, ec)) continue;
+        fs::remove_all(p, ec);
+    }
     return true;
 }
 
@@ -633,16 +750,18 @@ bool ensure_working_source_dir(const Title& title, const fs::path& src_base, con
 }
 
 // Overlay package into dest without wiping unchanged files (keeps mtimes so
-// Ninja stays incremental). cmake build_rel is never modified. First populate
-// of an empty/missing dest still uses a full install.
+// Ninja stays incremental). cmake build_rel and local codegen trees are never
+// deleted. First populate of an empty/missing dest still uses a full install.
 bool install_extracted_tree_preserving_build(const fs::path& staging, const fs::path& dest,
                                              const fs::path& build_rel, std::string* error,
-                                             const BuildProgressFn& on_progress) {
+                                             const BuildProgressFn& on_progress,
+                                             const std::vector<std::string>& extra_protected = {}) {
     std::error_code ec;
     if (!fs::is_directory(dest, ec) || !fs::is_regular_file(dest / "CMakeLists.txt", ec)) {
         return install_extracted_tree(staging, dest, error);
     }
-    return sync_extracted_tree_into(staging, dest, build_rel, error, on_progress);
+    return sync_extracted_tree_into(staging, dest, build_rel, error, on_progress,
+                                    extra_protected);
 }
 
 void prune_stale_source_tag_dirs(const fs::path& src_base, const fs::path& keep) {
@@ -761,6 +880,11 @@ bool copy_rel_file(const fs::path& from_root, const fs::path& to_root, const fs:
     const fs::path to = to_root / rel;
     fs::create_directories(to.parent_path(), ec);
     if (ec) return false;
+    /* Keep mtime when bytes match (SDK harvest / emitter reuse). */
+    if (fs::is_regular_file(to, ec) && files_content_equal(from, to)) {
+        ec.clear();
+        return true;
+    }
     fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
     return !ec;
 }
@@ -770,9 +894,13 @@ bool copy_rel_tree(const fs::path& from_root, const fs::path& to_root, const fs:
     const fs::path from = from_root / rel;
     if (!fs::is_directory(from, ec)) return false;
     const fs::path to = to_root / rel;
-    fs::create_directories(to.parent_path(), ec);
-    fs::copy(from, to, fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-    return !ec;
+    std::string err;
+    if (!sync_tree_content_aware(from, to, &err)) {
+        ec = std::make_error_code(std::errc::io_error);
+        return false;
+    }
+    ec.clear();
+    return true;
 }
 
 bool copy_tree_overwrite(const fs::path& from, const fs::path& to, std::string* error) {
@@ -891,8 +1019,19 @@ std::string bios_fingerprint(const BuildOptions& opts) {
     return "stat:" + file_stat_sig(opts.bios_path) + ":" + opts.bios_path.generic_string();
 }
 
+/* Content hash — harvest/copy remtimes must not force disc→C again. */
+std::string file_content_sig(const fs::path& p) {
+    std::error_code ec;
+    if (!fs::is_regular_file(p, ec)) return {};
+    const auto sz = fs::file_size(p, ec);
+    if (ec) return {};
+    const std::string hex = file_sha256_hex(p);
+    if (hex.empty()) return {};
+    return "sha256:" + std::to_string(static_cast<unsigned long long>(sz)) + ":" + hex;
+}
+
 std::string tool_fingerprint(const fs::path& game_bin, const fs::path& bios_bin) {
-    return file_stat_sig(game_bin) + "|" + file_stat_sig(bios_bin);
+    return file_content_sig(game_bin) + "|" + file_content_sig(bios_bin);
 }
 
 json make_codegen_meta(const std::string& engine, const std::string& rom_fp,
@@ -905,31 +1044,46 @@ json make_codegen_meta(const std::string& engine, const std::string& rom_fp,
                 {"tools", tool_fp}};
 }
 
-bool codegen_meta_matches(const json& meta, const json& want) {
+bool codegen_inputs_match(const json& meta, const json& want) {
     return meta.value("engine", "") == want.value("engine", "") &&
            meta.value("rom", "") == want.value("rom", "") &&
            meta.value("bios", "") == want.value("bios", "") &&
-           meta.value("sdk_tag", "") == want.value("sdk_tag", "") &&
            meta.value("tools", "") == want.value("tools", "");
+}
+
+bool codegen_meta_matches(const json& meta, const json& want) {
+    return codegen_inputs_match(meta, want) &&
+           meta.value("sdk_tag", "") == want.value("sdk_tag", "");
+}
+
+/* Pre-sha256 stamps used size:mtime; allow one-shot migrate when C is ready. */
+bool tools_fp_is_legacy_mtime(const std::string& tools) {
+    if (tools.empty() || tools.find("sha256:") != std::string::npos) return false;
+    for (char c : tools) {
+        if (!(std::isdigit(static_cast<unsigned char>(c)) || c == ':' || c == '|'))
+            return false;
+    }
+    return tools.find('|') != std::string::npos;
 }
 
 bool install_generated_from(const Title& title, const std::string& engine,
                             const fs::path& from_root, const fs::path& to_root,
                             std::string* error) {
+    /* Content-aware: identical shards keep mtimes so Ninja stays incremental. */
     if (engine == "psxrecomp") {
-        if (!copy_tree_overwrite(from_root / "generated", to_root / "generated", error))
+        if (!sync_tree_content_aware(from_root / "generated", to_root / "generated", error))
             return false;
         const fs::path bios_from = from_root / "psxrecomp" / "generated";
         const fs::path bios_to = to_root / "psxrecomp" / "generated";
         std::error_code ec;
         if (fs::is_directory(bios_from, ec)) {
-            if (!copy_tree_overwrite(bios_from, bios_to, error)) return false;
+            if (!sync_tree_content_aware(bios_from, bios_to, error)) return false;
         }
         return psx_generated_ready(to_root);
     }
     if (engine == "gbarecomp") {
-        if (!copy_tree_overwrite(gba_out_dir(title, from_root), gba_out_dir(title, to_root),
-                                 error))
+        if (!sync_tree_content_aware(gba_out_dir(title, from_root), gba_out_dir(title, to_root),
+                                     error))
             return false;
         const fs::path bios_from =
             from_root / "gbarecomp" / "src" / "runtime" / "generated_bios";
@@ -938,14 +1092,23 @@ bool install_generated_from(const Title& title, const std::string& engine,
         std::error_code ec;
         if (fs::is_directory(bios_from, ec) &&
             fs::is_regular_file(bios_from / "bios_recompiled.cpp", ec)) {
-            if (!copy_tree_overwrite(bios_from, bios_to, error)) return false;
+            if (!sync_tree_content_aware(bios_from, bios_to, error)) return false;
         }
         return gba_generated_ready(title, to_root);
     }
     const fs::path from_out = snes_out_dir(title, from_root);
     const fs::path to_out = snes_out_dir(title, to_root);
-    if (!copy_tree_overwrite(from_out, to_out, error)) return false;
+    if (!sync_tree_content_aware(from_out, to_out, error)) return false;
     return snes_generated_ready(title, to_root);
+}
+
+bool codegen_stamp_reusable(const json& meta, const json& want) {
+    if (codegen_inputs_match(meta, want)) return true;
+    /* One-shot migrate from size:mtime emitter stamps. */
+    if (!tools_fp_is_legacy_mtime(meta.value("tools", ""))) return false;
+    return meta.value("engine", "") == want.value("engine", "") &&
+           meta.value("rom", "") == want.value("rom", "") &&
+           meta.value("bios", "") == want.value("bios", "");
 }
 
 bool try_restore_codegen_cache(const Paths& paths, const Title& title, const std::string& engine,
@@ -957,7 +1120,7 @@ bool try_restore_codegen_cache(const Paths& paths, const Title& title, const std
     try {
         std::ifstream in(meta_path);
         const json meta = json::parse(in);
-        if (!codegen_meta_matches(meta, want)) return false;
+        if (!codegen_stamp_reusable(meta, want)) return false;
     } catch (...) {
         return false;
     }
@@ -994,7 +1157,7 @@ bool try_adopt_previous_src_generated(const Paths& paths, const Title& title,
         try {
             std::ifstream in(stamp);
             const json meta = json::parse(in);
-            if (!codegen_meta_matches(meta, want)) continue;
+            if (!codegen_stamp_reusable(meta, want)) continue;
         } catch (...) {
             continue;
         }
@@ -1012,26 +1175,30 @@ bool save_codegen_cache(const Paths& paths, const Title& title, const std::strin
     const fs::path cache = codegen_cache_dir(paths, title);
     std::string err;
     if (engine == "psxrecomp") {
-        if (!copy_tree_overwrite(src_root / "generated", cache / "generated", &err)) return false;
+        if (!sync_tree_content_aware(src_root / "generated", cache / "generated", &err))
+            return false;
         const fs::path bios = src_root / "psxrecomp" / "generated";
         std::error_code ec;
         if (fs::is_directory(bios, ec)) {
-            if (!copy_tree_overwrite(bios, cache / "psxrecomp" / "generated", &err)) return false;
+            if (!sync_tree_content_aware(bios, cache / "psxrecomp" / "generated", &err))
+                return false;
         }
     } else if (engine == "gbarecomp") {
-        if (!copy_tree_overwrite(gba_out_dir(title, src_root), gba_out_dir(title, cache), &err))
+        if (!sync_tree_content_aware(gba_out_dir(title, src_root), gba_out_dir(title, cache),
+                                     &err))
             return false;
         const fs::path bios =
             src_root / "gbarecomp" / "src" / "runtime" / "generated_bios";
         std::error_code ec;
         if (fs::is_directory(bios, ec) &&
             fs::is_regular_file(bios / "bios_recompiled.cpp", ec)) {
-            if (!copy_tree_overwrite(
+            if (!sync_tree_content_aware(
                     bios, cache / "gbarecomp" / "src" / "runtime" / "generated_bios", &err))
                 return false;
         }
     } else {
-        if (!copy_tree_overwrite(snes_out_dir(title, src_root), snes_out_dir(title, cache), &err))
+        if (!sync_tree_content_aware(snes_out_dir(title, src_root), snes_out_dir(title, cache),
+                                     &err))
             return false;
     }
     try {
@@ -1099,7 +1266,7 @@ PackEnsureResult harvest_embedded_sdk(const Paths& paths, const Title& title,
     ensure_dirs(paths);
     const std::string safe = sanitize_tag(tag.empty() ? "embedded" : tag);
     const fs::path dest = paths.sdks_dir / pack_id / safe;
-    fs::remove_all(dest, ec);
+    /* Content-aware overlay (no wipe) so identical emitters keep mtimes. */
     fs::create_directories(dest, ec);
     if (ec) {
         r.message = "create sdk cache: " + ec.message();
@@ -2315,7 +2482,18 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
         const bool preserve =
             fs::is_directory(dest / build_rel, ec) || source_tree_buildable(title, dest);
         if (preserve) {
-            return install_extracted_tree_preserving_build(stg, dest, build_rel, err, on_progress);
+            std::vector<std::string> extra_prot;
+            if (!title.build.generate.out_dir.empty()) {
+                /* Catalog overrides (e.g. variants/foo/generated, src/gen). */
+                std::string od = title.build.generate.out_dir;
+                for (char& c : od) {
+                    if (c == '\\') c = '/';
+                }
+                while (!od.empty() && od.back() == '/') od.pop_back();
+                if (!od.empty()) extra_prot.push_back(od);
+            }
+            return install_extracted_tree_preserving_build(stg, dest, build_rel, err, on_progress,
+                                                           extra_prot);
         }
         return install_extracted_tree(stg, dest, err);
     };
@@ -2660,20 +2838,26 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
     std::string reuse_note;
     if (!opts.force_generate) {
         if (generated_ready(title, engine, src.root)) {
-            // Refresh stamp when inputs still match an existing stamp.
             const fs::path stamp = src.root / ".retcomm-codegen.json";
             bool stamp_ok = false;
+            bool reusable = false;
             if (fs::is_regular_file(stamp, ec)) {
                 try {
                     std::ifstream in(stamp);
-                    stamp_ok = codegen_meta_matches(json::parse(in), codegen_want);
+                    const json meta = json::parse(in);
+                    stamp_ok = codegen_meta_matches(meta, codegen_want);
+                    reusable = codegen_stamp_reusable(meta, codegen_want);
                 } catch (...) {
                 }
             }
-            if (stamp_ok || !fs::is_regular_file(stamp, ec)) {
+            if (stamp_ok || reusable || !fs::is_regular_file(stamp, ec)) {
                 skip_generate = true;
-                reuse_note = stamp_ok ? "sources already present (fingerprint match)"
-                                      : "sources already present";
+                if (stamp_ok)
+                    reuse_note = "sources already present (fingerprint match)";
+                else if (reusable)
+                    reuse_note = "sources already present (inputs match)";
+                else
+                    reuse_note = "sources already present";
                 if (!stamp_ok) {
                     try {
                         std::ofstream out(stamp);
