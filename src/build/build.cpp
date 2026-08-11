@@ -2945,8 +2945,7 @@ InstallResult install_title_auto(const Paths& paths, const Title& title,
         const AppConfig cfg = load_app_config(paths.config_path);
         iopts.apps_dir = resolve_default_install_root(cfg, paths);
     }
-    const bool can_zip = title.supports_prebuilt_install();
-    const bool can_build = !iopts.prefer_prebuilt && title.supports_local_build();
+    const bool can_build = title.prefers_local_build_install(iopts.prefer_prebuilt);
 
     auto run_build = [&]() -> InstallResult {
         BuildOptions b = build_opts;
@@ -2962,6 +2961,8 @@ InstallResult install_title_auto(const Paths& paths, const Title& title,
 
     // Setup-host / one-zip catalogs: the GitHub asset is a SOURCE pack (wizard +
     // emitters), not a finished Play binary — always generate+cmake locally.
+    // Dual-mode titles (release zip + build recipe) also take this path unless
+    // prefer_prebuilt was set (InstallPrebuilt / Wine).
     if (can_build) return run_build();
     return install_title(paths, title, iopts);
 }

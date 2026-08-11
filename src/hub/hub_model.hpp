@@ -558,9 +558,9 @@ struct HubModel {
     // Open install-root chooser to relocate an existing install / preserved tree.
     bool begin_move_install(const std::string& title_id);
     void confirm_install_root_and_continue();
-    // If the library DB still points at a missing dump, purge stale rows for the
-    // title's platform and open the missing-ROM chooser. Returns true when the
-    // caller must not start Install (prompt shown or still no ROM).
+    // If Install will local-build and no verified ROM is bound, purge stale
+    // index rows and open the missing-ROM chooser (rescan / RomM). Returns true
+    // when the caller must not start Install (prompt shown or hard failure).
     bool prepare_build_rom_or_prompt(const std::string& title_id);
     void add_install_root_row();
     // Set when Quick Scan is started from the missing-ROM prompt; after scan,

@@ -500,9 +500,9 @@ TileStatusIcon tile_status_icon(const TitleRow& r) {
     if (r.install_dir_present) return TileStatusIcon::NeedsSetup;
     if (r.has_rom) return TileStatusIcon::RomReady;
     if (r.has_romm) return TileStatusIcon::OnRomm;
-    // Prebuilt zip (or no local-build ROM requirement) → not blocked.
-    const bool needs_rom = r.supports_local_build && !r.can_prebuilt_install;
-    if (needs_rom) return TileStatusIcon::NoRom;
+    // Default Install builds whenever a local recipe exists (even if a zip is
+    // also advertised) — surface the missing-ROM badge for those titles.
+    if (r.supports_local_build) return TileStatusIcon::NoRom;
     return TileStatusIcon::Catalog;
 }
 
@@ -552,7 +552,16 @@ void draw_status_badge_glyph(ImDrawList* dl, const ImVec2& c, float rad, TileSta
                           ImVec2(c.x + gap + bw, c.y + bh * 0.5f), ink, 1.4f);
         break;
     }
-    case TileStatusIcon::RomReady:
+    case TileStatusIcon::RomReady: {
+        // Check in a circle — local ROM verified / ready to install.
+        dl->AddCircle(c, rad * 0.55f, ink, 16, 1.7f);
+        const ImVec2 a(c.x - rad * 0.32f, c.y + rad * 0.02f);
+        const ImVec2 b(c.x - rad * 0.06f, c.y + rad * 0.30f);
+        const ImVec2 d(c.x + rad * 0.38f, c.y - rad * 0.28f);
+        dl->AddLine(a, b, ink, 1.9f);
+        dl->AddLine(b, d, ink, 1.9f);
+        break;
+    }
     case TileStatusIcon::OnRomm: {
         // Download: arrow into tray.
         const float h = rad * 0.36f;
@@ -925,12 +934,28 @@ void draw_queued_overlay(ImDrawList* dl, const ImVec2& art0, const ImVec2& art1,
                 ImVec2(c.x + rad * 0.42f, c.y + rad * 0.52f), ink, 2.0f);
 }
 
+void draw_rom_ready_overlay(ImDrawList* dl, const ImVec2& art0, const ImVec2& art1,
+                            const Theme& th) {
+    // Soft circle + check — verified local ROM ready to install.
+    const ImVec2 c((art0.x + art1.x) * 0.5f, (art0.y + art1.y) * 0.5f);
+    const float s = std::min(art1.x - art0.x, art1.y - art0.y);
+    const float rad = s * 0.20f;
+    dl->AddCircleFilled(c, rad, IM_COL32(12, 16, 28, 220), 36);
+    dl->AddCircle(c, rad, ImGui::ColorConvertFloat4ToU32(th.focus), 36, 2.2f);
+    const ImU32 ink = ImGui::ColorConvertFloat4ToU32(th.focus);
+    const ImVec2 a(c.x - rad * 0.38f, c.y + rad * 0.02f);
+    const ImVec2 b(c.x - rad * 0.06f, c.y + rad * 0.36f);
+    const ImVec2 d(c.x + rad * 0.46f, c.y - rad * 0.34f);
+    dl->AddLine(a, b, ink, 2.6f);
+    dl->AddLine(b, d, ink, 2.6f);
+}
+
 float draw_grid_tile(const ImVec2& tile_min, float tile_w, bool selected, const Theme& th,
                      const BoxartTexture* tex, float art_aspect_wh, const char* title,
                      const char* subtitle, const ImVec4* badge_col, bool busy_spinner = false,
                      bool dim_art = false, bool update_overlay = false,
                      TileStatusIcon status_icon = TileStatusIcon::None,
-                     bool queued_overlay = false) {
+                     bool queued_overlay = false, bool rom_ready_overlay = false) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     constexpr float kArtPad = 8.f;
     constexpr float kLabelGap = 6.f;
@@ -973,10 +998,11 @@ float draw_grid_tile(const ImVec2& tile_min, float tile_w, bool selected, const 
                      ImVec2(ix + fit.x, iy + fit.y));
     }
 
-    if (dim_art || busy_spinner || queued_overlay) draw_art_dim(dl, art0, art1, th.radius_sm);
+    if (dim_art || busy_spinner || queued_overlay || rom_ready_overlay)
+        draw_art_dim(dl, art0, art1, th.radius_sm);
     if (busy_spinner) draw_busy_spinner(dl, art0, art1, th);
 
-    // Queued Install/Update: pause-download disc (wins over update chevron).
+    // Queued Install/Update: pause-download disc (wins over update / ROM ready).
     if (queued_overlay && !busy_spinner) {
         draw_queued_overlay(dl, art0, art1, th);
     } else if (update_overlay && !busy_spinner) {
@@ -996,6 +1022,8 @@ float draw_grid_tile(const ImVec2& tile_min, float tile_w, bool selected, const 
         const float stem_w = w * 0.42f;
         dl->AddRectFilled(ImVec2(c.x - stem_w * 0.5f, c.y - h * 0.08f),
                           ImVec2(c.x + stem_w * 0.5f, c.y + h * 0.72f), arrow, 2.f);
+    } else if (rom_ready_overlay && !busy_spinner) {
+        draw_rom_ready_overlay(dl, art0, art1, th);
     }
 
     if (badge_col) {
@@ -1101,12 +1129,13 @@ void draw_library(HubModel& hub, BoxartCache& boxart, const Theme& th) {
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(kBackPadX, kBackPadY));
             float right_x = content_right - back_w;
             if (show_configure) {
-                const ImVec2 cfg_txt = ImGui::CalcTextSize("Configure");
+                const char* cfg_label = "PSXrecomp Config";
+                const ImVec2 cfg_txt = ImGui::CalcTextSize(cfg_label);
                 const float cfg_w = cfg_txt.x + kBackPadX * 2.f;
                 constexpr float kCfgGap = 8.f;
                 ImGui::SetCursorScreenPos(
                     ImVec2(right_x - kCfgGap - cfg_w, row0.y + (row_h - back_h) * 0.5f));
-                if (ImGui::Button("Configure", ImVec2(cfg_w, back_h)))
+                if (accent_button(cfg_label, th, ImVec2(cfg_w, back_h)))
                     hub.open_psx_settings();
                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                     ImGui::SetTooltip(
@@ -1239,6 +1268,8 @@ void draw_library(HubModel& hub, BoxartCache& boxart, const Theme& th) {
             const bool title_busy = install_busy && r.id == busy_title_id;
             const bool title_queued = !title_busy && queued_titles.count(r.id) > 0;
             const bool needs_update = r.update_available;
+            const bool rom_ready =
+                r.has_rom && !r.installed && !r.install_dir_present && !needs_update;
             const bool dim_art = !r.installed || needs_update || title_queued;
             const BoxartTexture* tex =
                 r.boxart_path.empty() ? nullptr : boxart.get(r.id, r.boxart_path);
@@ -1250,7 +1281,8 @@ void draw_library(HubModel& hub, BoxartCache& boxart, const Theme& th) {
             }
             const float tile_h = draw_grid_tile(
                 tile_min, tile_w, selected, th, tex, aspect, r.name.c_str(), nullptr, &badge,
-                title_busy, dim_art, needs_update && !title_queued, status, title_queued);
+                title_busy, dim_art, needs_update && !title_queued, status, title_queued,
+                rom_ready && !title_queued);
 
             ImGui::SetCursorScreenPos(tile_min);
             if (ImGui::InvisibleButton("##row", ImVec2(tile_w, tile_h))) {
@@ -2205,9 +2237,9 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
             ImGui::EndDisabled();
         }
     } else if (row.supports_local_build) {
-        // Prefer prebuilt zip when available — ROM only required for build-only titles.
-        const bool zip_first = row.can_prebuilt_install;
-        if (!row.has_rom && !zip_first) {
+        // Default Install uses local generate+cmake whenever a build recipe
+        // exists (install_title_auto), including dual-mode zip+build titles.
+        if (!row.has_rom) {
             ImGui::PushStyleColor(ImGuiCol_Text, th.warn);
             if (row.has_rom_identity) {
                 ImGui::TextWrapped(
@@ -2221,7 +2253,7 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
             }
             ImGui::PopStyleColor();
         }
-        const bool need_rom = !zip_first && !row.has_rom && !row.has_rom_identity;
+        const bool need_rom = !row.has_rom && !row.has_rom_identity;
         const bool inst_active =
             job_busy && retcomm::hub::hub_job_is_install(hub.job) &&
             hub.job_title_id == row.id && hub.job != HubJob::Update;
@@ -2433,6 +2465,17 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
                          sizeof(hub.settings.exclude_dirs)))
         hub.settings.dirty = true;
 
+    ImGui::Dummy(ImVec2(0, 10));
+    if (accent_button("Save##library_paths", th, ImVec2(160, 0))) {
+        std::string err;
+        if (!hub.save_settings(&err)) {
+            hub.append_log("settings save failed: " + err);
+            hub.set_status("Save failed");
+        } else {
+            hub.show_toast("Saved!");
+        }
+    }
+
     ImGui::Dummy(ImVec2(0, 12));
     ImGui::Separator();
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
@@ -2445,8 +2488,8 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     if (ImGui::BeginTable("install_roots", 4,
                           ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingStretchProp)) {
         ImGui::TableSetupColumn("##def", ImGuiTableColumnFlags_WidthFixed, 56.f);
-        ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, 100.f);
-        ImGui::TableSetupColumn("path", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, 180.f);
+        ImGui::TableSetupColumn("path", ImGuiTableColumnFlags_WidthStretch, 1.f);
         ImGui::TableSetupColumn("##rm", ImGuiTableColumnFlags_WidthFixed, 36.f);
         ImGui::TableHeadersRow();
         for (int i = 0; i < static_cast<int>(hub.settings.install_roots.size()); ++i) {
@@ -2458,6 +2501,7 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
                 hub.settings.dirty = true;
             if (ImGui::IsItemHovered()) ImGui::SetTooltip("Default for new installs");
             ImGui::TableNextColumn();
+            ImGui::SetNextItemWidth(-1.f);
             if (ImGui::InputText("##label", row.label, sizeof(row.label)))
                 hub.settings.dirty = true;
             ImGui::TableNextColumn();
@@ -2465,7 +2509,7 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
                 const float browse_w = 72.f;
                 const float gap = ImGui::GetStyle().ItemSpacing.x;
                 const float input_w = ImGui::GetContentRegionAvail().x - browse_w - gap;
-                if (input_w > 60.f) ImGui::SetNextItemWidth(input_w);
+                if (input_w > 40.f) ImGui::SetNextItemWidth(input_w);
                 if (ImGui::InputText("##path", row.path, sizeof(row.path)))
                     hub.settings.dirty = true;
                 ImGui::SameLine();
@@ -2499,6 +2543,16 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
         }
         ImGui::EndTable();
     }
+    if (accent_button("Save##install_roots", th, ImVec2(120, 0))) {
+        std::string err;
+        if (!hub.save_settings(&err)) {
+            hub.append_log("settings save failed: " + err);
+            hub.set_status("Save failed");
+        } else {
+            hub.show_toast("Saved!");
+        }
+    }
+    ImGui::SameLine();
     if (ImGui::Button("Add Install Location", ImVec2(200, 0)))
         hub.add_install_root_row();
 
@@ -2533,7 +2587,7 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0, 10));
-    if (ImGui::Checkbox("Filter Unsupported Titles", &hub.settings.filter_unsupported_titles))
+    if (ImGui::Checkbox("Hide Unowned Catalog Items", &hub.settings.filter_unsupported_titles))
         hub.settings.dirty = true;
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
     ImGui::TextWrapped(
@@ -4263,13 +4317,14 @@ void draw_psx_settings_panel(HubModel& hub, const Theme& th, BoxartCache& boxart
     ImGui::SetCursorPosY(desc_y);
     ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), right - kTabW));
     if (gamepads) {
-        if (ImGui::Button("System", ImVec2(kTabW, 0))) {
+        if (good_button("System", th, ImVec2(kTabW, 0))) {
             hub.psx_settings.gamepads_tab = false;
             cancel_psx_bind_capture(hub);
             hub.psx_settings.configuring_player = -1;
         }
     } else {
-        if (ImGui::Button("Gamepads", ImVec2(kTabW, 0))) hub.psx_settings.gamepads_tab = true;
+        if (good_button("Gamepads", th, ImVec2(kTabW, 0)))
+            hub.psx_settings.gamepads_tab = true;
     }
     ImGui::Separator();
 

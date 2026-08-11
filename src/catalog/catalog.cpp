@@ -297,6 +297,10 @@ bool Title::supports_prebuilt_install() const {
            !launch_binary_for_host().empty();
 }
 
+bool Title::prefers_local_build_install(bool prefer_prebuilt) const {
+    return !prefer_prebuilt && supports_local_build();
+}
+
 std::string normalize_netplay_version(std::string version) {
     while (!version.empty() &&
            std::isspace(static_cast<unsigned char>(version.front())))

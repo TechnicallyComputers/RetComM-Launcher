@@ -1119,17 +1119,17 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     append_log("unknown title: " + title_id);
                     break;
                 }
-                // Zip-first when host release assets exist; ROM only required for
-                // build-only titles (or build fallback after a failed zip).
+                // install_title_auto builds whenever a local recipe exists unless
+                // this job forced a zip (InstallPrebuilt / Wine).
+                const bool will_build = t->prefers_local_build_install(prebuilt);
                 const bool can_zip = t->supports_prebuilt_install();
-                const bool build_only =
-                    !prebuilt && t->supports_local_build() && !can_zip;
                 set_status(std::string(wine ? "Installing (Wine) "
+                                       : will_build ? "Building "
                                        : (prebuilt || can_zip) ? "Installing "
                                                                : "Building ") +
                            title_id + "…");
                 // Local builds need a verified ROM; hub confirm sets fetch_romm_first.
-                if (build_only || (!prebuilt && t->build.enabled && fetch_romm_first)) {
+                if (will_build || (!prebuilt && t->build.enabled && fetch_romm_first)) {
                     library = load_library_index(paths.library_index_path);
                     std::error_code rom_ec;
                     fs::path rom = library.preferred_rom(title_id);
@@ -1154,7 +1154,12 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     }
                     if (fetch_romm_first) {
                         if (!ensure_rom_via_romm(*t)) {
-                            set_status("Install failed: " + title_id);
+                            {
+                                std::lock_guard<std::mutex> lock(mu);
+                                missing_rom_prompt_id = title_id;
+                                show_missing_rom_prompt = true;
+                            }
+                            set_status("RomM ROM failed — rescan library or try again");
                             break;
                         }
                     }
@@ -1229,17 +1234,18 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 wire_build_activity(this, bopts);
                 auto r = install_title_auto(paths, *t, opts, bopts);
                 append_log(r.message);
-                // Zip failed → build fallback needs a ROM: offer the missing-ROM chooser.
-                if (!r.ok && !prebuilt && t->supports_local_build() && can_zip) {
+                // Build path failed with no verified ROM (dual-mode titles used to
+                // skip the pre-install chooser and land here with a quiet fail).
+                if (!r.ok && will_build) {
                     library = load_library_index(paths.library_index_path);
                     std::error_code rom_ec;
                     const fs::path rom = library.preferred_rom(title_id);
                     const bool no_rom = rom.empty() || !fs::is_regular_file(rom, rom_ec);
-                    if (no_rom && r.message.find("fell back to local build") != std::string::npos) {
+                    if (no_rom) {
                         std::lock_guard<std::mutex> lock(mu);
                         missing_rom_prompt_id = title_id;
                         show_missing_rom_prompt = true;
-                        set_status("Prebuilt install failed — add a ROM to build locally");
+                        set_status("ROM required to build — scan or download from RomM");
                         break;
                     }
                 }
@@ -2832,7 +2838,8 @@ bool HubModel::begin_install(const std::string& title_id) {
             job_apps_dir = existing.install_root.parent_path();
         else
             job_apps_dir = resolve_default_install_root(cfg, paths);
-        if (t->supports_local_build() && !t->supports_prebuilt_install()) {
+        // Same predicate as install_title_auto (build wins over zip when both exist).
+        if (t->prefers_local_build_install(/*prefer_prebuilt=*/false)) {
             if (prepare_build_rom_or_prompt(title_id)) return true;
         }
         return start_job(HubJob::Install, title_id);
@@ -2923,7 +2930,7 @@ void HubModel::confirm_install_root_and_continue() {
         append_log("unknown title: " + title_id);
         return;
     }
-    if (t->supports_local_build() && !t->supports_prebuilt_install()) {
+    if (t->prefers_local_build_install(/*prefer_prebuilt=*/false)) {
         if (prepare_build_rom_or_prompt(title_id)) return;
     }
     start_job(HubJob::Install, title_id);
