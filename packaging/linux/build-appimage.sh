@@ -56,6 +56,21 @@ fi
 mkdir -p "${APPDIR}/usr/bin/platforms"
 cp -a "${PLAT_DST}/." "${APPDIR}/usr/bin/platforms/"
 
+# PSX DualShock art for the Gamepads configure mapper.
+CTRL_DST="${APPDIR}/usr/share/retcomm/controllers"
+if [[ ! -f "${CTRL_DST}/pad_analog.png" ]]; then
+  if [[ -f "${ROOT}/assets/controllers/pad_analog.png" ]]; then
+    mkdir -p "${CTRL_DST}"
+    cp -a "${ROOT}/assets/controllers/." "${CTRL_DST}/"
+  fi
+fi
+if [[ ! -f "${CTRL_DST}/pad_analog.png" ]]; then
+  echo "error: hub PSX pad art missing (expected ${CTRL_DST}/pad_analog.png or assets/controllers/)" >&2
+  exit 1
+fi
+mkdir -p "${APPDIR}/usr/bin/controllers"
+cp -a "${CTRL_DST}/." "${APPDIR}/usr/bin/controllers/"
+
 # Desktop + icon at AppDir root (linuxdeploy / appimagetool convention).
 install -m 644 "${ROOT}/packaging/linux/retcomm.desktop" "${APPDIR}/retcomm.desktop"
 if [[ -f "${ROOT}/assets/retcomm.png" ]]; then

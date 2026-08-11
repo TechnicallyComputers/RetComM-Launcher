@@ -19,6 +19,7 @@
 #include <functional>
 #include <iostream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -428,6 +429,154 @@ bool install_extracted_tree(const fs::path& staging, const fs::path& dest, std::
 // Stable per-title working tree (package updates overlay here so cmake/ninja stay incremental).
 constexpr const char* kWorkingSourceDir = "current";
 
+std::string path_rel_key(const fs::path& base, const fs::path& p) {
+    std::error_code ec;
+    const fs::path rel = fs::relative(p, base, ec);
+    if (ec || rel.empty() || rel == ".") return {};
+    std::string s = rel.generic_string();
+    if (s == ".") return {};
+    while (s.size() >= 2 && s[0] == '.' && s[1] == '/') s.erase(0, 2);
+    if (s == "." || s.empty()) return {};
+    return s;
+}
+
+void add_rel_with_parents(std::set<std::string>& out, const std::string& rel) {
+    if (rel.empty() || rel == ".") return;
+    out.insert(rel);
+    std::string cur = rel;
+    for (;;) {
+        const auto pos = cur.rfind('/');
+        if (pos == std::string::npos) break;
+        cur.resize(pos);
+        if (cur.empty()) break;
+        out.insert(cur);
+    }
+}
+
+bool rel_is_protected(const std::string& rel, const std::string& build_key) {
+    if (rel.empty() || build_key.empty()) return false;
+    if (rel == build_key) return true;
+    return rel.size() > build_key.size() && rel[build_key.size()] == '/' &&
+           rel.compare(0, build_key.size(), build_key) == 0;
+}
+
+bool files_content_equal(const fs::path& a, const fs::path& b) {
+    std::error_code ec;
+    if (!fs::is_regular_file(a, ec) || !fs::is_regular_file(b, ec)) return false;
+    const auto sa = fs::file_size(a, ec);
+    if (ec) return false;
+    const auto sb = fs::file_size(b, ec);
+    if (ec || sa != sb) return false;
+    if (sa == 0) return true;
+    std::ifstream fa(a, std::ios::binary);
+    std::ifstream fb(b, std::ios::binary);
+    if (!fa || !fb) return false;
+    constexpr std::size_t kBuf = 64 * 1024;
+    std::vector<char> ba(kBuf), bb(kBuf);
+    for (;;) {
+        fa.read(ba.data(), static_cast<std::streamsize>(kBuf));
+        fb.read(bb.data(), static_cast<std::streamsize>(kBuf));
+        const auto na = fa.gcount();
+        const auto nb = fb.gcount();
+        if (na != nb) return false;
+        if (na == 0) return true;
+        if (std::memcmp(ba.data(), bb.data(), static_cast<std::size_t>(na)) != 0) return false;
+    }
+}
+
+// Content-aware overlay: copy only changed files (preserve mtimes on identical
+// bytes), delete paths removed upstream, never touch cmake build_rel.
+bool sync_extracted_tree_into(const fs::path& staging, const fs::path& dest,
+                              const fs::path& build_rel, std::string* error,
+                              const BuildProgressFn& on_progress) {
+    std::error_code ec;
+    const fs::path src = unwrap_single_subdir(staging);
+    if (!fs::is_directory(src, ec)) {
+        if (error) *error = "staging tree missing after extract";
+        return false;
+    }
+    fs::create_directories(dest, ec);
+
+    const std::string build_key = build_rel.empty() ? std::string() : build_rel.generic_string();
+    std::set<std::string> wanted;
+    std::vector<fs::path> src_files;
+    for (auto it = fs::recursive_directory_iterator(
+             src, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        const fs::path p = it->path();
+        const std::string rel = path_rel_key(src, p);
+        if (rel.empty()) continue;
+        if (rel_is_protected(rel, build_key)) continue; // never take package build/
+        add_rel_with_parents(wanted, rel);
+        if (it->is_regular_file(ec)) src_files.push_back(p);
+    }
+    if (ec) {
+        if (error) *error = "scan staging: " + ec.message();
+        return false;
+    }
+
+    std::size_t updated = 0;
+    std::size_t kept = 0;
+    progress(on_progress, "Syncing source tree (content-aware)…");
+    for (const fs::path& from : src_files) {
+        const std::string rel = path_rel_key(src, from);
+        if (rel.empty()) continue;
+        const fs::path to = dest / fs::path(rel);
+        std::error_code tec;
+        if (fs::is_regular_file(to, tec) && files_content_equal(from, to)) {
+            ++kept;
+            continue;
+        }
+        fs::create_directories(to.parent_path(), tec);
+        fs::copy_file(from, to, fs::copy_options::overwrite_existing, tec);
+        if (tec) {
+            if (error) *error = "sync copy " + rel + ": " + tec.message();
+            return false;
+        }
+        ++updated;
+    }
+
+    for (const std::string& rel : wanted) {
+        const fs::path from = src / fs::path(rel);
+        if (!fs::is_directory(from, ec)) continue;
+        fs::create_directories(dest / fs::path(rel), ec);
+    }
+
+    std::vector<fs::path> stale;
+    for (auto it = fs::recursive_directory_iterator(
+             dest, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        const fs::path p = it->path();
+        const std::string rel = path_rel_key(dest, p);
+        if (rel.empty()) continue;
+        if (rel_is_protected(rel, build_key)) {
+            it.disable_recursion_pending();
+            continue;
+        }
+        if (wanted.count(rel)) continue;
+        stale.push_back(p);
+    }
+    if (ec) {
+        if (error) *error = "scan destination: " + ec.message();
+        return false;
+    }
+    std::sort(stale.begin(), stale.end(), [](const fs::path& a, const fs::path& b) {
+        return a.native().size() > b.native().size();
+    });
+    std::size_t removed = 0;
+    for (const fs::path& p : stale) {
+        ec.clear();
+        if (!fs::exists(p, ec)) continue;
+        fs::remove_all(p, ec);
+        if (!ec) ++removed;
+    }
+
+    progress(on_progress, "Source sync: " + std::to_string(updated) + " updated, " +
+                              std::to_string(kept) + " unchanged, " + std::to_string(removed) +
+                              " removed");
+    return true;
+}
+
 std::string read_source_marker_ref(const fs::path& dest) {
     std::error_code ec;
     const fs::path marker = dest / ".retcomm-source.json";
@@ -483,54 +632,17 @@ bool ensure_working_source_dir(const Title& title, const fs::path& src_base, con
     return false;
 }
 
-// Replace dest with staging contents but keep cmake build_dir (and restore it afterward).
+// Overlay package into dest without wiping unchanged files (keeps mtimes so
+// Ninja stays incremental). cmake build_rel is never modified. First populate
+// of an empty/missing dest still uses a full install.
 bool install_extracted_tree_preserving_build(const fs::path& staging, const fs::path& dest,
                                              const fs::path& build_rel, std::string* error,
                                              const BuildProgressFn& on_progress) {
     std::error_code ec;
-    fs::path aside;
-    const fs::path build_dir = dest / build_rel;
-    if (!build_rel.empty() && fs::is_directory(build_dir, ec)) {
-        aside = dest.parent_path() / (".keep-build-" + unique_pack_suffix());
-        progress(on_progress, "Preserving cmake build tree for incremental compile…");
-        fs::rename(build_dir, aside, ec);
-        if (ec) {
-            fs::copy(build_dir, aside,
-                     fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-            if (ec) {
-                if (error) *error = "cannot preserve build dir: " + ec.message();
-                return false;
-            }
-            fs::remove_all(build_dir, ec);
-        }
+    if (!fs::is_directory(dest, ec) || !fs::is_regular_file(dest / "CMakeLists.txt", ec)) {
+        return install_extracted_tree(staging, dest, error);
     }
-
-    if (!install_extracted_tree(staging, dest, error)) {
-        if (!aside.empty() && fs::is_directory(aside, ec)) {
-            // Best-effort restore if the package install failed mid-way.
-            fs::create_directories(dest, ec);
-            fs::rename(aside, dest / build_rel, ec);
-        }
-        return false;
-    }
-
-    if (!aside.empty() && fs::is_directory(aside, ec)) {
-        progress(on_progress, "Restoring cmake build tree…");
-        const fs::path target = dest / build_rel;
-        fs::remove_all(target, ec);
-        ec.clear();
-        fs::rename(aside, target, ec);
-        if (ec) {
-            fs::copy(aside, target,
-                     fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-            fs::remove_all(aside, ec);
-            if (ec) {
-                if (error) *error = "cannot restore build dir: " + ec.message();
-                return false;
-            }
-        }
-    }
-    return true;
+    return sync_extracted_tree_into(staging, dest, build_rel, error, on_progress);
 }
 
 void prune_stale_source_tag_dirs(const fs::path& src_base, const fs::path& keep) {

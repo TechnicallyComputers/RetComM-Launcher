@@ -23,13 +23,15 @@ is never treated as a finished Play install — only `releases/` (or `current/`)
 counts.
 
 **Incremental cmake on update:** source always lives at `src/current/`. A newer
-release zip replaces package files in place while preserving `src/current/build/`
-so Ninja only recompiles changed translation units. Legacy `src/<tag>/` trees are
-migrated to `current` once, then pruned. Disk cost: the cmake tree stays after
-install (often hundreds of MiB) unless Library Settings → **Advanced** →
-**Auto-clean cmake build directories after install** is enabled
-(`auto_clean_build_dirs` in `config.json`). Hub **Generate & Rebuild**
-(`force_generate`) wipes `build/` and regenerates C from the disc.
+release zip is **content-synced** into that tree (overwrite only when bytes
+change, delete paths removed upstream, leave identical files’ mtimes alone) so
+Ninja only recompiles real diffs. `src/current/build/` is never touched by the
+sync. Legacy `src/<tag>/` trees are migrated to `current` once, then pruned.
+Disk cost: the cmake tree stays after install (often hundreds of MiB) unless
+Library Settings → **Advanced** → **Auto-clean cmake build directories after
+install** is enabled (`auto_clean_build_dirs` in `config.json`). Hub
+**Generate & Rebuild** (`force_generate`) wipes `build/` and regenerates C from
+the disc.
 
 **Codegen reuse on update:** after the first successful generate, RetComM keeps
 `apps/<title>/codegen-cache/` keyed by ROM/BIOS + emitter fingerprints. Updates

@@ -488,6 +488,23 @@ void PsxPlatformSettings::apply_hotkey_defaults_if_empty() {
     }
 }
 
+void PsxPlatformSettings::reset_system_to_defaults() {
+    const auto keep_src = player_src;
+    const auto keep_guid = player_guid;
+    const auto keep_mode = player_mode;
+    const auto keep_dz = player_deadzone;
+
+    *this = PsxPlatformSettings{};
+    player_src = keep_src;
+    player_guid = keep_guid;
+    player_mode = keep_mode;
+    player_deadzone = keep_dz;
+
+    for (int i = 0; i < kHotkeyCount; ++i)
+        hotkeys[static_cast<size_t>(i)] = hotkey_default(i);
+    apply_controller_defaults_if_unset();
+}
+
 void PsxPlatformSettings::apply_controller_defaults_if_unset() {
     // First load leaves arrays zeroed: treat that as P1 keyboard, rest none.
     bool any = false;
@@ -503,13 +520,18 @@ void PsxPlatformSettings::apply_controller_defaults_if_unset() {
         for (int i = 1; i < kMaxPlayers; ++i) player_src[static_cast<size_t>(i)] = 0;
     }
     for (int i = 0; i < kMaxPlayers; ++i) {
-        if (player_mode[static_cast<size_t>(i)] != 1 && player_mode[static_cast<size_t>(i)] != 2)
+        player_src[static_cast<size_t>(i)] = std::clamp(player_src[static_cast<size_t>(i)], 0, 2);
+        // Keyboard seats stay digital; everything else defaults to DualShock/analog
+        // (sticks are assumed on gamepads). Explicit digital for a pad is kept.
+        if (player_src[static_cast<size_t>(i)] == 1)
+            player_mode[static_cast<size_t>(i)] = 2;
+        else if (player_mode[static_cast<size_t>(i)] != 1 &&
+                 player_mode[static_cast<size_t>(i)] != 2)
             player_mode[static_cast<size_t>(i)] = 1; // analog
         if (player_deadzone[static_cast<size_t>(i)] < 0 || player_deadzone[static_cast<size_t>(i)] > 32767)
             player_deadzone[static_cast<size_t>(i)] = 3277;
         if (player_deadzone[static_cast<size_t>(i)] == 0 && player_src[static_cast<size_t>(i)] != 0)
             player_deadzone[static_cast<size_t>(i)] = 3277;
-        player_src[static_cast<size_t>(i)] = std::clamp(player_src[static_cast<size_t>(i)], 0, 2);
         if (player_src[static_cast<size_t>(i)] != 2) player_guid[static_cast<size_t>(i)].clear();
     }
 }

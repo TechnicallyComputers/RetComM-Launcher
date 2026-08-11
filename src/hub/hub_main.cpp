@@ -3644,8 +3644,8 @@ void assign_psx_player_source(HubModel& hub, int p, int src, const char* guid, c
         const int dz = retcomm::psx_pad_binds_deadzone(hub.paths, guid);
         s.player_deadzone[static_cast<size_t>(p)] =
             std::clamp((dz * 32767 + 50) / 100, 0, 32767);
-        if (s.player_mode[static_cast<size_t>(p)] != 1 && s.player_mode[static_cast<size_t>(p)] != 2)
-            s.player_mode[static_cast<size_t>(p)] = 1;
+        // Virtually all gamepads have sticks — default DualShock/analog.
+        s.player_mode[static_cast<size_t>(p)] = 1;
     } else {
         s.player_guid[static_cast<size_t>(p)].clear();
     }
@@ -4524,6 +4524,8 @@ void draw_psx_settings_panel(HubModel& hub, const Theme& th, BoxartCache& boxart
     } // system tab
 
     ImGui::Dummy(ImVec2(0, 12));
+    const float footer_y = ImGui::GetCursorPosY();
+    constexpr float kResetW = 150.f;
     if (accent_button("Save", th, ImVec2(160, 0))) {
         std::string err;
         if (!hub.save_psx_settings(&err)) {
@@ -4551,6 +4553,20 @@ void draw_psx_settings_panel(HubModel& hub, const Theme& th, BoxartCache& boxart
     ImGui::AlignTextToFramePadding();
     ImGui::TextColored(th.text_muted, "%s",
                        retcomm::psx_platform_settings_dir(hub.paths).string().c_str());
+    // System tab only: restore Display / Audio / Multitap / Hotkeys defaults.
+    if (!gamepads) {
+        ImGui::SetCursorPos(ImVec2(ImGui::GetWindowContentRegionMax().x - kResetW, footer_y));
+        if (ImGui::Button("Reset to Default", ImVec2(kResetW, 0))) {
+            hub.psx_settings.capturing_hotkey = -1;
+            s.reset_system_to_defaults();
+            mark();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "Restore Display, Audio, Multitap, and Hotkeys to defaults.\n"
+                "Gamepad seat assignments are left unchanged.");
+        }
+    }
     ImGui::EndChild();
 }
 

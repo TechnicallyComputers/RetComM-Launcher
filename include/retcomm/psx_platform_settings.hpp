@@ -41,8 +41,8 @@ struct PsxPlatformSettings {
     bool spu_hq = true;
 
     // --- Input ([controller]) ---
-    bool multitap_enabled = false;
-    bool multitap_analog = false;
+    bool multitap_enabled = true;
+    bool multitap_analog = true;
 
     // Per-seat devices (recomp-ui / settings.toml pN_device / pN_mode / pN_deadzone).
     // src: 0 none, 1 keyboard, 2 gamepad (GUID in player_guid when src==2).
@@ -66,6 +66,9 @@ struct PsxPlatformSettings {
 
     void apply_hotkey_defaults_if_empty();
     void apply_controller_defaults_if_unset();
+    // Restore Display / Audio / Multitap / Hotkeys to struct defaults.
+    // Leaves per-seat gamepad assignments alone (Gamepads tab).
+    void reset_system_to_defaults();
 
     // Device string written to settings.toml (none / keyboard / GUID / gamepad).
     std::string player_device_string(int slot) const;

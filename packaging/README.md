@@ -26,21 +26,23 @@ Writes `assets/retcomm.png` at **512×512** (linuxdeploy’s max allowed size;
 
 Hub UI fonts live in `assets/fonts/` (Lato Latin, same face as recomp-ui) and
 install to `share/retcomm/fonts`. Platform controller icons live in
-`assets/platforms/` (`psx.png`, …) → `share/retcomm/platforms`. Packaging
-**requires** both:
+`assets/platforms/` (`psx.png`, …) → `share/retcomm/platforms`. PSX DualShock
+pad art for the Gamepads configure mapper lives in `assets/controllers/`
+(`pad_analog.png`, `pad_digital.png`) → `share/retcomm/controllers`. Packaging
+**requires** all three:
 
-| Artifact | Font location | Platform icons |
-|---|---|---|
-| Linux AppImage | `usr/share/retcomm/fonts` + `usr/bin/fonts` | `usr/share/retcomm/platforms` + `usr/bin/platforms` |
-| macOS `.app` / DMG | `Contents/Resources/fonts` | `Contents/Resources/platforms` |
-| Windows setup / portable | `fonts/` next to the exes | `platforms/` next to the exes |
+| Artifact | Font location | Platform icons | PSX pad art |
+|---|---|---|---|
+| Linux AppImage | `usr/share/retcomm/fonts` + `usr/bin/fonts` | `usr/share/retcomm/platforms` + `usr/bin/platforms` | `usr/share/retcomm/controllers` + `usr/bin/controllers` |
+| macOS `.app` / DMG | `Contents/Resources/fonts` | `Contents/Resources/platforms` | `Contents/Resources/controllers` |
+| Windows setup / portable | `fonts/` next to the exes | `platforms/` next to the exes | `controllers/` next to the exes |
 
 On Windows, `retcomm-hub` links `/SUBSYSTEM:WINDOWS` (no console window);
 `retcomm.exe` remains a console CLI.
 
 CI fails the release job if `LatoLatin-Regular.ttf` is missing from the install
 prefix or the final package. Windows/macOS/Linux packagers also require
-`platforms/psx.png`.
+`platforms/psx.png` and `controllers/pad_analog.png`.
 
 ## Linux
 

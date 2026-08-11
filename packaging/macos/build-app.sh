@@ -47,6 +47,19 @@ if [[ ! -f "${APP}/Contents/Resources/platforms/psx.png" ]]; then
   exit 1
 fi
 
+# PSX DualShock art for the Gamepads configure mapper.
+if [[ -d "${PREFIX}/share/retcomm/controllers" ]]; then
+  mkdir -p "${APP}/Contents/Resources/controllers"
+  cp -a "${PREFIX}/share/retcomm/controllers/." "${APP}/Contents/Resources/controllers/"
+elif [[ -f "${ROOT}/assets/controllers/pad_analog.png" ]]; then
+  mkdir -p "${APP}/Contents/Resources/controllers"
+  cp -a "${ROOT}/assets/controllers/." "${APP}/Contents/Resources/controllers/"
+fi
+if [[ ! -f "${APP}/Contents/Resources/controllers/pad_analog.png" ]]; then
+  echo "error: hub PSX pad art missing in app bundle (pad_analog.png)" >&2
+  exit 1
+fi
+
 sed "s|@VERSION@|${VERSION}|g" "${ROOT}/packaging/macos/Info.plist.in" \
   > "${APP}/Contents/Info.plist"
 

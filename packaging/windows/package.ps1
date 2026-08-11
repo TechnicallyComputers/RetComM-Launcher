@@ -197,6 +197,21 @@ if (-not (Test-Path (Join-Path $PlatDst "psx.png"))) {
     throw "Failed to stage hub platform icons into $PlatDst"
 }
 
+# PSX DualShock art for the Gamepads configure mapper (controllers/pad_*.png).
+$CtrlSrc = Join-Path $Prefix "share\retcomm\controllers"
+if (-not (Test-Path (Join-Path $CtrlSrc "pad_analog.png"))) {
+    $CtrlSrc = Join-Path $Root "assets\controllers"
+}
+if (-not (Test-Path (Join-Path $CtrlSrc "pad_analog.png"))) {
+    throw "Hub PSX pad art missing (expected pad_analog.png under share/retcomm/controllers or assets/controllers)"
+}
+$CtrlDst = Join-Path $Stage "controllers"
+New-Item -ItemType Directory -Force -Path $CtrlDst | Out-Null
+Copy-Item (Join-Path $CtrlSrc "pad_*.png") $CtrlDst -Force
+if (-not (Test-Path (Join-Path $CtrlDst "pad_analog.png"))) {
+    throw "Failed to stage hub PSX pad art into $CtrlDst"
+}
+
 # --- Portable single-exe (stub + appended zip trailer; zip is temporary only) ---
 if (-not $PortableStub) {
     $candidates = @(
