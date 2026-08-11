@@ -96,8 +96,9 @@ for a later reinstall.
 
 Install with bundled **OpenBIOS**, then add a retail dump such as `SCPH1001.BIN`
 later and RetComM can prompt a rebuild with SCPH support. After that, hot-swap
-between BIOS choices in the hub. Online multiplayer may force the lobby down to
-OpenBIOS if a player lacks an SCPH-capable build.
+between BIOS choices in the hub (Play stages an empty `bios.cfg` for OpenBIOS so
+a prior SCPH pick cannot stick). Online lobbies settle one match BIOS: OpenBIOS
+unless every seated peer can run SCPH-1001 and nobody selected OpenBIOS.
 
 ### RomM integration
 
