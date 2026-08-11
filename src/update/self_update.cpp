@@ -349,6 +349,34 @@ bool save_launcher_state(const Paths& paths, const std::string& tag, const std::
 }
 
 #if defined(_WIN32)
+#ifndef CREATE_BREAKAWAY_FROM_JOB
+#define CREATE_BREAKAWAY_FROM_JOB 0x01000000
+#endif
+
+// Sanitize a path for embedding in mshta javascript:alert('...').
+std::string mshta_path_literal(const fs::path& p) {
+    std::string s = p.generic_string();
+    for (char& c : s) {
+        if (c == '\'') c = ' ';
+    }
+    return s;
+}
+
+// Locale-proof PID wait: loop while tasklist still lists the PID.
+// English "No tasks" matching fails on non-English Windows and empty output.
+// Caller must have set PID=; on timeout jumps to timeout_label (must exist).
+void write_bat_wait_for_pid(std::ostream& out, int max_loops, const char* timeout_label) {
+    out << "set W=0\r\n"
+        << ":wait\r\n"
+        << "tasklist /FI \"PID eq !PID!\" /NH 2>NUL | findstr /C:\"!PID!\" >NUL\r\n"
+        << "if not errorlevel 1 (\r\n"
+        << "  set /a W+=1\r\n"
+        << "  if !W! GTR " << max_loops << " goto " << timeout_label << "\r\n"
+        << "  ping -n 2 127.0.0.1 >NUL\r\n"
+        << "  goto wait\r\n"
+        << ")\r\n";
+}
+
 // Fire-and-forget a .bat with no console window. Avoid std::system / "cmd /C start"
 // — those spawn visible (or idle minimized) CMD windows while the script waits on PID.
 bool schedule_bat(const fs::path& script, std::string* error) {
@@ -359,7 +387,9 @@ bool schedule_bat(const fs::path& script, std::string* error) {
         return false;
     }
     const std::wstring cmd_exe = std::wstring(sys_dir) + L"\\cmd.exe";
-    std::wstring cmdline = L"\"" + cmd_exe + L"\" /C \"" + script.wstring() + L"\"";
+    // cmd /c ""C:\path\script.bat"" — nested quotes required when the path is quoted.
+    std::wstring cmdline =
+        L"\"" + cmd_exe + L"\" /c \"\"" + script.wstring() + L"\"\"";
     std::vector<wchar_t> mutable_cmd(cmdline.begin(), cmdline.end());
     mutable_cmd.push_back(L'\0');
 
@@ -368,13 +398,22 @@ bool schedule_bat(const fs::path& script, std::string* error) {
     si.dwFlags = STARTF_USESHOWWINDOW;
     si.wShowWindow = SW_HIDE;
     PROCESS_INFORMATION pi{};
-    const DWORD flags = CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
-    if (!CreateProcessW(cmd_exe.c_str(), mutable_cmd.data(), nullptr, nullptr, FALSE, flags,
-                        nullptr, script.parent_path().wstring().c_str(), &si, &pi)) {
-        if (error)
-            *error = "failed to launch apply script (CreateProcess " +
-                     std::to_string(GetLastError()) + ")";
-        return false;
+    const std::wstring cwd = script.parent_path().wstring();
+    auto try_spawn = [&](DWORD flags) -> bool {
+        return CreateProcessW(cmd_exe.c_str(), mutable_cmd.data(), nullptr, nullptr, FALSE,
+                              flags, nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si,
+                              &pi) != 0;
+    };
+    DWORD flags = CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP |
+                  CREATE_BREAKAWAY_FROM_JOB;
+    if (!try_spawn(flags)) {
+        flags &= ~static_cast<DWORD>(CREATE_BREAKAWAY_FROM_JOB);
+        if (!try_spawn(flags)) {
+            if (error)
+                *error = "failed to launch apply script (CreateProcess " +
+                         std::to_string(GetLastError()) + ")";
+            return false;
+        }
     }
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
@@ -386,10 +425,7 @@ bool schedule_replace_portable_and_restart(const fs::path& new_portable, const f
     const DWORD pid = GetCurrentProcessId();
     const fs::path script = new_portable.parent_path() / "apply_portable_update.bat";
     const fs::path log_path = new_portable.parent_path() / "apply_portable_update.log";
-    std::string log_js = log_path.generic_string(); // forward slashes for mshta/JS
-    for (char& c : log_js) {
-        if (c == '\'') c = ' ';
-    }
+    const std::string log_js = mshta_path_literal(log_path);
     {
         std::ofstream out(script);
         if (!out) {
@@ -409,19 +445,13 @@ bool schedule_replace_portable_and_restart(const fs::path& new_portable, const f
             << "echo RetComM portable update > \"!LOG!\"\r\n"
             << "echo NEW=!NEW!>> \"!LOG!\"\r\n"
             << "echo DEST=!DEST!>> \"!LOG!\"\r\n"
-            << "echo Waiting for PID !PID!>> \"!LOG!\"\r\n"
-            << "set W=0\r\n"
-            << ":wait\r\n"
-            << "tasklist /FI \"PID eq !PID!\" 2>NUL | findstr /I /C:\"No tasks\" >NUL\r\n"
-            << "if errorlevel 1 (\r\n"
-            << "  set /a W+=1\r\n"
-            << "  if !W! GTR 120 (\r\n"
-            << "    echo Timed out waiting for PID !PID!>> \"!LOG!\"\r\n"
-            << "    goto fail\r\n"
-            << "  )\r\n"
-            << "  ping -n 2 127.0.0.1 >NUL\r\n"
-            << "  goto wait\r\n"
-            << ")\r\n"
+            << "echo Waiting for PID !PID!>> \"!LOG!\"\r\n";
+        write_bat_wait_for_pid(out, 120, "wait_timeout");
+        out << "goto wait_done\r\n"
+            << ":wait_timeout\r\n"
+            << "echo Timed out waiting for PID !PID!>> \"!LOG!\"\r\n"
+            << "goto fail\r\n"
+            << ":wait_done\r\n"
             << "if not exist \"!NEW!\" (\r\n"
             << "  echo Staged portable missing>> \"!LOG!\"\r\n"
             << "  goto fail\r\n"
@@ -461,7 +491,8 @@ bool schedule_replace_portable_and_restart(const fs::path& new_portable, const f
             << "echo Replace OK size=!DESTSIZE!>> \"!LOG!\"\r\n"
             // Invalidate extracted runtime so the new stub re-unpacks.
             << "del /Q \"%LOCALAPPDATA%\\retcomm\\portable\\version.txt\" 2>NUL\r\n"
-            << "start \"\" \"!DEST!\"\r\n"
+            << ":relaunch\r\n"
+            << "if exist \"!DEST!\" start \"\" \"!DEST!\"\r\n"
             << "exit /b 0\r\n"
             << ":fail\r\n"
             << "echo FAILED>> \"!LOG!\"\r\n"
@@ -470,7 +501,7 @@ bool schedule_replace_portable_and_restart(const fs::path& new_portable, const f
                "exe.\\n\\nMove it out of Downloads/OneDrive if needed, ensure the folder "
                "is writable, then try Update again.\\n\\nLog:\\n"
             << log_js << "');close()\"\r\n"
-            << "exit /b 1\r\n";
+            << "goto relaunch\r\n";
     }
     return schedule_bat(script, error);
 }
@@ -479,6 +510,9 @@ bool schedule_run_setup_and_restart(const fs::path& setup_exe, const fs::path& i
                                     std::string* error) {
     const DWORD pid = GetCurrentProcessId();
     const fs::path script = setup_exe.parent_path() / "apply_setup_update.bat";
+    const fs::path log_path = setup_exe.parent_path() / "apply_setup_update.log";
+    const std::string log_js = mshta_path_literal(log_path);
+    const fs::path hub_exe = install_dir / "retcomm-hub.exe";
     {
         std::ofstream out(script);
         if (!out) {
@@ -487,22 +521,55 @@ bool schedule_run_setup_and_restart(const fs::path& setup_exe, const fs::path& i
         }
         // Wait for hub exit (with timeout). Do not use /CLOSEAPPLICATIONS — the hub
         // exits on its own; forcing closes mid-shutdown caused hangs/failed applies.
+        // Always relaunch hub — a bare "exit /b 1" on wait timeout left users stuck.
         out << "@echo off\r\n"
             << "setlocal EnableExtensions EnableDelayedExpansion\r\n"
             << "set PID=" << pid << "\r\n"
-            << "set W=0\r\n"
-            << ":wait\r\n"
-            << "tasklist /FI \"PID eq !PID!\" 2>NUL | findstr /I /C:\"No tasks\" >NUL\r\n"
-            << "if errorlevel 1 (\r\n"
-            << "  set /a W+=1\r\n"
-            << "  if !W! GTR 120 exit /b 1\r\n"
-            << "  ping -n 2 127.0.0.1 >NUL\r\n"
-            << "  goto wait\r\n"
+            << "set \"SETUP=" << setup_exe.string() << "\"\r\n"
+            << "set \"DIR=" << install_dir.string() << "\"\r\n"
+            << "set \"HUB=" << hub_exe.string() << "\"\r\n"
+            << "set \"LOG=" << log_path.string() << "\"\r\n"
+            << "echo RetComM installer update > \"!LOG!\"\r\n"
+            << "echo SETUP=!SETUP!>> \"!LOG!\"\r\n"
+            << "echo DIR=!DIR!>> \"!LOG!\"\r\n"
+            << "echo HUB=!HUB!>> \"!LOG!\"\r\n"
+            << "echo Waiting for PID !PID!>> \"!LOG!\"\r\n";
+        write_bat_wait_for_pid(out, 120, "wait_timeout");
+        out << "goto wait_done\r\n"
+            << ":wait_timeout\r\n"
+            << "echo Timed out waiting for PID !PID! — continuing>> \"!LOG!\"\r\n"
+            << ":wait_done\r\n"
+            << "if not exist \"!SETUP!\" (\r\n"
+            << "  echo Staged setup missing>> \"!LOG!\"\r\n"
+            << "  goto fail\r\n"
             << ")\r\n"
-            << "start /wait \"\" \"" << setup_exe.string()
-            << "\" /VERYSILENT /NORESTART /SUPPRESSMSGBOXES /DIR=\""
-            << install_dir.string() << "\"\r\n"
-            << "start \"\" \"" << (install_dir / "retcomm-hub.exe").string() << "\"\r\n";
+            << "echo Running setup>> \"!LOG!\"\r\n"
+            << "start /wait \"\" \"!SETUP!\" /VERYSILENT /NORESTART /SUPPRESSMSGBOXES "
+               "/CURRENTUSER /DIR=\"!DIR!\"\r\n"
+            << "set SETUP_RC=!errorlevel!\r\n"
+            << "echo Setup exit=!SETUP_RC!>> \"!LOG!\"\r\n"
+            << "if not \"!SETUP_RC!\"==\"0\" (\r\n"
+            << "  echo Setup failed>> \"!LOG!\"\r\n"
+            << "  goto fail\r\n"
+            << ")\r\n"
+            << "if not exist \"!HUB!\" (\r\n"
+            << "  echo Hub missing after setup>> \"!LOG!\"\r\n"
+            << "  goto fail\r\n"
+            << ")\r\n"
+            << "echo Setup OK — relaunching>> \"!LOG!\"\r\n"
+            << ":relaunch\r\n"
+            << "if exist \"!HUB!\" (\r\n"
+            << "  start \"\" /D \"!DIR!\" \"!HUB!\"\r\n"
+            << ") else (\r\n"
+            << "  echo Cannot relaunch — hub missing>> \"!LOG!\"\r\n"
+            << ")\r\n"
+            << "exit /b 0\r\n"
+            << ":fail\r\n"
+            << "echo FAILED>> \"!LOG!\"\r\n"
+            << "mshta \"javascript:alert('RetComM installer update failed.\\n\\n"
+               "Try running the setup from the GitHub release manually.\\n\\nLog:\\n"
+            << log_js << "');close()\"\r\n"
+            << "goto relaunch\r\n";
     }
     return schedule_bat(script, error);
 }
@@ -628,16 +695,10 @@ bool schedule_retcomm_relaunch_impl(std::string* error) {
         out << "@echo off\r\n"
             << "setlocal EnableExtensions EnableDelayedExpansion\r\n"
             << "set PID=" << pid << "\r\n"
-            << "set W=0\r\n"
-            << ":wait\r\n"
-            << "tasklist /FI \"PID eq !PID!\" 2>NUL | findstr /I /C:\"No tasks\" >NUL\r\n"
-            << "if errorlevel 1 (\r\n"
-            << "  set /a W+=1\r\n"
-            << "  if !W! GTR 120 exit /b 1\r\n"
-            << "  ping -n 2 127.0.0.1 >NUL\r\n"
-            << "  goto wait\r\n"
-            << ")\r\n"
-            << "start \"\" \"" << launch.string() << "\"\r\n";
+            << "set \"LAUNCH=" << launch.string() << "\"\r\n";
+        write_bat_wait_for_pid(out, 120, "wait_done");
+        out << ":wait_done\r\n"
+            << "if exist \"!LAUNCH!\" start \"\" \"!LAUNCH!\"\r\n";
     }
     return schedule_bat(script, error);
 #else

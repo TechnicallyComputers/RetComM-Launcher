@@ -128,4 +128,8 @@ Self-update channels (detected via `channel.json` / env from the portable stub):
 - **installer** (primary) → downloads `RetComM-Launcher-windows-*-setup.exe`, silent Inno into the current install dir
 - **portable** → downloads `RetComM-Launcher-windows-portable.exe`, replaces the stub, re-extracts on next launch
 
+Apply logs (after a failed/successful Windows self-update):
+`%LOCALAPPDATA%\retcomm\self-update\bin\apply_setup_update.log` or
+`apply_portable_update.log`.
+
 Loose/dev copies without `channel.json` cannot self-update.
