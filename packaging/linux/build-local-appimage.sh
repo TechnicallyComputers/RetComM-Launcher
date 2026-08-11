@@ -8,14 +8,14 @@
 #   JOBS=8 ./packaging/linux/build-local-appimage.sh
 #
 # Output:
-#   dist/RetComM-Launcher-<ver>-linux-<arch>.AppImage
+#   dist/RetComM-Launcher-linux-<arch>.AppImage
 #
 # Run (no install):
-#   ./dist/RetComM-Launcher-*-linux-*.AppImage
-#   ./dist/RetComM-Launcher-*-linux-*.AppImage cli list
+#   ./dist/RetComM-Launcher-linux-*.AppImage
+#   ./dist/RetComM-Launcher-linux-*.AppImage cli list
 #
 # If FUSE is unavailable:
-#   ./dist/RetComM-Launcher-*-linux-*.AppImage --appimage-extract-and-run
+#   ./dist/RetComM-Launcher-linux-*.AppImage --appimage-extract-and-run
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -159,7 +159,7 @@ bundle_sdl_libs
 echo "==> Package AppImage"
 ./packaging/linux/build-appimage.sh "${PREFIX}" "${VERSION}" "${ARCH}"
 
-APPIMAGE="${ROOT}/dist/RetComM-Launcher-${VERSION}-linux-${ARCH}.AppImage"
+APPIMAGE="${ROOT}/dist/RetComM-Launcher-linux-${ARCH}.AppImage"
 if [[ ! -f "${APPIMAGE}" ]]; then
   echo "AppImage not found at ${APPIMAGE}" >&2
   exit 1

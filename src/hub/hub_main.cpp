@@ -2241,19 +2241,12 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
         // exists (install_title_auto), including dual-mode zip+build titles.
         if (!row.has_rom) {
             ImGui::PushStyleColor(ImGuiCol_Text, th.warn);
-            if (row.has_rom_identity) {
-                ImGui::TextWrapped(
-                    "No verified .cue / ROM in your library yet. Install will offer a "
-                    "quick scan for %s%s.",
-                    platform_display_name(row.platform),
-                    row.romm_ready ? ", or a RomM download" : "");
-            } else {
-                ImGui::TextWrapped(
-                    "Match a verified .cue / ROM in your library before Install.");
-            }
+            ImGui::TextWrapped(
+                "No verified .cue / ROM in your library yet. Install will prompt to "
+                "rescan %s, import files, or download from RomM.",
+                platform_display_name(row.platform));
             ImGui::PopStyleColor();
         }
-        const bool need_rom = !row.has_rom && !row.has_rom_identity;
         const bool inst_active =
             job_busy && retcomm::hub::hub_job_is_install(hub.job) &&
             hub.job_title_id == row.id && hub.job != HubJob::Update;
@@ -2264,7 +2257,7 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
             : job_busy
                 ? (row.install_dir_present ? "Queue Reinstall" : "Queue Install")
                 : (row.install_dir_present ? "Reinstall" : "Install");
-        ImGui::BeginDisabled(inst_active || inst_queued || need_rom ||
+        ImGui::BeginDisabled(inst_active || inst_queued ||
                              (!job_busy && block_title_mutate));
         if (good_button(inst_label, th, ImVec2(-1, 0))) hub.begin_install(row.id);
         ImGui::EndDisabled();
@@ -5094,21 +5087,18 @@ int main(int argc, char** argv) {
             }
             const std::string plat = prow ? prow->platform : std::string{};
             const char* plat_label = plat.empty() ? "this platform" : platform_display_name(plat);
-            const bool romm_ok = prow && prow->romm_ready && prow->has_rom_identity;
+            // Always offer the same actions; RomM download is disabled until sync is set up.
+            const bool romm_sync_ok = prow && prow->romm_ready;
+            const bool romm_download_ok =
+                romm_sync_ok && prow->has_rom_identity && !tid.empty();
             ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 420.f);
             ImGui::TextWrapped("%s", prow ? prow->name.c_str() : tid.c_str());
             ImGui::Dummy(ImVec2(0, 6));
-            if (romm_ok) {
-                ImGui::TextWrapped(
-                    "No verified ROM is in your library yet. Rescan %s for a matching dump, "
-                    "or download from RomM (multi-track discs include the full .cue + track set).",
-                    plat_label);
-            } else {
-                ImGui::TextWrapped(
-                    "No verified ROM is in your library yet. Add the dump locally (Menu → "
-                    "Import), then rescan %s. Configure RomM Sync Settings to enable download.",
-                    plat_label);
-            }
+            ImGui::TextWrapped(
+                "No verified ROM is in your library yet. Rescan %s for a matching dump, "
+                "import the files, or download from RomM when sync is configured "
+                "(multi-track discs need the full .cue + track set).",
+                plat_label);
             ImGui::PopTextWrapPos();
             ImGui::Dummy(ImVec2(0, 10));
             const bool job_busy = hub.job_running.load();
@@ -5116,22 +5106,34 @@ int main(int argc, char** argv) {
             const bool scan_active = job_busy && hub.job == HubJob::ScanRoms &&
                                      hub.job_platform_filter == plat;
             const bool scan_queued = hub.is_job_queued(HubJob::ScanRoms, {}, plat);
-            char scan_label[128];
+            char scan_label[96];
             if (scan_active)
                 std::snprintf(scan_label, sizeof(scan_label), "Scanning…");
             else if (scan_queued)
                 std::snprintf(scan_label, sizeof(scan_label), "Queued");
             else if (job_busy && !any_scan_queued)
-                std::snprintf(scan_label, sizeof(scan_label), "Queue Rescan %s Library",
-                              plat_label);
+                std::snprintf(scan_label, sizeof(scan_label), "Queue Rescan Library");
             else
-                std::snprintf(scan_label, sizeof(scan_label), "Rescan %s Library", plat_label);
+                std::snprintf(scan_label, sizeof(scan_label), "Rescan Library");
             ImGui::BeginDisabled(tid.empty() || plat.empty() || scan_active || scan_queued ||
                                  any_scan_queued);
             if (good_button(scan_label, th, ImVec2(-1, 0))) {
                 hub.scans_platform_filter = plat;
                 hub.pending_scan_missing_rom_id = tid;
                 hub.start_job(HubJob::ScanRoms);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            bool file_busy = false;
+            {
+                std::lock_guard<std::mutex> lock(hub.file_pick_mu);
+                file_busy = hub.file_pick_busy;
+            }
+            ImGui::BeginDisabled(plat.empty() || file_busy || job_busy);
+            if (ImGui::Button("Import ROM", ImVec2(-1, 0))) {
+                const auto exts = rom_exts_for_platform(hub.catalog, plat);
+                begin_file_pick(hub, window, retcomm::hub::FilePickKind::ImportRom, plat,
+                                "ROM files", exts, /*allow_many=*/true, tid);
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndDisabled();
@@ -5142,12 +5144,20 @@ int main(int argc, char** argv) {
                                    : inst_queued ? "Queued"
                                    : job_busy    ? "Queue Download from RomM"
                                                  : "Download from RomM";
-            ImGui::BeginDisabled(!romm_ok || inst_active || inst_queued);
+            ImGui::BeginDisabled(!romm_download_ok || inst_active || inst_queued);
             if (romm_button(romm_lbl, th, ImVec2(-1, 0))) {
                 hub.start_job(HubJob::Install, tid, false, true);
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndDisabled();
+            if (!romm_download_ok &&
+                ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled |
+                                    ImGuiHoveredFlags_DelayNormal)) {
+                if (!romm_sync_ok)
+                    ImGui::SetTooltip("Configure RomM Sync Settings to enable download.");
+                else
+                    ImGui::SetTooltip("This title has no catalog ROM identity for RomM match.");
+            }
             if (ImGui::Button("Cancel", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
             close_modal_on_outside_click();
             ImGui::EndPopup();
@@ -5170,43 +5180,78 @@ int main(int argc, char** argv) {
                     break;
                 }
             }
+            if (plat.empty() && prow) plat = prow->platform;
             const char* plat_label = plat.empty() ? "this platform" : platform_display_name(plat);
+            const bool romm_sync_ok = prow && prow->romm_ready;
+            const bool romm_download_ok =
+                romm_sync_ok && prow->has_rom_identity && !tid.empty();
             ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 420.f);
             ImGui::TextWrapped("%s", prow ? prow->name.c_str() : tid.c_str());
             ImGui::Dummy(ImVec2(0, 6));
             ImGui::TextWrapped(
-                "Refresh did not find a verified dump for this title under %s. "
-                "Open the ROM folder to add the files, then refresh again from Library "
-                "(or download from RomM if configured).",
+                "Still no verified dump for this title under %s. Rescan again, import the "
+                "files, or download from RomM when sync is configured.",
                 plat_label);
             ImGui::PopTextWrapPos();
             ImGui::Dummy(ImVec2(0, 10));
-            ImGui::BeginDisabled(plat.empty() || hub.cfg.library_root.empty());
-            char open_label[96];
-            std::snprintf(open_label, sizeof(open_label), "Open %s ROM Folder", plat_label);
-            if (ImGui::Button(open_label, ImVec2(-1, 0))) {
-                const fs::path dir =
-                    retcomm::ensure_platform_dir(hub.cfg.library_root,
-                                                 hub.cfg.folders_for_platform(plat));
-                std::string err;
-                if (dir.empty() || !retcomm::open_path_in_file_manager(dir, &err)) {
-                    hub.append_log("Open ROM folder failed: " +
-                                   (err.empty() ? dir.string() : err));
-                    hub.set_status("Could not open ROM folder");
-                } else {
-                    hub.set_status("Opened " + dir.string());
-                }
+            const bool job_busy = hub.job_running.load();
+            const bool any_scan_queued = hub.has_queued_scan();
+            const bool scan_active = job_busy && hub.job == HubJob::ScanRoms &&
+                                     hub.job_platform_filter == plat;
+            const bool scan_queued = hub.is_job_queued(HubJob::ScanRoms, {}, plat);
+            char scan_label[96];
+            if (scan_active)
+                std::snprintf(scan_label, sizeof(scan_label), "Scanning…");
+            else if (scan_queued)
+                std::snprintf(scan_label, sizeof(scan_label), "Queued");
+            else if (job_busy && !any_scan_queued)
+                std::snprintf(scan_label, sizeof(scan_label), "Queue Rescan Library");
+            else
+                std::snprintf(scan_label, sizeof(scan_label), "Rescan Library");
+            ImGui::BeginDisabled(tid.empty() || plat.empty() || scan_active || scan_queued ||
+                                 any_scan_queued);
+            if (good_button(scan_label, th, ImVec2(-1, 0))) {
+                hub.scans_platform_filter = plat;
+                hub.pending_scan_missing_rom_id = tid;
+                hub.start_job(HubJob::ScanRoms);
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndDisabled();
-            const bool romm_ok = prow && prow->romm_ready && prow->has_rom_identity;
-            ImGui::BeginDisabled(hub.job_running.load() || !romm_ok || tid.empty());
-            if (romm_button("Download from RomM", th, ImVec2(-1, 0))) {
+            bool file_busy = false;
+            {
+                std::lock_guard<std::mutex> lock(hub.file_pick_mu);
+                file_busy = hub.file_pick_busy;
+            }
+            ImGui::BeginDisabled(plat.empty() || file_busy || job_busy);
+            if (ImGui::Button("Import ROM", ImVec2(-1, 0))) {
+                const auto exts = rom_exts_for_platform(hub.catalog, plat);
+                begin_file_pick(hub, window, retcomm::hub::FilePickKind::ImportRom, plat,
+                                "ROM files", exts, /*allow_many=*/true, tid);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            const bool inst_active =
+                job_busy && hub.job == HubJob::Install && hub.job_title_id == tid;
+            const bool inst_queued = hub.is_job_queued(HubJob::Install, tid);
+            const char* romm_lbl = inst_active  ? "Installing…"
+                                   : inst_queued ? "Queued"
+                                   : job_busy    ? "Queue Download from RomM"
+                                                 : "Download from RomM";
+            ImGui::BeginDisabled(!romm_download_ok || inst_active || inst_queued);
+            if (romm_button(romm_lbl, th, ImVec2(-1, 0))) {
                 hub.start_job(HubJob::Install, tid, false, true);
                 ImGui::CloseCurrentPopup();
             }
             ImGui::EndDisabled();
-            if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+            if (!romm_download_ok &&
+                ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled |
+                                    ImGuiHoveredFlags_DelayNormal)) {
+                if (!romm_sync_ok)
+                    ImGui::SetTooltip("Configure RomM Sync Settings to enable download.");
+                else
+                    ImGui::SetTooltip("This title has no catalog ROM identity for RomM match.");
+            }
+            if (ImGui::Button("Cancel", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
             close_modal_on_outside_click();
             ImGui::EndPopup();
         }

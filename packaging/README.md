@@ -6,9 +6,13 @@ Release assets (no zips):
 
 | Platform | Artifact |
 |---|---|
-| Linux | `RetComM-Launcher-<ver>-linux-x86_64.AppImage` |
-| macOS | `RetComM-Launcher-<ver>-macos-{arm64,x86_64}.dmg` |
-| Windows | `*-windows-x64-setup.exe` + `*-windows-portable.exe` |
+| Linux | `RetComM-Launcher-linux-x86_64.AppImage` |
+| macOS | `RetComM-Launcher-macos-{arm64,x86_64}.dmg` |
+| Windows | `RetComM-Launcher-windows-x64-setup.exe` + `RetComM-Launcher-windows-portable.exe` |
+
+Filenames are stable across releases (version lives in the GitHub tag / binary
+`RETCOMM_VERSION`). Self-update replaces AppImage / portable in place and keeps
+the user's path, so a versioned download name would go stale.
 
 ## Icons
 
@@ -49,13 +53,13 @@ prefix or the final package. Windows/macOS/Linux packagers also require
 ```
 
 Builds icons, SDL3 (cached under `.cache/sdl3` if not already installed), RetComM,
-and writes `dist/RetComM-Launcher-<ver>-linux-<arch>.AppImage`.
+and writes `dist/RetComM-Launcher-linux-<arch>.AppImage`.
 
 ```sh
-./dist/RetComM-Launcher-*-linux-*.AppImage
-./dist/RetComM-Launcher-*-linux-*.AppImage cli list
+./dist/RetComM-Launcher-linux-*.AppImage
+./dist/RetComM-Launcher-linux-*.AppImage cli list
 # if FUSE is unavailable:
-./dist/RetComM-Launcher-*-linux-*.AppImage --appimage-extract-and-run
+./dist/RetComM-Launcher-linux-*.AppImage --appimage-extract-and-run
 ```
 
 ### Manual / CI-style steps
@@ -85,7 +89,7 @@ Produces under `dist/`:
 | Artifact | Role |
 |---|---|
 | `RetComM Launcher.app` | App bundle (local staging) |
-| `RetComM-Launcher-<ver>-macos-<arch>.dmg` | Drag-to-Applications installer disk image |
+| `RetComM-Launcher-macos-<arch>.dmg` | Drag-to-Applications installer disk image |
 
 Open the DMG and drag **RetComM Launcher** onto **Applications**. That puts it on
 Launchpad, Spotlight, and the Applications folder. Self-update downloads the
@@ -109,19 +113,19 @@ Produces under `dist/`:
 
 | Artifact | Role |
 |---|---|
-| `RetComM-Launcher-<ver>-windows-portable.exe` | Single-file portable (stub + zip trailer; icon embedded) |
-| `RetComM-Launcher-<ver>-windows-x64-setup.exe` | Per-user Inno Setup installer (Start Menu / desktop) |
+| `RetComM-Launcher-windows-portable.exe` | Single-file portable (stub + zip trailer; icon embedded) |
+| `RetComM-Launcher-windows-x64-setup.exe` | Per-user Inno Setup installer (Start Menu / desktop) |
 
 Portable usage:
 
 ```text
-RetComM-Launcher-*-windows-portable.exe           # hub UI
-RetComM-Launcher-*-windows-portable.exe cli list  # CLI
+RetComM-Launcher-windows-portable.exe           # hub UI
+RetComM-Launcher-windows-portable.exe cli list  # CLI
 ```
 
 Self-update channels (detected via `channel.json` / env from the portable stub):
 
-- **installer** (primary) → downloads `*-windows-*-setup.exe`, silent Inno into the current install dir
-- **portable** → downloads `*-windows-portable.exe`, replaces the stub, re-extracts on next launch
+- **installer** (primary) → downloads `RetComM-Launcher-windows-*-setup.exe`, silent Inno into the current install dir
+- **portable** → downloads `RetComM-Launcher-windows-portable.exe`, replaces the stub, re-extracts on next launch
 
 Loose/dev copies without `channel.json` cannot self-update.

@@ -136,11 +136,11 @@ exclude dirs, update checks, etc.).
 
 | Artifact | Platform |
 |---|---|
-| `RetComM-Launcher-<ver>-linux-x86_64.AppImage` | Linux |
-| `RetComM-Launcher-<ver>-windows-x64-setup.exe` | Windows installer |
-| `RetComM-Launcher-<ver>-windows-portable.exe` | Windows portable |
-| `RetComM-Launcher-<ver>-macos-arm64.dmg` | macOS Apple Silicon |
-| `RetComM-Launcher-<ver>-macos-x86_64.dmg` | macOS Intel |
+| `RetComM-Launcher-linux-x86_64.AppImage` | Linux |
+| `RetComM-Launcher-windows-x64-setup.exe` | Windows installer |
+| `RetComM-Launcher-windows-portable.exe` | Windows portable |
+| `RetComM-Launcher-macos-arm64.dmg` | macOS Apple Silicon |
+| `RetComM-Launcher-macos-x86_64.dmg` | macOS Intel |
 
 Releases are published manually via Actions → **Release**. Hub **Update RetComM**
 pulls the matching asset for your install channel. Windows portable: run with no

@@ -113,13 +113,13 @@ jobs:
           export LD_LIBRARY_PATH="$HOME/sdl3/lib:${LD_LIBRARY_PATH:-}"
           ./packaging/linux/build-appimage.sh "$PWD/out" "${{ needs.version.outputs.version }}" x86_64
           ls -lah dist/
-          test -f "dist/RetComM-Launcher-${{ needs.version.outputs.version }}-linux-x86_64.AppImage"
+          test -f "dist/RetComM-Launcher-linux-x86_64.AppImage"
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux-x86_64
           path: |
-            dist/RetComM-Launcher-*-linux-x86_64.AppImage
+            dist/RetComM-Launcher-linux-x86_64.AppImage
 
   windows:
     needs: version
@@ -235,8 +235,8 @@ jobs:
           }
           Get-ChildItem dist
           $need = @(
-            "RetComM-Launcher-${{ needs.version.outputs.version }}-windows-portable.exe",
-            "RetComM-Launcher-${{ needs.version.outputs.version }}-windows-x64-setup.exe"
+            "RetComM-Launcher-windows-portable.exe",
+            "RetComM-Launcher-windows-x64-setup.exe"
           )
           foreach ($n in $need) {
             $p = Join-Path dist $n
@@ -247,8 +247,8 @@ jobs:
         with:
           name: windows-x64
           path: |
-            dist/RetComM-Launcher-*-windows-portable.exe
-            dist/RetComM-Launcher-*-windows-x64-setup.exe
+            dist/RetComM-Launcher-windows-portable.exe
+            dist/RetComM-Launcher-windows-x64-setup.exe
 
   macos:
     needs: version
@@ -293,7 +293,7 @@ jobs:
         run: |
           ./packaging/macos/build-app.sh "$PWD/out" "${{ needs.version.outputs.version }}" "${{ matrix.arch }}"
           ls -lah dist/
-          test -f "dist/RetComM-Launcher-${{ needs.version.outputs.version }}-macos-${{ matrix.arch }}.dmg"
+          test -f "dist/RetComM-Launcher-macos-${{ matrix.arch }}.dmg"
           test -d "dist/RetComM Launcher.app/Contents/Resources/fonts"
           test -f "dist/RetComM Launcher.app/Contents/Resources/fonts/LatoLatin-Regular.ttf"
 
@@ -301,7 +301,7 @@ jobs:
         with:
           name: macos-${{ matrix.arch }}
           path: |
-            dist/RetComM-Launcher-*-macos-${{ matrix.arch }}.dmg
+            dist/RetComM-Launcher-macos-${{ matrix.arch }}.dmg
 
   publish:
     needs: [version, linux, windows, macos]
@@ -321,12 +321,12 @@ jobs:
           find artifacts -type f \( -name '*.AppImage' -o -name '*.exe' -o -name '*.dmg' \) -exec cp -v {} dist/ \;
           ls -lah dist/
           test -n "$(ls -A dist)" || { echo "No release artifacts found" >&2; exit 1; }
-          # Guaranteed end-user set (no zips).
-          test -n "$(ls dist/*-linux-*.AppImage 2>/dev/null)"
-          test -n "$(ls dist/*-windows-*-setup.exe 2>/dev/null)"
-          test -n "$(ls dist/*-windows-portable.exe 2>/dev/null)"
-          test -n "$(ls dist/*-macos-arm64.dmg 2>/dev/null)"
-          test -n "$(ls dist/*-macos-x86_64.dmg 2>/dev/null)"
+          # Guaranteed end-user set (no zips). Stable names (version is the release tag).
+          test -f dist/RetComM-Launcher-linux-x86_64.AppImage
+          test -f dist/RetComM-Launcher-windows-x64-setup.exe
+          test -f dist/RetComM-Launcher-windows-portable.exe
+          test -f dist/RetComM-Launcher-macos-arm64.dmg
+          test -f dist/RetComM-Launcher-macos-x86_64.dmg
 
       - name: Ensure release tag exists
         env:

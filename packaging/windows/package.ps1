@@ -15,7 +15,8 @@ $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $OutDir = Join-Path $Root "dist"
 $Stage = Join-Path $OutDir "windows-stage"
-$PortableName = "RetComM-Launcher-$Version-windows-portable.exe"
+# Stable filename (no version): self-update replaces the portable stub in place.
+$PortableName = "RetComM-Launcher-windows-portable.exe"
 
 Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null

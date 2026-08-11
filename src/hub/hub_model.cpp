@@ -2732,7 +2732,12 @@ void HubModel::apply_pending_file_pick() {
             pending_import_toast_kind = "rom";
         }
         scans_platform_filter = platform;
-        pending_scan_missing_rom_id.clear();
+        // Import from the missing-ROM install prompt passes title_id — keep it so
+        // the post-scan follow-up can resume (found → ready to Install).
+        if (!title_id.empty())
+            pending_scan_missing_rom_id = title_id;
+        else
+            pending_scan_missing_rom_id.clear();
         set_status("Imported ROM — scanning " + std::string(platform_label(platform)) + "…");
         start_job(HubJob::ScanRoms);
         return;
@@ -3339,14 +3344,11 @@ bool HubModel::prepare_build_rom_or_prompt(const std::string& title_id) {
     }
 
     refresh_rows(false);
-    if (!t->has_rom_identity()) {
-        set_status("No verified ROM for " + title_id);
-        return true;
-    }
+    // Always prompt — Rescan / Import / RomM (disabled if sync not set up) / Cancel.
     missing_rom_prompt_id = title_id;
     show_missing_rom_prompt = true;
-    set_status(had_stale_bind ? "ROM missing from disk — scan or download from RomM"
-                              : "No verified ROM — scan or download from RomM");
+    set_status(had_stale_bind ? "ROM missing from disk — rescan, import, or download from RomM"
+                              : "No verified ROM — rescan, import, or download from RomM");
     return true;
 }
 

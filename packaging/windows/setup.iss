@@ -35,7 +35,8 @@ DisableProgramGroupPage=yes
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir={#OutputDir}
-OutputBaseFilename=RetComM-Launcher-{#MyAppVersion}-windows-{#Arch}-setup
+; Stable download name (no version): AppVersion still carries MyAppVersion.
+OutputBaseFilename=RetComM-Launcher-windows-{#Arch}-setup
 SetupIconFile={#StageDir}\retcomm.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2

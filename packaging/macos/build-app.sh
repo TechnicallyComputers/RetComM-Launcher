@@ -106,7 +106,8 @@ else
 fi
 
 # Drag-to-Applications DMG (.app + /Applications symlink).
-DMG="${OUT_DIR}/RetComM-Launcher-${VERSION}-macos-${ARCH}.dmg"
+# Stable filename (no version): version is in Info.plist / release tag only.
+DMG="${OUT_DIR}/RetComM-Launcher-macos-${ARCH}.dmg"
 VOLUME_NAME="RetComM Launcher"
 STAGE="${OUT_DIR}/dmg-staging"
 RW_DMG="${OUT_DIR}/.retcomm-dmg-rw.dmg"

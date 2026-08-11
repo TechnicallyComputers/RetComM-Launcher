@@ -266,7 +266,7 @@ std::string unsupported_hint() {
            "Install to Applications, launch that app, then use Update RetComM.";
 #else
     return "Self-update needs the Linux AppImage. "
-           "Launch RetComM-Launcher-*-linux-*.AppImage, then use Update RetComM.";
+           "Launch RetComM-Launcher-linux-*.AppImage, then use Update RetComM.";
 #endif
 }
 
