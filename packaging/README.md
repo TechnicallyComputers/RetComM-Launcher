@@ -117,7 +117,7 @@ Produces under `dist/`:
 | Artifact | Role |
 |---|---|
 | `RetComM Launcher.exe` | Single-file portable stub + payload (local; not the GitHub asset) |
-| `RetComM-Launcher-portable-windows.zip` | Release zip wrapping that exe |
+| `RetComM-Launcher-portable-windows.zip` | Release zip; root entry is `RetComM Launcher.exe` (no nested folder) |
 | `RetComM-Launcher-windows-x64-setup.exe` | Per-user Inno Setup installer (Start Menu / desktop) |
 
 Portable usage (after unzipping the release zip):
@@ -132,8 +132,10 @@ Self-update channels (detected via `channel.json` / env from the portable stub):
 - **installer** (primary) → downloads `RetComM-Launcher-windows-*-setup.exe`, silent Inno into the current install dir
 - **portable** → downloads `RetComM-Launcher-portable-windows.zip`, extracts the stub, replaces the desktop exe, re-extracts on next launch
 
-Apply logs (after a failed/successful Windows self-update):
-`%LOCALAPPDATA%\retcomm\self-update\bin\apply_setup_update.log` or
-`apply_portable_update.log`.
+Apply scripts/logs (Windows PowerShell; Unicode-safe path args):
+`%LOCALAPPDATA%\retcomm\self-update\bin\apply_setup_update.ps1` /
+`apply_setup_update.log`, or `apply_portable_update.ps1` /
+`apply_portable_update.log`. Installer apply aborts if the hub PID is still
+alive after 120s (avoids Inno fighting locked files).
 
 Loose/dev copies without `channel.json` cannot self-update.

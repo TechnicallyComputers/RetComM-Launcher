@@ -46,6 +46,14 @@ copy (identical shards keep mtimes). SDK harvest into
 `sdks/psxrecomp-tools/<tag>/` is also content-aware. Pass `force_generate`
 (Hub **Generate & Rebuild**) to rebuild C from the disc again.
 
+**CMake configure reuse:** after a successful `cmake -S/-B`, RetComM writes
+`src/current/<build>/.retcomm-cmake-configure.json` capturing the conf argv,
+toolchain tag/path, and a size+mtime manifest of every `CMakeLists.txt` /
+`*.cmake` under the source tree (excluding `build/` and generated/). Host/UI
+updates that do not touch those inputs skip configure and go straight to
+`cmake --build`. Changing cmake files, the toolchain, `-DPSX_NETPLAY`, or using
+**Generate & Rebuild** (wipes `build/`) forces a fresh configure.
+
 **Setup-host vs raw zip:** catalog titles with `build.enabled` treat the GitHub
 release zip as *source* for generate+cmake (`install_title_auto` /
 `update_title_auto`). Blind zip extract would replace a built Play binary with

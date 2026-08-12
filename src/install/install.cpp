@@ -720,23 +720,93 @@ fs::path resolve_launch_binary(const fs::path& root, const std::string& expected
     return best.path;
 }
 
+std::string unique_release_suffix() {
+    const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
+#if defined(_WIN32)
+    return std::to_string(GetCurrentProcessId()) + "-" + std::to_string(ticks);
+#else
+    return std::to_string(static_cast<unsigned>(::getpid())) + "-" + std::to_string(ticks);
+#endif
+}
+
+// Forward declaration — defined below out of the anonymous namespace for build.cpp.
+} // namespace
+
 bool promote_staging_to_release(const fs::path& staging, const fs::path& release_dir,
-                                std::string* error) {
+                                std::string* error, fs::path* outgoing_for_cleanup) {
     std::error_code ec;
-    fs::remove_all(release_dir, ec);
-    fs::create_directories(release_dir.parent_path(), ec);
+    const fs::path parent = release_dir.parent_path();
+    fs::create_directories(parent, ec);
+
+    // Land staging at a sibling .new first so a failed promote never leaves
+    // release_dir half-wiped (current/ may still point at it).
+    const fs::path incoming = parent / (release_dir.filename().string() + ".new");
+    fs::remove_all(incoming, ec);
     ec.clear();
-    fs::rename(staging, release_dir, ec);
-    if (!ec) return true;
-    ec.clear();
-    fs::copy(staging, release_dir, fs::copy_options::recursive, ec);
-    fs::remove_all(staging, ec);
+    fs::rename(staging, incoming, ec);
     if (ec) {
-        if (error) *error = ec.message();
-        return false;
+        std::error_code copy_ec;
+        fs::copy(staging, incoming,
+                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, copy_ec);
+        if (copy_ec) {
+            if (error) *error = "stage to .new failed: " + copy_ec.message();
+            return false;
+        }
+        std::error_code rm_ec;
+        fs::remove_all(staging, rm_ec); // best-effort; copy succeeded
+    }
+
+    fs::path outgoing;
+    bool have_outgoing = false;
+    if (fs::exists(release_dir, ec) || fs::is_symlink(release_dir, ec)) {
+        outgoing =
+            parent / (release_dir.filename().string() + ".old-" + unique_release_suffix());
+        ec.clear();
+        fs::rename(release_dir, outgoing, ec);
+        if (ec) {
+            // Refuse to delete a live tree (game may be running / binary locked).
+            std::error_code rm_ec;
+            fs::remove_all(incoming, rm_ec);
+            if (error)
+                *error = "cannot replace live release (is the game running?): " + ec.message();
+            return false;
+        }
+        have_outgoing = true;
+    }
+
+    auto restore_outgoing = [&]() {
+        if (!have_outgoing) return;
+        std::error_code rec_ec;
+        if (!fs::exists(release_dir, rec_ec))
+            fs::rename(outgoing, release_dir, rec_ec);
+    };
+
+    ec.clear();
+    fs::rename(incoming, release_dir, ec);
+    if (ec) {
+        std::error_code copy_ec;
+        fs::copy(incoming, release_dir,
+                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, copy_ec);
+        if (copy_ec) {
+            restore_outgoing();
+            std::error_code rm_ec;
+            fs::remove_all(incoming, rm_ec);
+            if (error) *error = "promote into release dir failed: " + copy_ec.message();
+            return false;
+        }
+        std::error_code rm_ec;
+        fs::remove_all(incoming, rm_ec);
+    }
+
+    if (have_outgoing) {
+        if (outgoing_for_cleanup)
+            *outgoing_for_cleanup = outgoing;
+        // Else leave .old-* for prune_old_release_dirs after install.json.
     }
     return true;
 }
+
+namespace {
 
 void make_executable(const fs::path& p) {
 #if !defined(_WIN32)
@@ -959,14 +1029,17 @@ void set_current_symlink(const fs::path& install_root, const std::string& tag) {
 #if defined(_WIN32)
     // Directory junction / symlink — may require privileges; fall back to text pointer.
     fs::create_directory_symlink(install_root / target, link, ec);
-    if (ec) {
-        std::ofstream ptr(ptr_path);
-        ptr << target.string();
-    }
 #else
     fs::create_directory_symlink(target, link, ec);
-    if (ec) throw std::runtime_error("cannot create current symlink: " + ec.message());
 #endif
+    if (ec) {
+        // Never leave the install without a current pointer after removing the link.
+        std::ofstream ptr(ptr_path);
+        if (!ptr)
+            throw std::runtime_error("cannot create current symlink or current.path: " +
+                                     ec.message());
+        ptr << target.generic_string();
+    }
 }
 
 fs::path resolve_current_dir(const fs::path& install_root) {
@@ -1328,7 +1401,11 @@ OldReleaseCleanupResult cleanup_old_release_dirs(const Paths& paths, const Catal
         }
 
         std::string stash_note;
-        stash_user_state_for_update(paths, title, &stash_note);
+        if (!stash_user_state_for_update(paths, title, &stash_note)) {
+            result.messages.push_back(title.id + ": stash failed — skipped prune (" + stash_note +
+                                      ")");
+            continue;
+        }
         fs::path current = resolve_current_release_dir(install_root);
         if (current.empty()) {
             // Fall back to releases/<sanitized keep_tag>.
@@ -1379,16 +1456,16 @@ void restore_user_state(const fs::path& install_root, const fs::path& release_di
             normalize_preserved_rel(rel_posix_under(preserved, it->path()));
         if (rel.empty() || !is_user_state_path(rel, {})) continue;
         const fs::path dest = release_dir / rel;
-        if (fs::exists(dest, ec)) continue;
         fs::create_directories(dest.parent_path(), ec);
-        fs::copy_file(it->path(), dest, fs::copy_options::skip_existing, ec);
+        // Preserved user state wins over any defaults shipped in the package.
+        fs::copy_file(it->path(), dest, fs::copy_options::overwrite_existing, ec);
         if (!ec) ++n;
     }
     if (note && n > 0)
         *note = "restored " + std::to_string(n) + " preserved save/config file(s) into release\n";
 }
 
-void stash_user_state_for_update(const Paths& paths, const Title& title, std::string* note) {
+bool stash_user_state_for_update(const Paths& paths, const Title& title, std::string* note) {
     const AppConfig cfg = load_app_config(paths.config_path);
     const InstallPlan plan = inspect_install_any(paths, cfg, title);
     const fs::path install_root = plan.install_root.empty()
@@ -1428,6 +1505,7 @@ void stash_user_state_for_update(const Paths& paths, const Title& title, std::st
         else if (n > 0)
             *note = "preserved " + std::to_string(n) + " save/config file(s)\n";
     }
+    return err.empty();
 }
 
 bool extract_archive_to(const fs::path& archive, const fs::path& dest, std::string* error) {
@@ -2086,8 +2164,12 @@ InstallResult install_title(const Paths& paths_in, const Title& title, const Ins
     make_executable(binary);
 
     // Keep saves + user config across same-tag force reinstall / overwrite.
+    // Abort before promote so a stash I/O failure cannot lose the only copy.
     std::string stash_note;
-    stash_user_state_for_update(paths, title, &stash_note);
+    if (!stash_user_state_for_update(paths, title, &stash_note)) {
+        result.message = "failed to preserve saves/config before update: " + stash_note;
+        return result;
+    }
 
     if (!promote_staging_to_release(staging, release_dir, &err)) {
         result.message = "failed to place release dir: " + err;
@@ -2112,6 +2194,9 @@ InstallResult install_title(const Paths& paths_in, const Title& title, const Ins
     const fs::path rel_bin = fs::relative(binary, release_dir, ec);
     set_current_symlink(install_root, tag);
 
+    std::string restore_note;
+    restore_user_state(install_root, release_dir, &restore_note);
+
     InstallRecord rec;
     rec.title_id = title.id;
     rec.github = title.release.github;
@@ -2125,14 +2210,14 @@ InstallResult install_title(const Paths& paths_in, const Title& title, const Ins
     rec.release_url = rel.html_url;
     rec.method = "zip";
     if (!save_install_record(install_root, rec)) {
-        result.message = "installed files but failed to write install.json";
+        // current/ already flipped — keep .old-* siblings for manual recovery.
+        result.message = "installed files but failed to write install.json "
+                         "(old release folders kept for recovery)";
         return result;
     }
 
     // Keep download cache for resume / faster reinstalls and hub prefetch.
-
-    std::string restore_note;
-    restore_user_state(install_root, release_dir, &restore_note);
+    // Prune only after install.json is durable.
     std::string prune_note;
     prune_old_release_dirs(install_root, tag, &prune_note);
 

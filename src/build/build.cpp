@@ -107,13 +107,15 @@ bool activate_pack_tree(const fs::path& staging, const fs::path& dest, fs::path*
     progress(on_progress, "Activating " + pack_label + "…");
     fs::rename(staging, incoming, ec);
     if (ec) {
+        std::error_code copy_ec;
         fs::copy(staging, incoming,
-                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-        fs::remove_all(staging, ec);
-        if (ec) {
-            if (error) *error = "pack stage failed: " + ec.message();
+                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, copy_ec);
+        if (copy_ec) {
+            if (error) *error = "pack stage failed: " + copy_ec.message();
             return false;
         }
+        std::error_code rm_ec;
+        fs::remove_all(staging, rm_ec); // best-effort; copy succeeded
     }
 
     if (fs::exists(dest, ec)) {
@@ -122,10 +124,11 @@ bool activate_pack_tree(const fs::path& staging, const fs::path& dest, fs::path*
         fs::rename(dest, outgoing, ec);
         if (ec) {
             progress(on_progress, "Removing previous " + pack_label + "…");
-            fs::remove_all(dest, ec);
-            if (ec) {
+            std::error_code rm_ec;
+            fs::remove_all(dest, rm_ec);
+            if (rm_ec) {
                 fs::remove_all(incoming, ec);
-                if (error) *error = "cannot replace existing pack: " + ec.message();
+                if (error) *error = "cannot replace existing pack: " + rm_ec.message();
                 return false;
             }
         } else if (outgoing_for_cleanup) {
@@ -136,13 +139,15 @@ bool activate_pack_tree(const fs::path& staging, const fs::path& dest, fs::path*
     ec.clear();
     fs::rename(incoming, dest, ec);
     if (ec) {
+        std::error_code copy_ec;
         fs::copy(incoming, dest,
-                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, ec);
-        fs::remove_all(incoming, ec);
-        if (ec) {
-            if (error) *error = "pack install failed: " + ec.message();
+                 fs::copy_options::recursive | fs::copy_options::overwrite_existing, copy_ec);
+        if (copy_ec) {
+            if (error) *error = "pack install failed: " + copy_ec.message();
             return false;
         }
+        std::error_code rm_ec;
+        fs::remove_all(incoming, rm_ec);
     }
     return true;
 }
@@ -2076,6 +2081,97 @@ std::string read_cmake_cache_generator(const fs::path& cache_file) {
     return {};
 }
 
+// Manifest of CMakeLists.txt + *.cmake under src_root (size+mtime rows).
+// Content-aware source sync preserves mtimes on identical bytes, so this skips
+// reconfigure when only non-cmake sources changed.
+std::vector<std::string> collect_cmake_input_rows(const fs::path& src_root,
+                                                  const fs::path& build_rel) {
+    std::error_code ec;
+    const std::string build_key = build_rel.empty() ? std::string("build")
+                                                    : build_rel.generic_string();
+    std::vector<std::string> lines;
+    for (auto it = fs::recursive_directory_iterator(
+             src_root, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        const fs::path p = it->path();
+        const std::string rel = path_rel_key(src_root, p);
+        if (rel.empty()) continue;
+        if (rel == build_key || rel.rfind(build_key + "/", 0) == 0) {
+            if (it->is_directory(ec)) it.disable_recursion_pending();
+            continue;
+        }
+        if (rel_is_codegen_artifact(rel)) {
+            if (it->is_directory(ec)) it.disable_recursion_pending();
+            continue;
+        }
+        if (rel == ".git" || rel.rfind(".git/", 0) == 0 || rel == "disc" ||
+            rel.rfind("disc/", 0) == 0 || rel == "bpe" || rel.rfind("bpe/", 0) == 0 ||
+            rel == "motk" || rel.rfind("motk/", 0) == 0) {
+            if (it->is_directory(ec)) it.disable_recursion_pending();
+            continue;
+        }
+        if (!it->is_regular_file(ec)) continue;
+        const std::string name = p.filename().string();
+        const bool is_cmake_lists = name == "CMakeLists.txt";
+        const bool is_cmake_mod =
+            name.size() > 6 && name.compare(name.size() - 6, 6, ".cmake") == 0;
+        if (!is_cmake_lists && !is_cmake_mod) continue;
+        std::error_code sec, tec;
+        const auto sz = fs::file_size(p, sec);
+        const auto ft = fs::last_write_time(p, tec);
+        if (sec || tec) continue;
+        const auto mtime =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(ft.time_since_epoch())
+                .count();
+        lines.push_back(rel + "\t" + std::to_string(static_cast<unsigned long long>(sz)) +
+                        "\t" + std::to_string(static_cast<long long>(mtime)));
+    }
+    std::sort(lines.begin(), lines.end());
+    return lines;
+}
+
+json make_cmake_configure_stamp(const std::vector<std::string>& conf,
+                                const std::string& toolchain_tag,
+                                const fs::path& path_prefix,
+                                const fs::path& src_root, const fs::path& build_rel) {
+    json j;
+    j["schema"] = 1;
+    j["conf"] = conf;
+    j["toolchain_tag"] = toolchain_tag;
+    j["path_prefix"] = path_prefix.generic_string();
+    j["cmake_files"] = collect_cmake_input_rows(src_root, build_rel);
+    return j;
+}
+
+bool cmake_configure_stamp_matches(const fs::path& stamp_path, const json& want) {
+    std::error_code ec;
+    if (!fs::is_regular_file(stamp_path, ec)) return false;
+    try {
+        std::ifstream in(stamp_path);
+        const json have = json::parse(in);
+        return have == want;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool cmake_build_tree_ready(const fs::path& build_dir) {
+    std::error_code ec;
+    if (!fs::is_regular_file(build_dir / "CMakeCache.txt", ec)) return false;
+    // Ninja or Makefile generators both OK — stamp captures the conf argv.
+    if (fs::is_regular_file(build_dir / "build.ninja", ec)) return true;
+    if (fs::is_regular_file(build_dir / "Makefile", ec)) return true;
+    return false;
+}
+
+void write_cmake_configure_stamp(const fs::path& stamp_path, const json& stamp) {
+    try {
+        std::ofstream out(stamp_path);
+        out << stamp.dump(2) << "\n";
+    } catch (...) {
+    }
+}
+
 int run_capture_lines(const std::string& cmd, const fs::path& cwd,
                       const std::function<void(const std::string&)>& on_line,
                       std::string* combined_err) {
@@ -2160,10 +2256,14 @@ bool stage_build_output(const fs::path& src_root, const fs::path& build_dir,
                         const std::string& launch_name, const fs::path& release_dir,
                         const std::string& game_config_rel, std::string* error) {
     std::error_code ec;
-    fs::remove_all(release_dir, ec);
-    fs::create_directories(release_dir, ec);
+    // Stage into a sibling tree, then rename-aside into release_dir so a live
+    // current/ → releases/<tag> is never wiped mid-update.
+    const fs::path staging =
+        release_dir.parent_path() / (release_dir.filename().string() + ".build-staging");
+    fs::remove_all(staging, ec);
+    fs::create_directories(staging, ec);
     if (ec) {
-        if (error) *error = "create release dir: " + ec.message();
+        if (error) *error = "create staging dir: " + ec.message();
         return false;
     }
 
@@ -2177,7 +2277,7 @@ bool stage_build_output(const fs::path& src_root, const fs::path& build_dir,
         return false;
     }
 
-    const fs::path dest_bin = release_dir / binary.filename();
+    const fs::path dest_bin = staging / binary.filename();
     fs::copy_file(binary, dest_bin, fs::copy_options::overwrite_existing, ec);
     if (ec) {
         if (error) *error = "copy binary: " + ec.message();
@@ -2186,22 +2286,22 @@ bool stage_build_output(const fs::path& src_root, const fs::path& build_dir,
     make_executable(dest_bin);
 
     const fs::path exe_dir = binary.parent_path();
-    if (!copy_tree_if_exists(exe_dir / "assets", release_dir / "assets", error)) return false;
-    if (!copy_tree_if_exists(src_root / "VERSION", release_dir / "VERSION", error)) return false;
+    if (!copy_tree_if_exists(exe_dir / "assets", staging / "assets", error)) return false;
+    if (!copy_tree_if_exists(src_root / "VERSION", staging / "VERSION", error)) return false;
     // Bundled OpenBIOS: runtime resolves bios/openbios.bin beside the Play exe.
     // CMake POST_BUILD stages it next to the build binary — ship that unit into
     // the release dir. Prefer the staged tree (openbios.bin + MIT notice only);
     // do not copy a title-root bios/ wholesale (may contain retail dumps).
-    if (!copy_tree_if_exists(exe_dir / "bios", release_dir / "bios", error)) return false;
-    if (!fs::is_regular_file(release_dir / "bios" / "openbios.bin", ec)) {
+    if (!copy_tree_if_exists(exe_dir / "bios", staging / "bios", error)) return false;
+    if (!fs::is_regular_file(staging / "bios" / "openbios.bin", ec)) {
         for (const fs::path& cand :
              {src_root / "psxrecomp" / "bios", src_root / "bios"}) {
             const fs::path src_bin = cand / "openbios.bin";
             if (!fs::is_regular_file(src_bin, ec)) continue;
-            if (!copy_tree_if_exists(src_bin, release_dir / "bios" / "openbios.bin", error))
+            if (!copy_tree_if_exists(src_bin, staging / "bios" / "openbios.bin", error))
                 return false;
             copy_tree_if_exists(cand / "OpenBIOS.LICENSE",
-                                release_dir / "bios" / "OpenBIOS.LICENSE", error);
+                                staging / "bios" / "OpenBIOS.LICENSE", error);
             break;
         }
     }
@@ -2211,22 +2311,22 @@ bool stage_build_output(const fs::path& src_root, const fs::path& build_dir,
         const fs::path cfg_rel =
             game_config_rel.empty() ? fs::path("game.toml") : fs::path(game_config_rel);
         const fs::path cfg_name = cfg_rel.filename();
-        if (!copy_tree_if_exists(src_root / cfg_rel, release_dir / cfg_name, error)) return false;
-        if (!fs::exists(release_dir / cfg_name, ec)) {
+        if (!copy_tree_if_exists(src_root / cfg_rel, staging / cfg_name, error)) return false;
+        if (!fs::exists(staging / cfg_name, ec)) {
             // Also try next to the built binary (some projects copy it POST_BUILD).
-            copy_tree_if_exists(exe_dir / cfg_name, release_dir / cfg_name, error);
+            copy_tree_if_exists(exe_dir / cfg_name, staging / cfg_name, error);
         }
     }
     // Fallback assets from source tree (recomp-ui POST_BUILD may not have run yet).
-    if (!fs::exists(release_dir / "assets" / "fonts", ec)) {
+    if (!fs::exists(staging / "assets" / "fonts", ec)) {
         copy_tree_if_exists(src_root / "recomp-ui" / "assets" / "fonts",
-                            release_dir / "assets" / "fonts", error);
+                            staging / "assets" / "fonts", error);
     }
-    if (!fs::exists(release_dir / "assets" / "img", ec)) {
-        copy_tree_if_exists(src_root / "recomp" / "launcher", release_dir / "assets" / "img",
+    if (!fs::exists(staging / "assets" / "img", ec)) {
+        copy_tree_if_exists(src_root / "recomp" / "launcher", staging / "assets" / "img",
                             error);
     }
-    return true;
+    return promote_staging_to_release(staging, release_dir, error);
 }
 
 std::string first_digest(const std::vector<std::string>& v) {
@@ -3039,13 +3139,16 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
     }
 
     const fs::path build_dir = src.root / title.build.cmake.build_dir;
+    const fs::path build_rel = title.build.cmake.build_dir.empty()
+                                   ? fs::path("build")
+                                   : fs::path(title.build.cmake.build_dir);
+    const fs::path configure_stamp_path = build_dir / ".retcomm-cmake-configure.json";
     // Keep build/ across normal Update / --force so ninja stays incremental.
     // Only wipe when the caller asks for a full regenerate from disc.
     if (opts.force_generate) {
         progress(opts.on_progress, "Cleaning previous cmake build…", 0.52f);
         fs::remove_all(build_dir, ec);
     }
-    progress(opts.on_progress, "Configuring cmake…", 0.55f);
     std::string cmake_log;
     std::vector<std::string> conf = {"cmake", "-S", src.root.string(), "-B",
                                      build_dir.string()};
@@ -3106,25 +3209,42 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
         }
 #endif
     }
+
+    const json configure_want =
+        make_cmake_configure_stamp(conf, tc.tag, path_prefix, src.root, build_rel);
+    const bool skip_configure =
+        !opts.force_generate && cmake_build_tree_ready(build_dir) &&
+        cmake_configure_stamp_matches(configure_stamp_path, configure_want);
+
     const auto stream_cli = [&](const std::string& line) {
         if (opts.on_output) opts.on_output(line);
     };
-    if (opts.on_output) {
-        std::ostringstream cmd_preview;
-        for (size_t i = 0; i < conf.size(); ++i) {
-            if (i) cmd_preview << ' ';
-            cmd_preview << conf[i];
-        }
-        opts.on_output("$ " + cmd_preview.str());
-    }
     const auto tc_cmake_env = toolchain_cmake_env(path_prefix);
-    int crc_rc =
-        run_with_path(conf, src.root, path_prefix, &cmake_log, stream_cli, tc_cmake_env);
-    if (crc_rc != 0) {
-        result.message = fail_with_log(
-            "cmake configure failed (exit " + std::to_string(crc_rc) + ")", cmake_log,
-            opts.on_output);
-        return result;
+
+    if (skip_configure) {
+        progress(opts.on_progress, "Reusing cmake configure (inputs unchanged)…", 0.55f);
+        if (opts.on_output)
+            opts.on_output("note: skipped cmake -S/-B (stamp match under " +
+                           configure_stamp_path.string() + ")");
+    } else {
+        progress(opts.on_progress, "Configuring cmake…", 0.55f);
+        if (opts.on_output) {
+            std::ostringstream cmd_preview;
+            for (size_t i = 0; i < conf.size(); ++i) {
+                if (i) cmd_preview << ' ';
+                cmd_preview << conf[i];
+            }
+            opts.on_output("$ " + cmd_preview.str());
+        }
+        const int crc_rc =
+            run_with_path(conf, src.root, path_prefix, &cmake_log, stream_cli, tc_cmake_env);
+        if (crc_rc != 0) {
+            result.message = fail_with_log(
+                "cmake configure failed (exit " + std::to_string(crc_rc) + ")", cmake_log,
+                opts.on_output);
+            return result;
+        }
+        write_cmake_configure_stamp(configure_stamp_path, configure_want);
     }
 
     progress(opts.on_progress, "Building " + title.build.cmake.target + "…", 0.65f);
@@ -3159,7 +3279,10 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
     const std::string launch_name = title.launch_binary_for_host();
 
     std::string stash_note;
-    stash_user_state_for_update(paths, title, &stash_note);
+    if (!stash_user_state_for_update(paths, title, &stash_note)) {
+        result.message = "failed to preserve saves/config before update: " + stash_note;
+        return result;
+    }
 
     std::string stage_err;
     if (!stage_build_output(src.root, build_dir, launch_name, release_dir,
@@ -3175,8 +3298,6 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
 
     std::string restore_note;
     restore_user_state(install_root, release_dir, &restore_note);
-    std::string prune_note;
-    prune_old_release_dirs(install_root, pin_tag, &prune_note);
 
     InstallRecord rec;
     rec.title_id = title.id;
@@ -3203,9 +3324,12 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
     rec.bios_source =
         (opts.use_openbios || opts.bios_path.empty()) ? "openbios" : "retail";
     if (!save_install_record(install_root, rec)) {
-        result.message = "built but failed to write install.json";
+        result.message = "built but failed to write install.json "
+                         "(old release folders kept for recovery)";
         return result;
     }
+    std::string prune_note;
+    prune_old_release_dirs(install_root, pin_tag, &prune_note);
     if (!rec.source_ref.empty() && rec.source_ref != "main" && rec.source_ref != "master" &&
         rec.source_ref != "override")
         sync_release_tag_cache(paths, title, rec.source_ref);

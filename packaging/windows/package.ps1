@@ -253,11 +253,22 @@ if (-not $PortableStub -or -not (Test-Path $PortableStub)) {
     Remove-Item $PayloadZip -Force -ErrorAction SilentlyContinue
     Write-Host "Portable exe: $OutPortableExe (stub $($stubBytes.Length) + payload $($zipBytes.Length))"
 
-    # Release asset users download — unzip to get "RetComM Launcher.exe" on the desktop.
+    # Release asset: flat zip root = "RetComM Launcher.exe" (no nested folder).
+    # Compress-Archive with a full path can store a parent segment; ZipFile does not.
     $OutPortableZip = Join-Path $OutDir $PortableZipName
     if (Test-Path $OutPortableZip) { Remove-Item $OutPortableZip -Force }
-    Compress-Archive -Path $OutPortableExe -DestinationPath $OutPortableZip
-    Write-Host "Portable zip: $OutPortableZip"
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::Open(
+        $OutPortableZip,
+        [System.IO.Compression.ZipArchiveMode]::Create)
+    try {
+        [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+            $zip, $OutPortableExe, $PortableExeName,
+            [System.IO.Compression.CompressionLevel]::Optimal)
+    } finally {
+        $zip.Dispose()
+    }
+    Write-Host "Portable zip: $OutPortableZip (entry: $PortableExeName)"
 }
 
 # --- Inno Setup installer ---

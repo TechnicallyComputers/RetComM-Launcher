@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <string>
 #include <vector>
 
 #if defined(_WIN32)
@@ -83,10 +84,19 @@ bool match_glob(const std::string& pattern, const std::string& name) {
 
 fs::path current_executable_path() {
 #if defined(_WIN32)
-    char buf[MAX_PATH]{};
-    const DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return {};
-    return fs::path(buf);
+    DWORD cap = MAX_PATH;
+    std::wstring buf(cap, L'\0');
+    for (;;) {
+        const DWORD n = GetModuleFileNameW(nullptr, buf.data(), cap);
+        if (n == 0) return {};
+        if (n < cap) {
+            buf.resize(n);
+            return fs::path(buf);
+        }
+        if (cap >= 32768) return {};
+        cap *= 2;
+        buf.assign(cap, L'\0');
+    }
 #elif defined(__APPLE__)
     char buf[4096];
     uint32_t size = sizeof(buf);
@@ -358,47 +368,73 @@ bool save_launcher_state(const Paths& paths, const std::string& tag, const std::
 #define CREATE_BREAKAWAY_FROM_JOB 0x01000000
 #endif
 
-// Sanitize a path for embedding in mshta javascript:alert('...').
-std::string mshta_path_literal(const fs::path& p) {
-    std::string s = p.generic_string();
-    for (char& c : s) {
-        if (c == '\'') c = ' ';
+std::wstring win_getenv_w(const wchar_t* name) {
+    const DWORD n = GetEnvironmentVariableW(name, nullptr, 0);
+    if (n == 0) return {};
+    std::wstring buf(n, L'\0');
+    const DWORD got = GetEnvironmentVariableW(name, buf.data(), n);
+    if (got == 0 || got >= n) return {};
+    buf.resize(got);
+    return buf;
+}
+
+std::wstring utf8_to_wstring(const std::string& u8) {
+    if (u8.empty()) return {};
+    const int n = MultiByteToWideChar(CP_UTF8, 0, u8.data(), static_cast<int>(u8.size()), nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring out(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, u8.data(), static_cast<int>(u8.size()), out.data(), n);
+    return out;
+}
+
+std::string wstring_to_utf8(const std::wstring& w) {
+    if (w.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0,
+                                      nullptr, nullptr);
+    if (n <= 0) return {};
+    std::string out(static_cast<size_t>(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), out.data(), n, nullptr,
+                        nullptr);
+    return out;
+}
+
+fs::path path_from_utf8(const std::string& u8) {
+    const std::wstring w = utf8_to_wstring(u8);
+    return w.empty() ? fs::path(u8) : fs::path(w);
+}
+
+// PowerShell single-quoted literal (double embedded quotes).
+std::wstring ps_single_quote(const fs::path& p) {
+    std::wstring out = L"'";
+    for (wchar_t c : p.wstring()) {
+        if (c == L'\'') out += L"''";
+        else out += c;
     }
-    return s;
+    out += L"'";
+    return out;
 }
 
-// Locale-proof PID wait via hidden PowerShell (no tasklist|findstr pipe).
-// That pipe spawned visible consoles titled findstr /C:"PID" and could hang
-// forever with no timeout. Caller must have set PID=; on timeout jumps to
-// timeout_label (must exist). timeout_sec is wall-clock seconds.
-void write_bat_wait_for_pid(std::ostream& out, int timeout_sec, const char* timeout_label) {
-    if (timeout_sec < 1) timeout_sec = 1;
-    // Single powershell.exe: polls Get-Process until gone or deadline.
-    // Already-exited PID is success (SilentlyContinue). exit 1 = timeout.
-    out << "powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command "
-           "\"$p=!PID!; $d=(Get-Date).AddSeconds("
-        << timeout_sec
-        << "); while ((Get-Date) -lt $d) { "
-           "if (-not (Get-Process -Id $p -ErrorAction SilentlyContinue)) { exit 0 }; "
-           "Start-Sleep -Milliseconds 400 }; exit 1\"\r\n"
-        << "if errorlevel 1 goto " << timeout_label << "\r\n";
-}
-
-// Fire-and-forget a .bat with no console window. Avoid std::system / "cmd /C start"
-// — those spawn visible CMD windows. Also avoid DETACHED_PROCESS: combined with
-// CREATE_NO_WINDOW it lets console children (findstr/powershell) allocate new
-// visible consoles.
-bool schedule_bat(const fs::path& script, std::string* error) {
+std::wstring find_powershell_exe() {
     wchar_t sys_dir[MAX_PATH]{};
-    const UINT n = GetSystemDirectoryW(sys_dir, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) {
-        if (error) *error = "GetSystemDirectoryW failed";
-        return false;
+    if (GetSystemDirectoryW(sys_dir, MAX_PATH) == 0) return L"powershell.exe";
+    // System32\WindowsPowerShell\v1.0\powershell.exe
+    std::wstring p = std::wstring(sys_dir) + L"\\WindowsPowerShell\\v1.0\\powershell.exe";
+    if (GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES) return p;
+    return L"powershell.exe";
+}
+
+// Fire-and-forget hidden powershell -File <script> <args…>.
+// Paths must be passed as -Arg '…' (ps_single_quote) — never embed in .bat.
+bool schedule_powershell(const fs::path& script, const std::wstring& extra_args, std::string* error) {
+    const std::wstring ps = find_powershell_exe();
+    std::wstring cmdline = L"\"" + ps +
+                           L"\" -NoProfile -NonInteractive -WindowStyle Hidden "
+                           L"-ExecutionPolicy Bypass -File \"" +
+                           script.wstring() + L"\"";
+    if (!extra_args.empty()) {
+        cmdline += L" ";
+        cmdline += extra_args;
     }
-    const std::wstring cmd_exe = std::wstring(sys_dir) + L"\\cmd.exe";
-    // cmd /c ""C:\path\script.bat"" — nested quotes required when the path is quoted.
-    std::wstring cmdline =
-        L"\"" + cmd_exe + L"\" /c \"\"" + script.wstring() + L"\"\"";
     std::vector<wchar_t> mutable_cmd(cmdline.begin(), cmdline.end());
     mutable_cmd.push_back(L'\0');
 
@@ -410,9 +446,8 @@ bool schedule_bat(const fs::path& script, std::string* error) {
     const std::wstring cwd = script.parent_path().wstring();
     auto try_spawn = [&](DWORD flags) -> bool {
         ZeroMemory(&pi, sizeof(pi));
-        return CreateProcessW(cmd_exe.c_str(), mutable_cmd.data(), nullptr, nullptr, FALSE,
-                              flags, nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si,
-                              &pi) != 0;
+        return CreateProcessW(ps.c_str(), mutable_cmd.data(), nullptr, nullptr, FALSE, flags,
+                              nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si, &pi) != 0;
     };
     DWORD flags = CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB;
     if (!try_spawn(flags)) {
@@ -429,159 +464,187 @@ bool schedule_bat(const fs::path& script, std::string* error) {
     return true;
 }
 
+bool write_text_file(const fs::path& path, const std::string& utf8_body, std::string* error) {
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        if (error) *error = "cannot write " + path.string();
+        return false;
+    }
+    // UTF-8 BOM so Windows PowerShell 5.1 parses non-ASCII in -File scripts reliably.
+    const unsigned char bom[] = {0xEF, 0xBB, 0xBF};
+    out.write(reinterpret_cast<const char*>(bom), 3);
+    out.write(utf8_body.data(), static_cast<std::streamsize>(utf8_body.size()));
+    return static_cast<bool>(out);
+}
+
+/* Trailer: uint64 LE payload size + "RCM1" (see win_portable_main.cpp). */
+bool looks_like_retcomm_portable_stub(const fs::path& p) {
+    std::error_code ec;
+    if (!fs::is_regular_file(p, ec)) return false;
+    const auto sz = fs::file_size(p, ec);
+    if (ec || sz < 12) return false;
+    std::ifstream in(p, std::ios::binary);
+    if (!in) return false;
+    in.seekg(static_cast<std::streamoff>(sz - 12));
+    unsigned char buf[12]{};
+    in.read(reinterpret_cast<char*>(buf), 12);
+    if (in.gcount() != 12) return false;
+    return buf[8] == 'R' && buf[9] == 'C' && buf[10] == 'M' && buf[11] == '1';
+}
+
 bool schedule_replace_portable_and_restart(const fs::path& new_portable, const fs::path& dest_portable,
                                            std::string* error) {
     const DWORD pid = GetCurrentProcessId();
-    const fs::path script = new_portable.parent_path() / "apply_portable_update.bat";
+    const fs::path script = new_portable.parent_path() / "apply_portable_update.ps1";
     const fs::path log_path = new_portable.parent_path() / "apply_portable_update.log";
-    const std::string log_js = mshta_path_literal(log_path);
-    {
-        std::ofstream out(script);
-        if (!out) {
-            if (error) *error = "cannot write apply script";
-            return false;
-        }
-        // Harden replace: retry + rename dance; only invalidate/relaunch if the
-        // new bytes land at dest. A failed copy used to delete version.txt and
-        // restart the old stub (same version forever).
-        out << "@echo off\r\n"
-            << "setlocal EnableExtensions EnableDelayedExpansion\r\n"
-            << "set PID=" << pid << "\r\n"
-            << "set \"NEW=" << new_portable.string() << "\"\r\n"
-            << "set \"DEST=" << dest_portable.string() << "\"\r\n"
-            << "set \"OLD=!DEST!.retcomm-old\"\r\n"
-            << "set \"LOG=" << log_path.string() << "\"\r\n"
-            << "echo RetComM portable update > \"!LOG!\"\r\n"
-            << "echo NEW=!NEW!>> \"!LOG!\"\r\n"
-            << "echo DEST=!DEST!>> \"!LOG!\"\r\n"
-            << "echo Waiting for PID !PID!>> \"!LOG!\"\r\n";
-        // 120s wall clock. On timeout still try replace — the portable stub is not
-        // locked by the hub (hub runs from %LOCALAPPDATA%\retcomm\portable\current).
-        write_bat_wait_for_pid(out, 120, "wait_timeout");
-        out << "goto wait_done\r\n"
-            << ":wait_timeout\r\n"
-            << "echo Timed out waiting for PID !PID! — continuing>> \"!LOG!\"\r\n"
-            << ":wait_done\r\n"
-            << "if not exist \"!NEW!\" (\r\n"
-            << "  echo Staged portable missing>> \"!LOG!\"\r\n"
-            << "  goto fail\r\n"
-            << ")\r\n"
-            << "del /F /Q \"!OLD!\" 2>NUL\r\n"
-            << "set TRIES=0\r\n"
-            << ":retry\r\n"
-            << "set /a TRIES+=1\r\n"
-            << "if !TRIES! GTR 40 (\r\n"
-            << "  echo Replace retries exhausted>> \"!LOG!\"\r\n"
-            << "  goto fail\r\n"
-            << ")\r\n"
-            << "echo Attempt !TRIES!>> \"!LOG!\"\r\n"
-            << "if exist \"!DEST!\" (\r\n"
-            << "  move /Y \"!DEST!\" \"!OLD!\" >> \"!LOG!\" 2>&1\r\n"
-            << "  if errorlevel 1 (\r\n"
-            << "    ping -n 2 127.0.0.1 >NUL\r\n"
-            << "    goto retry\r\n"
-            << "  )\r\n"
-            << ")\r\n"
-            << "copy /Y \"!NEW!\" \"!DEST!\" >> \"!LOG!\" 2>&1\r\n"
-            << "if errorlevel 1 (\r\n"
-            << "  if exist \"!OLD!\" move /Y \"!OLD!\" \"!DEST!\" >> \"!LOG!\" 2>&1\r\n"
-            << "  ping -n 2 127.0.0.1 >NUL\r\n"
-            << "  goto retry\r\n"
-            << ")\r\n"
-            << "for %%A in (\"!NEW!\") do set NEWSIZE=%%~zA\r\n"
-            << "for %%A in (\"!DEST!\") do set DESTSIZE=%%~zA\r\n"
-            << "if not \"!NEWSIZE!\"==\"!DESTSIZE!\" (\r\n"
-            << "  echo Size mismatch NEW=!NEWSIZE! DEST=!DESTSIZE!>> \"!LOG!\"\r\n"
-            << "  del /F /Q \"!DEST!\" 2>NUL\r\n"
-            << "  if exist \"!OLD!\" move /Y \"!OLD!\" \"!DEST!\" >> \"!LOG!\" 2>&1\r\n"
-            << "  ping -n 2 127.0.0.1 >NUL\r\n"
-            << "  goto retry\r\n"
-            << ")\r\n"
-            << "del /F /Q \"!OLD!\" 2>NUL\r\n"
-            << "echo Replace OK size=!DESTSIZE!>> \"!LOG!\"\r\n"
-            // Invalidate extracted runtime so the new stub re-unpacks.
-            << "del /Q \"%LOCALAPPDATA%\\retcomm\\portable\\version.txt\" 2>NUL\r\n"
-            << ":relaunch\r\n"
-            << "if exist \"!DEST!\" start \"\" \"!DEST!\"\r\n"
-            << "exit /b 0\r\n"
-            << ":fail\r\n"
-            << "echo FAILED>> \"!LOG!\"\r\n"
-            << "if exist \"!OLD!\" if not exist \"!DEST!\" move /Y \"!OLD!\" \"!DEST!\" >> \"!LOG!\" 2>&1\r\n"
-            << "mshta \"javascript:alert('RetComM portable update failed to replace the "
-               "exe.\\n\\nMove it out of Downloads/OneDrive if needed, ensure the folder "
-               "is writable, then try Update again.\\n\\nLog:\\n"
-            << log_js << "');close()\"\r\n"
-            << "goto relaunch\r\n";
+    // Paths are CLI args (Unicode-safe). Stub is not locked by the hub process, so a
+    // wait timeout still attempts replace.
+    const char* body = R"ps1(
+param(
+  [Parameter(Mandatory=$true)][int]$WaitPid,
+  [Parameter(Mandatory=$true)][string]$New,
+  [Parameter(Mandatory=$true)][string]$Dest,
+  [Parameter(Mandatory=$true)][string]$Log
+)
+$ErrorActionPreference = 'Continue'
+function Log([string]$m) { Add-Content -LiteralPath $Log -Value $m -Encoding UTF8 }
+function Fail-And-Relaunch([string]$OldPath) {
+  Log 'FAILED'
+  if ((Test-Path -LiteralPath $OldPath) -and -not (Test-Path -LiteralPath $Dest)) {
+    Move-Item -LiteralPath $OldPath -Destination $Dest -Force -ErrorAction SilentlyContinue
+  }
+  $msg = "RetComM portable update failed to replace the exe.`n`nMove it out of Downloads/OneDrive if needed, ensure the folder is writable, then try Update again.`n`nLog:`n" + $Log
+  try {
+    Add-Type -AssemblyName System.Windows.Forms
+    [void][System.Windows.Forms.MessageBox]::Show($msg, 'RetComM Launcher')
+  } catch {}
+  if (Test-Path -LiteralPath $Dest) { Start-Process -FilePath $Dest }
+  exit 1
+}
+Log 'RetComM portable update'
+Log ("NEW=" + $New)
+Log ("DEST=" + $Dest)
+Log ("Waiting for PID " + $WaitPid)
+$deadline = (Get-Date).AddSeconds(120)
+while ((Get-Date) -lt $deadline) {
+  if (-not (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue)) { break }
+  Start-Sleep -Milliseconds 400
+}
+if (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue) {
+  Log ("Timed out waiting for PID " + $WaitPid + " — continuing")
+}
+if (-not (Test-Path -LiteralPath $New)) {
+  Log 'Staged portable missing'
+  Fail-And-Relaunch ($Dest + '.retcomm-old')
+}
+$Old = $Dest + '.retcomm-old'
+Remove-Item -LiteralPath $Old -Force -ErrorAction SilentlyContinue
+$ok = $false
+for ($tries = 1; $tries -le 40; $tries++) {
+  Log ("Attempt " + $tries)
+  try {
+    if (Test-Path -LiteralPath $Dest) {
+      Move-Item -LiteralPath $Dest -Destination $Old -Force -ErrorAction Stop
     }
-    return schedule_bat(script, error);
+    Copy-Item -LiteralPath $New -Destination $Dest -Force -ErrorAction Stop
+    $ns = (Get-Item -LiteralPath $New).Length
+    $ds = (Get-Item -LiteralPath $Dest).Length
+    if ($ns -ne $ds) { throw "Size mismatch NEW=$ns DEST=$ds" }
+    Remove-Item -LiteralPath $Old -Force -ErrorAction SilentlyContinue
+    Log ("Replace OK size=" + $ds)
+    $ok = $true
+    break
+  } catch {
+    Log ("Attempt failed: " + $_)
+    if ((Test-Path -LiteralPath $Old) -and -not (Test-Path -LiteralPath $Dest)) {
+      Move-Item -LiteralPath $Old -Destination $Dest -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Seconds 1
+  }
+}
+if (-not $ok) { Fail-And-Relaunch $Old }
+$ver = Join-Path $env:LOCALAPPDATA 'retcomm\portable\version.txt'
+Remove-Item -LiteralPath $ver -Force -ErrorAction SilentlyContinue
+if (Test-Path -LiteralPath $Dest) { Start-Process -FilePath $Dest }
+exit 0
+)ps1";
+    if (!write_text_file(script, body, error)) return false;
+    const std::wstring args = L"-WaitPid " + std::to_wstring(pid) + L" -New " +
+                              ps_single_quote(new_portable) + L" -Dest " +
+                              ps_single_quote(dest_portable) + L" -Log " + ps_single_quote(log_path);
+    return schedule_powershell(script, args, error);
 }
 
 bool schedule_run_setup_and_restart(const fs::path& setup_exe, const fs::path& install_dir,
                                     std::string* error) {
     const DWORD pid = GetCurrentProcessId();
-    const fs::path script = setup_exe.parent_path() / "apply_setup_update.bat";
+    const fs::path script = setup_exe.parent_path() / "apply_setup_update.ps1";
     const fs::path log_path = setup_exe.parent_path() / "apply_setup_update.log";
-    const std::string log_js = mshta_path_literal(log_path);
     const fs::path hub_exe = install_dir / "retcomm-hub.exe";
-    {
-        std::ofstream out(script);
-        if (!out) {
-            if (error) *error = "cannot write apply script";
-            return false;
-        }
-        // Wait for hub exit (with timeout). Do not use /CLOSEAPPLICATIONS — the hub
-        // exits on its own; forcing closes mid-shutdown caused hangs/failed applies.
-        // Always relaunch hub — a bare "exit /b 1" on wait timeout left users stuck.
-        out << "@echo off\r\n"
-            << "setlocal EnableExtensions EnableDelayedExpansion\r\n"
-            << "set PID=" << pid << "\r\n"
-            << "set \"SETUP=" << setup_exe.string() << "\"\r\n"
-            << "set \"DIR=" << install_dir.string() << "\"\r\n"
-            << "set \"HUB=" << hub_exe.string() << "\"\r\n"
-            << "set \"LOG=" << log_path.string() << "\"\r\n"
-            << "echo RetComM installer update > \"!LOG!\"\r\n"
-            << "echo SETUP=!SETUP!>> \"!LOG!\"\r\n"
-            << "echo DIR=!DIR!>> \"!LOG!\"\r\n"
-            << "echo HUB=!HUB!>> \"!LOG!\"\r\n"
-            << "echo Waiting for PID !PID!>> \"!LOG!\"\r\n";
-        write_bat_wait_for_pid(out, 120, "wait_timeout");
-        out << "goto wait_done\r\n"
-            << ":wait_timeout\r\n"
-            << "echo Timed out waiting for PID !PID! — continuing>> \"!LOG!\"\r\n"
-            << ":wait_done\r\n"
-            << "if not exist \"!SETUP!\" (\r\n"
-            << "  echo Staged setup missing>> \"!LOG!\"\r\n"
-            << "  goto fail\r\n"
-            << ")\r\n"
-            << "echo Running setup>> \"!LOG!\"\r\n"
-            << "start /wait \"\" \"!SETUP!\" /VERYSILENT /NORESTART /SUPPRESSMSGBOXES "
-               "/CURRENTUSER /DIR=\"!DIR!\"\r\n"
-            << "set SETUP_RC=!errorlevel!\r\n"
-            << "echo Setup exit=!SETUP_RC!>> \"!LOG!\"\r\n"
-            << "if not \"!SETUP_RC!\"==\"0\" (\r\n"
-            << "  echo Setup failed>> \"!LOG!\"\r\n"
-            << "  goto fail\r\n"
-            << ")\r\n"
-            << "if not exist \"!HUB!\" (\r\n"
-            << "  echo Hub missing after setup>> \"!LOG!\"\r\n"
-            << "  goto fail\r\n"
-            << ")\r\n"
-            << "echo Setup OK — relaunching>> \"!LOG!\"\r\n"
-            << ":relaunch\r\n"
-            << "if exist \"!HUB!\" (\r\n"
-            << "  start \"\" /D \"!DIR!\" \"!HUB!\"\r\n"
-            << ") else (\r\n"
-            << "  echo Cannot relaunch — hub missing>> \"!LOG!\"\r\n"
-            << ")\r\n"
-            << "exit /b 0\r\n"
-            << ":fail\r\n"
-            << "echo FAILED>> \"!LOG!\"\r\n"
-            << "mshta \"javascript:alert('RetComM installer update failed.\\n\\n"
-               "Try running the setup from the GitHub release manually.\\n\\nLog:\\n"
-            << log_js << "');close()\"\r\n"
-            << "goto relaunch\r\n";
-    }
-    return schedule_bat(script, error);
+    // Hub holds install-dir locks — do NOT run setup if it is still alive after timeout.
+    const char* body = R"ps1(
+param(
+  [Parameter(Mandatory=$true)][int]$WaitPid,
+  [Parameter(Mandatory=$true)][string]$Setup,
+  [Parameter(Mandatory=$true)][string]$Dir,
+  [Parameter(Mandatory=$true)][string]$Hub,
+  [Parameter(Mandatory=$true)][string]$Log
+)
+$ErrorActionPreference = 'Continue'
+function Log([string]$m) { Add-Content -LiteralPath $Log -Value $m -Encoding UTF8 }
+function Fail-And-Relaunch {
+  Log 'FAILED'
+  $msg = "RetComM installer update failed.`n`nTry running the setup from the GitHub release manually.`n`nLog:`n" + $Log
+  try {
+    Add-Type -AssemblyName System.Windows.Forms
+    [void][System.Windows.Forms.MessageBox]::Show($msg, 'RetComM Launcher')
+  } catch {}
+  if (Test-Path -LiteralPath $Hub) {
+    Start-Process -FilePath $Hub -WorkingDirectory $Dir
+  }
+  exit 1
+}
+Log 'RetComM installer update'
+Log ("SETUP=" + $Setup)
+Log ("DIR=" + $Dir)
+Log ("HUB=" + $Hub)
+Log ("Waiting for PID " + $WaitPid)
+$deadline = (Get-Date).AddSeconds(120)
+while ((Get-Date) -lt $deadline) {
+  if (-not (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue)) { break }
+  Start-Sleep -Milliseconds 400
+}
+if (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue) {
+  Log ("Timed out waiting for PID " + $WaitPid + " — aborting (hub may still lock files)")
+  Fail-And-Relaunch
+}
+if (-not (Test-Path -LiteralPath $Setup)) {
+  Log 'Staged setup missing'
+  Fail-And-Relaunch
+}
+Log 'Running setup'
+$p = Start-Process -FilePath $Setup -ArgumentList @(
+  '/VERYSILENT', '/NORESTART', '/SUPPRESSMSGBOXES', '/CURRENTUSER', ("/DIR=" + $Dir)
+) -Wait -PassThru
+Log ("Setup exit=" + $p.ExitCode)
+if ($p.ExitCode -ne 0) {
+  Log 'Setup failed'
+  Fail-And-Relaunch
+}
+if (-not (Test-Path -LiteralPath $Hub)) {
+  Log 'Hub missing after setup'
+  Fail-And-Relaunch
+}
+Log 'Setup OK — relaunching'
+Start-Process -FilePath $Hub -WorkingDirectory $Dir
+exit 0
+)ps1";
+    if (!write_text_file(script, body, error)) return false;
+    const std::wstring args =
+        L"-WaitPid " + std::to_wstring(pid) + L" -Setup " + ps_single_quote(setup_exe) +
+        L" -Dir " + ps_single_quote(install_dir) + L" -Hub " + ps_single_quote(hub_exe) +
+        L" -Log " + ps_single_quote(log_path);
+    return schedule_powershell(script, args, error);
 }
 #else
 bool schedule_shell(const fs::path& script, std::string* error) {
@@ -683,8 +746,8 @@ bool schedule_retcomm_relaunch_impl(std::string* error) {
     // Prefer a writable temp dir — AppImage mount points are often read-only.
     fs::path script_dir;
 #if defined(_WIN32)
-    char tmp[MAX_PATH]{};
-    const DWORD n = GetTempPathA(MAX_PATH, tmp);
+    wchar_t tmp[MAX_PATH]{};
+    const DWORD n = GetTempPathW(MAX_PATH, tmp);
     if (n > 0 && n < MAX_PATH) script_dir = fs::path(tmp);
 #else
     if (const char* t = std::getenv("TMPDIR"); t && *t) script_dir = t;
@@ -695,22 +758,23 @@ bool schedule_retcomm_relaunch_impl(std::string* error) {
 
 #if defined(_WIN32)
     const DWORD pid = GetCurrentProcessId();
-    const fs::path script = script_dir / "retcomm_relaunch.bat";
-    {
-        std::ofstream out(script);
-        if (!out) {
-            if (error) *error = "cannot write relaunch script";
-            return false;
-        }
-        out << "@echo off\r\n"
-            << "setlocal EnableExtensions EnableDelayedExpansion\r\n"
-            << "set PID=" << pid << "\r\n"
-            << "set \"LAUNCH=" << launch.string() << "\"\r\n";
-        write_bat_wait_for_pid(out, 120, "wait_done");
-        out << ":wait_done\r\n"
-            << "if exist \"!LAUNCH!\" start \"\" \"!LAUNCH!\"\r\n";
-    }
-    return schedule_bat(script, error);
+    const fs::path script = script_dir / "retcomm_relaunch.ps1";
+    const char* body = R"ps1(
+param(
+  [Parameter(Mandatory=$true)][int]$WaitPid,
+  [Parameter(Mandatory=$true)][string]$Launch
+)
+$deadline = (Get-Date).AddSeconds(120)
+while ((Get-Date) -lt $deadline) {
+  if (-not (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue)) { break }
+  Start-Sleep -Milliseconds 400
+}
+if (Test-Path -LiteralPath $Launch) { Start-Process -FilePath $Launch }
+)ps1";
+    if (!write_text_file(script, body, error)) return false;
+    const std::wstring args =
+        L"-WaitPid " + std::to_wstring(pid) + L" -Launch " + ps_single_quote(launch);
+    return schedule_powershell(script, args, error);
 #else
     const pid_t pid = ::getpid();
     const fs::path script = script_dir / ("retcomm_relaunch_" + std::to_string(pid) + ".sh");
@@ -760,9 +824,13 @@ RetcommInstallInfo retcomm_install_info() {
 #if defined(_WIN32)
     fs::path portable_exe;
     std::string channel_env;
-    if (const char* env = std::getenv("RETCOMM_INSTALL_CHANNEL")) channel_env = to_lower(env);
-    if (const char* pe = std::getenv("RETCOMM_PORTABLE_EXE")) {
-        if (*pe) portable_exe = fs::path(pe);
+    {
+        const std::wstring ch = win_getenv_w(L"RETCOMM_INSTALL_CHANNEL");
+        if (!ch.empty()) channel_env = to_lower(wstring_to_utf8(ch));
+    }
+    {
+        const std::wstring pe = win_getenv_w(L"RETCOMM_PORTABLE_EXE");
+        if (!pe.empty()) portable_exe = fs::path(pe);
     }
     const fs::path exe = current_executable_path();
     std::string channel_file;
@@ -771,7 +839,7 @@ RetcommInstallInfo retcomm_install_info() {
         if (ch.is_object()) {
             channel_file = to_lower(ch.value("channel", ""));
             const std::string pe = ch.value("portable_exe", "");
-            if (!pe.empty() && portable_exe.empty()) portable_exe = pe;
+            if (!pe.empty() && portable_exe.empty()) portable_exe = path_from_utf8(pe);
         }
     }
     const bool want_portable =
@@ -945,25 +1013,44 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
                 return fail(result, "unpack portable zip failed: " + err);
             }
             source_exe.clear();
-            const fs::path preferred = unpack / "RetComM Launcher.exe";
-            if (fs::is_regular_file(preferred, ec)) {
-                source_exe = preferred;
-            } else {
+            auto try_name = [&](const char* name) -> fs::path {
+                const fs::path direct = unpack / name;
+                if (fs::is_regular_file(direct, ec) && looks_like_retcomm_portable_stub(direct))
+                    return direct;
                 for (auto it = fs::recursive_directory_iterator(
                          unpack, fs::directory_options::skip_permission_denied, ec);
                      !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
                     if (!it->is_regular_file(ec)) continue;
-                    const auto name = it->path().filename().string();
-                    const auto lower = to_lower(name);
+                    if (it->path().filename() != name) continue;
+                    if (looks_like_retcomm_portable_stub(it->path())) return it->path();
+                }
+                return {};
+            };
+            source_exe = try_name("RetComM Launcher.exe");
+            if (source_exe.empty())
+                source_exe = try_name("RetComM-Launcher-windows-portable.exe");
+            if (source_exe.empty()) {
+                /* Last resort: any .exe with RCM1 trailer (never pick setup/random). */
+                for (auto it = fs::recursive_directory_iterator(
+                         unpack, fs::directory_options::skip_permission_denied, ec);
+                     !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+                    if (!it->is_regular_file(ec)) continue;
+                    const auto lower = to_lower(it->path().filename().string());
                     if (!ends_with_ci(lower, ".exe")) continue;
                     if (lower.find("setup") != std::string::npos) continue;
-                    source_exe = it->path();
-                    if (lower.find("launcher") != std::string::npos) break;
+                    if (looks_like_retcomm_portable_stub(it->path())) {
+                        source_exe = it->path();
+                        break;
+                    }
                 }
             }
             if (source_exe.empty() || !fs::is_regular_file(source_exe, ec)) {
-                return fail(result, "portable zip has no launcher .exe: " + asset->name);
+                return fail(result,
+                            "portable zip has no RetComM Launcher stub (RCM1): " + asset->name);
             }
+        } else if (!looks_like_retcomm_portable_stub(source_exe)) {
+            return fail(result, "downloaded portable asset is not a RetComM stub (missing RCM1): " +
+                                    asset->name);
         }
 
         fs::copy_file(source_exe, staged_portable, fs::copy_options::overwrite_existing, ec);

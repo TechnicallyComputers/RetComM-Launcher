@@ -182,11 +182,20 @@ OrphanCleanupResult cleanup_removed_catalog_titles(const Paths& paths, const Cat
 
 // Stash saves + user config from existing release trees into
 // apps/<install>/preserved/ before a wipe/rebuild/update.
-// Restores into a newly staged release_dir (skip_existing).
-void stash_user_state_for_update(const Paths& paths, const Title& title,
+// Returns false if a matching file could not be copied (caller must abort update).
+bool stash_user_state_for_update(const Paths& paths, const Title& title,
                                  std::string* note = nullptr);
+// Restores preserved saves/config into release_dir. User-state paths overwrite
+// package defaults so shipped settings.toml / keybinds cannot clobber the stash.
 void restore_user_state(const fs::path& install_root, const fs::path& release_dir,
                         std::string* note = nullptr);
+
+// Replace release_dir with staging via rename-aside (never delete the live tree
+// first). On success, a previous release_dir may be left at *outgoing_for_cleanup
+// for the caller to remove after current/ + install.json are committed.
+bool promote_staging_to_release(const fs::path& staging, const fs::path& release_dir,
+                                std::string* error = nullptr,
+                                fs::path* outgoing_for_cleanup = nullptr);
 
 // apps/<title>/current → releases/<tag> (empty if unset / missing).
 fs::path resolve_current_release_dir(const fs::path& install_root);
