@@ -3960,11 +3960,26 @@ InstallResult install_title_auto(const Paths& paths, const Title& title,
         return build_title(paths, title, b);
     };
 
-    // Setup-host / one-zip catalogs: the GitHub asset is a SOURCE pack (wizard +
-    // emitters), not a finished Play binary — always generate+cmake locally.
-    // Dual-mode titles (release zip + build recipe) also take this path unless
-    // prefer_prebuilt was set (InstallPrebuilt / Wine).
-    if (can_build) return run_build();
+    // Setup-host / one-zip catalogs: the GitHub asset is normally a SOURCE pack
+    // (wizard + emitters) → generate+cmake. Dual-mode titles that already ship
+    // the catalog launch binary inside that zip (Tomba, etc.) install prebuilt.
+    // prefer_prebuilt (InstallPrebuilt / Wine) always forces zip extract.
+    if (can_build) {
+        if (title.supports_prebuilt_install()) {
+            Paths job_paths = with_apps_dir(paths, iopts.apps_dir);
+            auto zip = resolve_title_release_zip(job_paths, title, iopts, {});
+            if (zip.ok && !zip.zip_path.empty()) {
+                const std::string target_os = iopts.use_wine ? "windows" : host_os_key();
+                const std::string launch = title.launch_binary_for_os(target_os);
+                if (!launch.empty() && archive_contains_named_file(zip.zip_path, launch)) {
+                    InstallOptions pre = iopts;
+                    pre.prefer_prebuilt = true;
+                    return install_title(job_paths, title, pre);
+                }
+            }
+        }
+        return run_build();
+    }
     return install_title(paths, title, iopts);
 }
 
@@ -3986,6 +4001,21 @@ InstallResult update_title_auto(const Paths& paths, const Title& title,
     const bool can_build =
         !iopts.prefer_prebuilt && (was_build || title.supports_local_build());
     const bool can_zip = title.supports_prebuilt_install();
+
+    // Dual-mode playable zips (launch binary present): update via prebuilt extract
+    // instead of treating the asset as setup-host source.
+    if (can_build && can_zip) {
+        auto zip = resolve_title_release_zip(job_paths, title, iopts, {});
+        if (zip.ok && !zip.zip_path.empty()) {
+            const std::string target_os = iopts.use_wine ? "windows" : host_os_key();
+            const std::string launch = title.launch_binary_for_os(target_os);
+            if (!launch.empty() && archive_contains_named_file(zip.zip_path, launch)) {
+                InstallOptions pre = iopts;
+                pre.prefer_prebuilt = true;
+                return update_title(job_paths, title, pre);
+            }
+        }
+    }
 
     // Setup-host titles: pull latest release zip as source and rebuild.
     // codegen-cache skips disc→C when ROM/BIOS/emitter fingerprints match, so

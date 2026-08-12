@@ -732,6 +732,114 @@ std::string unique_release_suffix() {
 // Forward declaration — defined below out of the anonymous namespace for build.cpp.
 } // namespace
 
+namespace {
+
+bool basename_eq_ci_zip(std::string entry, const std::string& want) {
+    while (!entry.empty() && (entry.back() == '/' || entry.back() == '\\')) entry.pop_back();
+    if (entry.empty() || want.empty()) return false;
+    const auto slash = entry.find_last_of("/\\");
+    if (slash != std::string::npos) entry = entry.substr(slash + 1);
+    if (entry.size() != want.size()) return false;
+    for (size_t i = 0; i < entry.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(entry[i])) !=
+            std::tolower(static_cast<unsigned char>(want[i])))
+            return false;
+    }
+    return true;
+}
+
+bool listing_mentions_basename(const fs::path& listing_file, const std::string& filename) {
+    std::ifstream in(listing_file);
+    if (!in) return false;
+    std::string line;
+    while (std::getline(in, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (line.empty()) continue;
+        if (basename_eq_ci_zip(line, filename)) return true;
+        const auto sp = line.find_last_of(" \t");
+        if (sp != std::string::npos && basename_eq_ci_zip(line.substr(sp + 1), filename))
+            return true;
+    }
+    return false;
+}
+
+} // namespace
+
+bool archive_contains_named_file(const fs::path& archive, const std::string& filename) {
+    if (filename.empty() || archive.empty()) return false;
+    std::error_code ec;
+    if (!fs::is_regular_file(archive, ec)) return false;
+
+    const fs::path tmp =
+        fs::temp_directory_path(ec) /
+        ("retcomm-zip-list-" +
+         std::to_string(
+#if defined(_WIN32)
+             GetCurrentProcessId()
+#else
+             static_cast<unsigned>(::getpid())
+#endif
+                 ) +
+         ".txt");
+    if (ec) return false;
+
+    auto cleanup = [&]() {
+        std::error_code rm;
+        fs::remove(tmp, rm);
+    };
+
+#if defined(_WIN32)
+    std::string err;
+    bool listed = false;
+    if (win_exe_on_path(L"tar") && win_exe_on_path(L"powershell")) {
+        const std::wstring cmd =
+            L"& tar.exe -tf '" + win_ps_single_quote(archive) +
+            L"' | Out-File -Encoding utf8 '" + win_ps_single_quote(tmp) + L"'";
+        listed = win_run_hidden(L"powershell.exe",
+                                {L"-NoProfile", L"-ExecutionPolicy", L"Bypass", L"-Command", cmd},
+                                &err) == 0;
+    }
+    if (!listed && ends_with_ci(archive.filename().string(), ".zip") &&
+        win_exe_on_path(L"powershell")) {
+        const std::wstring cmd =
+            L"Add-Type -AssemblyName System.IO.Compression.FileSystem; "
+            L"[IO.Compression.ZipFile]::OpenRead('" +
+            win_ps_single_quote(archive) +
+            L"').Entries | ForEach-Object { $_.FullName } | Out-File -Encoding utf8 '" +
+            win_ps_single_quote(tmp) + L"'";
+        listed = win_run_hidden(L"powershell.exe",
+                                {L"-NoProfile", L"-ExecutionPolicy", L"Bypass", L"-Command", cmd},
+                                &err) == 0;
+    }
+    if (!listed) {
+        cleanup();
+        return false;
+    }
+#else
+    std::string err;
+    bool listed = false;
+    const std::string out_redir = " >" + shell_quote(tmp) + " 2>/dev/null";
+    if (tool_on_path_unix("bsdtar")) {
+        listed = run_cmd("bsdtar -tf " + shell_quote(archive) + out_redir, &err) == 0;
+    }
+    if (!listed && ends_with_ci(archive.filename().string(), ".zip") &&
+        tool_on_path_unix("unzip")) {
+        listed = run_cmd("unzip -Z1 " + shell_quote(archive) + out_redir, &err) == 0;
+    }
+    if (!listed && tool_on_path_unix("tar")) {
+        listed = run_cmd("tar -tf " + shell_quote(archive) + out_redir, &err) == 0;
+    }
+    if (!listed) {
+        cleanup();
+        return false;
+    }
+#endif
+
+    const bool hit = listing_mentions_basename(tmp, filename);
+    cleanup();
+    return hit;
+}
+
 bool promote_staging_to_release(const fs::path& staging, const fs::path& release_dir,
                                 std::string* error, fs::path* outgoing_for_cleanup) {
     std::error_code ec;

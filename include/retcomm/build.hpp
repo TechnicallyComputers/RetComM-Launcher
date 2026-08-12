@@ -99,14 +99,16 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
 InstallResult build_title(const Paths& paths, const Title& title, const BuildOptions& opts = {});
 
 // Setup-host / one-zip titles (build.enabled): release zip is SOURCE → generate+cmake.
-// Pure prebuilt titles: zip extract. prefer_prebuilt forces zip extract.
+// Dual-mode titles whose release zip already contains the catalog launch binary
+// (e.g. Tomba) take the prebuilt extract path. prefer_prebuilt forces zip extract.
 InstallResult install_title_auto(const Paths& paths, const Title& title,
                                  const InstallOptions& install_opts = {},
                                  const BuildOptions& build_opts = {});
 
 // Setup-host titles: overlay latest release zip onto src/current and cmake-build
 // incrementally; codegen-cache skips regenerate when ROM/BIOS/emitters match.
-// Pure prebuilt: zip extract. Generate & Rebuild sets force_generate.
+// Dual-mode playable zips update via prebuilt extract. Generate & Rebuild sets
+// force_generate.
 InstallResult update_title_auto(const Paths& paths, const Title& title,
                                 const InstallOptions& install_opts = {},
                                 const BuildOptions& build_opts = {});

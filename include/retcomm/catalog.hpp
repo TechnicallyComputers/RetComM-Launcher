@@ -157,10 +157,9 @@ struct Title {
     bool supports_local_build() const;
     // True when a prebuilt GitHub release zip can still be installed.
     bool supports_prebuilt_install() const;
-    // Matches install_title_auto: with prefer_prebuilt=false, Install runs the
-    // local generate+cmake path whenever a build recipe exists — even if a
-    // finished zip is also advertised. Hub ROM prompts must use this, not
-    // "!supports_prebuilt_install()", or dual-mode titles skip the chooser.
+    // With prefer_prebuilt=false, true when a local generate+cmake recipe exists.
+    // Hub uses this for ROM prompts. install_title_auto may still choose the
+    // prebuilt zip when that archive already contains the launch binary.
     bool prefers_local_build_install(bool prefer_prebuilt = false) const;
 };
 
