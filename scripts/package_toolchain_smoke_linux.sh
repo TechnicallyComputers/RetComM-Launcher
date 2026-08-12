@@ -23,6 +23,10 @@ REAL_NINJA=""
 if command -v ninja >/dev/null 2>&1; then
   REAL_NINJA="$(readlink -f "$(command -v ninja)")"
 fi
+REAL_CCACHE=""
+if command -v ccache >/dev/null 2>&1; then
+  REAL_CCACHE="$(readlink -f "$(command -v ccache)")"
+fi
 
 rm -rf "$STAGE"
 mkdir -p "$STAGE/bin" "$OUT"
@@ -39,6 +43,14 @@ if [[ -n "$REAL_NINJA" ]]; then
 exec "$REAL_NINJA" "\$@"
 EOF
   chmod +x "$STAGE/bin/ninja"
+fi
+
+if [[ -n "$REAL_CCACHE" ]]; then
+  cat >"$STAGE/bin/ccache" <<EOF
+#!/usr/bin/env bash
+exec "$REAL_CCACHE" "\$@"
+EOF
+  chmod +x "$STAGE/bin/ccache"
 fi
 
 for tool in clang clang++ c++ g++; do

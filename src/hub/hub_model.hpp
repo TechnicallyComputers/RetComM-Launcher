@@ -452,7 +452,7 @@ struct HubModel {
     std::atomic<bool> prefetch_running{false};
     std::atomic<bool> prefetch_cancel{false}; // SelfUpdate / exit: stop between titles
     std::thread prefetch_worker;
-    // After idle: CheckUpdates (catalog → launcher → games → toolchain).
+    // After idle: CheckUpdates (catalog → launcher → toolchain → games).
     bool pending_startup_update_check = false;
     // Brief top-of-window notice (import / scan results). Main thread times display.
     std::string toast_message; // guarded by mu

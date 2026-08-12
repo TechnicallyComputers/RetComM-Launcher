@@ -2137,6 +2137,20 @@ bool cmake_cache_compilers_stale(const fs::path& cache_file, const fs::path& wan
     return check("CMAKE_C_COMPILER", want_c) || check("CMAKE_CXX_COMPILER", want_cxx);
 }
 
+// True when CMakeCache was created under a different source or build absolute path
+// (e.g. apps_dir moved from ~/.local/share/retcomm/apps to a custom install root).
+// cmake -S/-B against that cache fails with "different than the directory …".
+bool cmake_cache_paths_stale(const fs::path& cache_file, const fs::path& want_src,
+                              const fs::path& want_build) {
+    std::error_code ec;
+    if (!fs::is_regular_file(cache_file, ec)) return false;
+    const std::string home = read_cmake_cache_entry(cache_file, "CMAKE_HOME_DIRECTORY");
+    if (!home.empty() && !same_compiler_path(fs::path(home), want_src)) return true;
+    const std::string cache_dir = read_cmake_cache_entry(cache_file, "CMAKE_CACHEFILE_DIR");
+    if (!cache_dir.empty() && !same_compiler_path(fs::path(cache_dir), want_build)) return true;
+    return false;
+}
+
 // Manifest of CMakeLists.txt + *.cmake under src_root (size+mtime rows).
 // Content-aware source sync preserves mtimes on identical bytes, so this skips
 // reconfigure when only non-cmake sources changed.
@@ -3226,6 +3240,11 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
     // not honor a new -DCMAKE_C_COMPILER over a locked cache entry.
     {
         const fs::path cache_file = build_dir / "CMakeCache.txt";
+        if (cmake_cache_paths_stale(cache_file, src.root, build_dir)) {
+            progress(opts.on_progress,
+                     "Replacing cmake cache (source/build path moved)…", 0.54f);
+            fs::remove_all(build_dir, ec);
+        }
         const bool have_ninja =
             !path_prefix.empty() &&
             (fs::exists(path_prefix / "ninja", ec) || fs::exists(path_prefix / "ninja.exe", ec));
@@ -3272,6 +3291,26 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
             conf.push_back("Ninja");
         }
 #endif
+    }
+
+    // Prefer pack ccache when present — survives build/ wipes and path moves.
+    // Also covers titles whose vendored runtime.cmake predates auto-detect.
+    {
+        std::error_code lec;
+        fs::path ccache;
+        if (fs::exists(path_prefix / "ccache.exe", lec))
+            ccache = path_prefix / "ccache.exe";
+        else if (fs::exists(path_prefix / "ccache", lec))
+            ccache = path_prefix / "ccache";
+        if (!ccache.empty()) {
+#if defined(_WIN32)
+            const std::string ccache_s = path_to_utf8(ccache);
+#else
+            const std::string ccache_s = ccache.string();
+#endif
+            conf.push_back("-DCMAKE_C_COMPILER_LAUNCHER=" + ccache_s);
+            conf.push_back("-DCMAKE_CXX_COMPILER_LAUNCHER=" + ccache_s);
+        }
     }
 
     const json configure_want =

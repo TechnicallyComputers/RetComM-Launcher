@@ -1737,7 +1737,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
             }
             case HubJob::CheckUpdates: {
                 set_status("Checking updates…");
-                // Catalog → launcher → games → toolchain (prompt order matches).
+                // Catalog → launcher → toolchain → games (prompt order matches).
                 // Catalog sync always asks GitHub for the latest catalog release
                 // (downloads only when newer). Game tags use force_github_tags so
                 // the 4h release-tag TTL cannot hide a new title release — GitHub
@@ -1765,18 +1765,6 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     // Do not open the modal yet — job_running would disable Update.
                     launcher_upd = lc.ok && lc.update_available;
                 }
-                set_status("Checking game updates…");
-                refresh_rows(/*check_updates=*/true, /*force_github_tags=*/true);
-                int game_updates = 0;
-                {
-                    std::lock_guard<std::mutex> lock(mu);
-                    for (const auto& r : rows)
-                        if (r.update_available) ++game_updates;
-                    game_updates_prompt_count = game_updates;
-                }
-                if (game_updates > 0) {
-                    append_log(std::to_string(game_updates) + " game update(s) available");
-                }
                 bool toolchain_upd = false;
                 {
                     set_status("Checking toolchain…");
@@ -1789,8 +1777,20 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     toolchain_status = tc.message;
                     toolchain_upd = tc.update_available;
                 }
+                set_status("Checking game updates…");
+                refresh_rows(/*check_updates=*/true, /*force_github_tags=*/true);
+                int game_updates = 0;
+                {
+                    std::lock_guard<std::mutex> lock(mu);
+                    for (const auto& r : rows)
+                        if (r.update_available) ++game_updates;
+                    game_updates_prompt_count = game_updates;
+                }
+                if (game_updates > 0) {
+                    append_log(std::to_string(game_updates) + " game update(s) available");
+                }
                 if (launcher_upd) {
-                    // Hold game/toolchain prompts until Later. Accepting self-update
+                    // Hold toolchain/game prompts until Later. Accepting self-update
                     // discards them so nothing else starts before restart.
                     // Arm the modal only after this job clears so Update is clickable.
                     {
@@ -1807,8 +1807,8 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     launcher_update_prompt_pending.store(true);
                     return;
                 }
-                if (game_updates > 0) game_updates_prompt_pending.store(true);
                 if (toolchain_upd) toolchain_prompt_pending.store(true);
+                if (game_updates > 0) game_updates_prompt_pending.store(true);
                 if (toolchain_prompt_pending.load() || game_updates > 0)
                     set_status("Updates available");
                 else

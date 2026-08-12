@@ -72,6 +72,7 @@ Optional: `RETCOMM_PYTHON` selects the interpreter for SDK CLIs
 cmake-clang-v1-<os>/
   bin/cmake
   bin/ninja          # optional but preferred
+  bin/ccache         # optional; RetComM enables CMAKE_*_COMPILER_LAUNCHER when present
   bin/clang …        # or system compiler via env.sh
   env.sh             # optional: export PATH/CC/CXX
   env.bat            # Windows
@@ -101,9 +102,9 @@ override cannot block a newer release. Optionally **harvest** a legacy game-zip
 
 | OS asset | Notes |
 |----------|--------|
-| `cmake-clang-v1-linux-x64.zip` | Pruned LLVM/Clang + lld + cmake + ninja |
-| `cmake-clang-v1-windows-x64.zip` | llvm-mingw UCRT + cmake + ninja |
-| `cmake-clang-v1-macos-universal.zip` | cmake + ninja; requires Xcode CLT |
+| `cmake-clang-v1-linux-x64.zip` | Pruned LLVM/Clang + lld + cmake + ninja + ccache |
+| `cmake-clang-v1-windows-x64.zip` | llvm-mingw UCRT + cmake + ninja + ccache |
+| `cmake-clang-v1-macos-universal.zip` | cmake + ninja + ccache; requires Xcode CLT |
 
 ## SDK pack layout
 

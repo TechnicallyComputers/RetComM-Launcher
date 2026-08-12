@@ -2592,7 +2592,7 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
         hub.settings.dirty = true;
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
     ImGui::TextWrapped(
-        "When enabled, RetComM checks for launcher, game, and toolchain updates after the hub "
+        "When enabled, RetComM checks for launcher, toolchain, and game updates after the hub "
         "starts. Turn off to skip the startup prompt (Check Updates in the menu still works). "
         "Save to apply.");
     ImGui::PopStyleColor();
@@ -5366,7 +5366,7 @@ int main(int argc, char** argv) {
             ImGui::EndPopup();
         }
 
-        // Update prompts in order: launcher → games → toolchain.
+        // Update prompts in order: launcher → toolchain → games.
         // Avoid opening the next modal on the same frame (IsPopupOpen can lag OpenPopup).
         const bool open_launcher_update = hub.launcher_update_prompt_pending.exchange(false);
         if (open_launcher_update) ImGui::OpenPopup("RetComM update###launcher_update");
@@ -5407,7 +5407,7 @@ int main(int argc, char** argv) {
         const bool launcher_self_updating =
             hub.request_exit.load() ||
             (hub.job_running.load() && hub.job == HubJob::SelfUpdate);
-        // Outside-click dismiss is "Later" — release deferred game/toolchain prompts.
+        // Outside-click dismiss is "Later" — release deferred toolchain/game prompts.
         {
             static bool launcher_modal_was_open = false;
             const bool launcher_modal_open =
@@ -5420,45 +5420,10 @@ int main(int argc, char** argv) {
             launcher_self_updating || open_launcher_update ||
             ImGui::IsPopupOpen("RetComM update###launcher_update") ||
             hub.launcher_update_prompt_pending.load();
-        const bool open_game_updates =
-            !launcher_blocking && hub.game_updates_prompt_pending.exchange(false);
-        if (open_game_updates) ImGui::OpenPopup("Game updates###game_updates");
-        if (ImGui::BeginPopupModal("Game updates###game_updates", nullptr,
-                                   ImGuiWindowFlags_AlwaysAutoResize)) {
-            int n = 0;
-            {
-                std::lock_guard<std::mutex> lock(hub.mu);
-                n = hub.game_updates_prompt_count;
-            }
-            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 380.f);
-            if (n == 1) {
-                ImGui::TextWrapped(
-                    "1 installed game has an update available.\n\n"
-                    "Queue it to download/install when the worker is free, or dismiss "
-                    "for now.");
-            } else {
-                ImGui::TextWrapped(
-                    "%d installed games have updates available.\n\n"
-                    "Queue all updates to run one after another, or dismiss for now.",
-                    n);
-            }
-            ImGui::PopTextWrapPos();
-            ImGui::Dummy(ImVec2(0, 10));
-            if (good_button("Queue All Updates", th, ImVec2(-1, 0))) {
-                hub.queue_all_updates();
-                ImGui::CloseCurrentPopup();
-            }
-            if (ImGui::Button("Not Right Now", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
-            close_modal_on_outside_click();
-            ImGui::EndPopup();
-        }
 
-        const bool games_blocking =
-            open_game_updates || ImGui::IsPopupOpen("Game updates###game_updates") ||
-            hub.game_updates_prompt_pending.load();
-        if (!launcher_blocking && !games_blocking &&
-            hub.toolchain_prompt_pending.exchange(false))
-            ImGui::OpenPopup("Toolchain update###toolchain_update");
+        const bool open_toolchain_update =
+            !launcher_blocking && hub.toolchain_prompt_pending.exchange(false);
+        if (open_toolchain_update) ImGui::OpenPopup("Toolchain update###toolchain_update");
         if (ImGui::BeginPopupModal("Toolchain update###toolchain_update", nullptr,
                                    ImGuiWindowFlags_AlwaysAutoResize)) {
             std::string cur, latest;
@@ -5486,6 +5451,45 @@ int main(int argc, char** argv) {
             ImGui::SameLine();
             if (ImGui::Button("Later", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
             ImGui::EndDisabled();
+            close_modal_on_outside_click();
+            ImGui::EndPopup();
+        }
+
+        const bool toolchain_blocking =
+            open_toolchain_update || ImGui::IsPopupOpen("Toolchain update###toolchain_update") ||
+            hub.toolchain_prompt_pending.load() ||
+            (hub.job_running.load() && hub.job == HubJob::UpdateToolchain);
+
+        const bool open_game_updates =
+            !launcher_blocking && !toolchain_blocking &&
+            hub.game_updates_prompt_pending.exchange(false);
+        if (open_game_updates) ImGui::OpenPopup("Game updates###game_updates");
+        if (ImGui::BeginPopupModal("Game updates###game_updates", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            int n = 0;
+            {
+                std::lock_guard<std::mutex> lock(hub.mu);
+                n = hub.game_updates_prompt_count;
+            }
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 380.f);
+            if (n == 1) {
+                ImGui::TextWrapped(
+                    "1 installed game has an update available.\n\n"
+                    "Queue it to download/install when the worker is free, or dismiss "
+                    "for now.");
+            } else {
+                ImGui::TextWrapped(
+                    "%d installed games have updates available.\n\n"
+                    "Queue all updates to run one after another, or dismiss for now.",
+                    n);
+            }
+            ImGui::PopTextWrapPos();
+            ImGui::Dummy(ImVec2(0, 10));
+            if (good_button("Queue All Updates", th, ImVec2(-1, 0))) {
+                hub.queue_all_updates();
+                ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::Button("Not Right Now", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
             close_modal_on_outside_click();
             ImGui::EndPopup();
         }
