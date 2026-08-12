@@ -186,10 +186,40 @@ jobs:
       - name: Bootstrap vcpkg
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $baseline = "9d7f79f56ae1a9b4704d6a7fb8237e347a974133"
           git clone https://github.com/microsoft/vcpkg.git $env:RETCOMM_VCPKG
           git -C $env:RETCOMM_VCPKG checkout $baseline
-          & "$env:RETCOMM_VCPKG\bootstrap-vcpkg.bat" -disableMetrics
+
+          # bootstrap.ps1 uses tls12-download.exe with no retries; GitHub release
+          # assets intermittently return 503 and abort the job. Prefetch the
+          # pinned vcpkg-tool with curl retries, then skip bootstrap's download.
+          $metaPath = Join-Path $env:RETCOMM_VCPKG "scripts\vcpkg-tool-metadata.txt"
+          $meta = ConvertFrom-StringData (Get-Content $metaPath -Raw)
+          $tag = $meta.VCPKG_TOOL_RELEASE_TAG
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            throw "VCPKG_TOOL_RELEASE_TAG missing from $metaPath"
+          }
+          $url = "https://github.com/microsoft/vcpkg-tool/releases/download/$tag/vcpkg.exe"
+          $dest = Join-Path $env:RETCOMM_VCPKG "vcpkg.exe"
+          $ok = $false
+          for ($i = 1; $i -le 10; $i++) {
+            Write-Host "Downloading vcpkg.exe attempt $i/10 ($url)"
+            if (Test-Path $dest) { Remove-Item -LiteralPath $dest -Force }
+            & curl.exe -fsSL --retry 5 --retry-all-errors --retry-delay 2 `
+              --connect-timeout 30 --max-time 300 -o $dest $url
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $dest) -and ((Get-Item $dest).Length -gt 1MB)) {
+              $ok = $true
+              break
+            }
+            Start-Sleep -Seconds ([Math]::Min(60, 3 * $i))
+          }
+          if (-not $ok) {
+            throw "Failed to download vcpkg.exe from $url after retries (transient CDN/503?)"
+          }
+          Set-Content -LiteralPath (Join-Path $env:RETCOMM_VCPKG "vcpkg.disable-metrics") -Value ""
+          & $dest version --disable-metrics
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg.exe failed to run after download" }
 
       - name: Build icons
         shell: bash
