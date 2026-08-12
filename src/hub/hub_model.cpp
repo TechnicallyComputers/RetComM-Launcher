@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstring>
+#include <fstream>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -2656,6 +2657,34 @@ void HubModel::apply_pending_file_pick() {
         file_pick_busy = false;
     }
     if (picked.empty()) return;
+
+    if (kind == FilePickKind::ExportActivityLog) {
+        const fs::path dest(picked.front());
+        std::string body;
+        {
+            std::lock_guard<std::mutex> lock(mu);
+            body = log;
+        }
+        if (body.empty()) body = "(no activity yet)";
+        std::ofstream out(dest, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            append_log("Export activity log failed: cannot write " + dest.string(), LogLevel::Error);
+            set_status("Export activity log failed");
+            return;
+        }
+        out.write(body.data(), static_cast<std::streamsize>(body.size()));
+        if (!body.empty() && body.back() != '\n') out.put('\n');
+        if (!out) {
+            append_log("Export activity log failed while writing " + dest.string(), LogLevel::Error);
+            set_status("Export activity log failed");
+            return;
+        }
+        append_log("Exported activity log → " + dest.string(), LogLevel::Good);
+        set_status("Exported activity log");
+        show_toast("Saved " + dest.filename().string());
+        return;
+    }
+
     if (platform.empty() && title_id.empty()) return;
 
     cfg = load_app_config(paths.config_path);

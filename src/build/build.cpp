@@ -23,6 +23,7 @@
 #include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -2065,20 +2066,75 @@ std::vector<std::pair<std::string, std::string>> toolchain_cmake_env(
     return out;
 }
 
-// CMAKE_GENERATOR:STRING=Ninja (empty if missing / unreadable).
-std::string read_cmake_cache_generator(const fs::path& cache_file) {
+// CMAKE_GENERATOR / CMAKE_*_COMPILER cache entries (empty if missing / unreadable).
+std::string read_cmake_cache_entry(const fs::path& cache_file, std::string_view name) {
     std::error_code ec;
     if (!fs::is_regular_file(cache_file, ec)) return {};
     std::ifstream in(cache_file);
     if (!in) return {};
+    const std::string prefix(name);
     std::string line;
     while (std::getline(in, line)) {
-        constexpr const char* kKey = "CMAKE_GENERATOR:INTERNAL=";
-        constexpr const char* kKey2 = "CMAKE_GENERATOR:STRING=";
-        if (line.rfind(kKey, 0) == 0) return line.substr(std::strlen(kKey));
-        if (line.rfind(kKey2, 0) == 0) return line.substr(std::strlen(kKey2));
+        // NAME:TYPE=value  (TYPE is INTERNAL / STRING / FILEPATH / …)
+        if (line.size() <= prefix.size() + 1 || line.compare(0, prefix.size(), prefix) != 0 ||
+            line[prefix.size()] != ':')
+            continue;
+        const size_t eq = line.find('=', prefix.size() + 1);
+        if (eq == std::string::npos) continue;
+        return line.substr(eq + 1);
     }
     return {};
+}
+
+std::string read_cmake_cache_generator(const fs::path& cache_file) {
+    return read_cmake_cache_entry(cache_file, "CMAKE_GENERATOR");
+}
+
+std::string normalize_compiler_path_key(std::string s) {
+    for (char& c : s) {
+        if (c == '\\') c = '/';
+#if defined(_WIN32)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+#endif
+    }
+    while (s.size() >= 2 && s.back() == '/') s.pop_back();
+    return s;
+}
+
+bool same_compiler_path(const fs::path& a, const fs::path& b) {
+    if (a.empty() || b.empty()) return false;
+    std::error_code ec;
+    if (fs::equivalent(a, b, ec)) return true;
+    ec.clear();
+    const fs::path na = fs::weakly_canonical(a, ec);
+    const fs::path ca = ec ? a.lexically_normal() : na;
+    ec.clear();
+    const fs::path nb = fs::weakly_canonical(b, ec);
+    const fs::path cb = ec ? b.lexically_normal() : nb;
+    const auto as_utf8 = [](const fs::path& p) {
+        const auto u8 = p.u8string();
+        return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+    };
+    return normalize_compiler_path_key(as_utf8(ca)) == normalize_compiler_path_key(as_utf8(cb));
+}
+
+// True when CMakeCache locks CMAKE_C/CXX_COMPILER to a missing path or one that
+// differs from the pack clang we are about to pass. Re-running cmake -B with a
+// new -DCMAKE_*_COMPILER does not reliably unlock those entries (Windows log:
+// cache still pointed at broken toolchains/.../latest/bin/clang.exe).
+bool cmake_cache_compilers_stale(const fs::path& cache_file, const fs::path& want_c,
+                                 const fs::path& want_cxx) {
+    std::error_code ec;
+    if (!fs::is_regular_file(cache_file, ec)) return false;
+    const auto check = [&](std::string_view key, const fs::path& want) -> bool {
+        if (want.empty()) return false;
+        const std::string cached = read_cmake_cache_entry(cache_file, key);
+        if (cached.empty()) return false;
+        const fs::path cached_p(cached);
+        if (!fs::exists(cached_p, ec)) return true;
+        return !same_compiler_path(cached_p, want);
+    };
+    return check("CMAKE_C_COMPILER", want_c) || check("CMAKE_CXX_COMPILER", want_cxx);
 }
 
 // Manifest of CMakeLists.txt + *.cmake under src_root (size+mtime rows).
@@ -3165,6 +3221,9 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
     // Prefer Ninja when the toolchain pack provides it. On Windows, a prior
     // failed configure often leaves CMakeCache.txt stuck on "NMake Makefiles"
     // with no compiler — wipe that and force Ninja + clang from the pack.
+    // Also wipe when CMAKE_*_COMPILER still points at a missing/broken path
+    // (e.g. toolchains/cmake-clang-v1/latest after a pack bump) — cmake will
+    // not honor a new -DCMAKE_C_COMPILER over a locked cache entry.
     {
         const fs::path cache_file = build_dir / "CMakeCache.txt";
         const bool have_ninja =
@@ -3196,6 +3255,11 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
             opts.on_output(
                 "warning: ninja.exe not found under toolchain bin — cmake may pick "
                 "NMake Makefiles (install/update cmake-clang-v1)");
+        }
+        if (cmake_cache_compilers_stale(cache_file, clang_c, clang_cxx)) {
+            progress(opts.on_progress,
+                     "Replacing cmake cache (stale / missing pack compiler path)…", 0.54f);
+            fs::remove_all(build_dir, ec);
         }
         if (!clang_c.empty())
             conf.push_back("-DCMAKE_C_COMPILER=" + path_to_utf8(clang_c));

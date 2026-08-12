@@ -87,7 +87,11 @@ poisons libc++). Ambient pack prefixes from older `env.bat` are stripped for
 cmake children. On Windows it forces `-G Ninja` when
 `ninja.exe` is present (wiping a stale NMake/`Visual Studio` `CMakeCache.txt`
 if needed) and passes `-DCMAKE_C_COMPILER` / `-DCMAKE_CXX_COMPILER` to the
-pack’s `clang` / `clang++`. Prefer **downloading** `cmake-clang-v1` from
+pack’s `clang` / `clang++`. It also wipes `build/` when the cache still locks
+those compilers to a missing path or a different pack tree (e.g. a broken
+`toolchains/cmake-clang-v1/latest` junction after a toolchain bump — cmake
+ignores a new `-DCMAKE_C_COMPILER` over a locked entry). Prefer **downloading**
+`cmake-clang-v1` from
 [TechnicallyComputers/retcomm-toolchains](https://github.com/TechnicallyComputers/retcomm-toolchains)
 into the shared cache (`RETCOMM_TOOLCHAIN_DIR` overrides when the directory
 exists; a missing/stale override — e.g. broken `latest/` junction — falls

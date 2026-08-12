@@ -355,12 +355,13 @@ enum class SetupPath : int {
     Advanced = 2,
 };
 
-// Native file dialog for Library → Import (callback may be off-thread).
+// Native file dialog for Library → Import / activity export (callback may be off-thread).
 enum class FilePickKind : int {
     None = 0,
     ImportRom,
     ImportSave,
     ImportBios,
+    ExportActivityLog,
 };
 
 // Center library panel: platforms list → titles for a platform (or all).
@@ -490,9 +491,10 @@ struct HubModel {
     std::string file_pick_title_id; // optional: ImportSave binds preferred for this title
     std::vector<std::string> file_pick_paths; // set by dialog callback
     bool file_pick_busy = false;
-    // Filter strings must outlive SDL_ShowOpenFileDialog until the callback.
+    // Filter / default path strings must outlive SDL file dialogs until the callback.
     std::string file_pick_filter_name;
     std::string file_pick_filter_pattern;
+    std::string file_pick_default_location;
 
     // check_updates: query GitHub latest tags for installed titles.
     // force_github_tags: ignore the 4h release-tag TTL (manual Check for Updates).

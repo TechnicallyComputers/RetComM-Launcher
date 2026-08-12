@@ -429,6 +429,27 @@ void begin_file_pick(HubModel& hub, SDL_Window* window, retcomm::hub::FilePickKi
     SDL_ShowOpenFileDialog(on_file_dialog, &hub, window, filters, 1, nullptr, allow_many);
 }
 
+void begin_export_activity_log(HubModel& hub, SDL_Window* window) {
+    {
+        std::lock_guard<std::mutex> lock(hub.file_pick_mu);
+        if (hub.file_pick_busy) return;
+        hub.file_pick_busy = true;
+        hub.file_pick_kind = retcomm::hub::FilePickKind::ExportActivityLog;
+        hub.file_pick_platform.clear();
+        hub.file_pick_title_id.clear();
+        hub.file_pick_paths.clear();
+        hub.file_pick_filter_name = "Log files";
+        hub.file_pick_filter_pattern = "log";
+        hub.file_pick_default_location =
+            (retcomm::user_home_dir() / "retcomm-launcher.log").string();
+    }
+    static SDL_DialogFileFilter filters[1];
+    filters[0].name = hub.file_pick_filter_name.c_str();
+    filters[0].pattern = hub.file_pick_filter_pattern.c_str();
+    SDL_ShowSaveFileDialog(on_file_dialog, &hub, window, filters, 1,
+                           hub.file_pick_default_location.c_str());
+}
+
 // Path field + native Browse button. Returns true if the text field changed.
 bool path_field_with_browse(const char* label, const char* input_id, char* buf, size_t buf_n,
                             HubModel& hub, SDL_Window* window, FolderPickTarget target,
@@ -4606,7 +4627,7 @@ void draw_log_collapsed_bar(HubModel& hub, const Theme& th) {
     ImGui::PopStyleVar(); // WindowPadding
 }
 
-void draw_log(HubModel& hub, const Theme& th, float height) {
+void draw_log(HubModel& hub, const Theme& th, float height, SDL_Window* window) {
     if (height < 60.f) height = 60.f;
     ImGui::BeginChild("log", ImVec2(0, height), ImGuiChildFlags_Borders);
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
@@ -4626,12 +4647,24 @@ void draw_log(HubModel& hub, const Theme& th, float height) {
     {
         const float hide_w =
             ImGui::CalcTextSize("Hide").x + ImGui::GetStyle().FramePadding.x * 2.f;
+        const float export_w =
+            ImGui::CalcTextSize("Export").x + ImGui::GetStyle().FramePadding.x * 2.f;
         const float copy_w =
             ImGui::CalcTextSize("Copy").x + ImGui::GetStyle().FramePadding.x * 2.f;
         const float gap = ImGui::GetStyle().ItemSpacing.x;
         const float right = ImGui::GetWindowContentRegionMax().x;
-        ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), right - hide_w - gap - copy_w));
+        ImGui::SetCursorPosX(
+            std::max(ImGui::GetCursorPosX(), right - hide_w - gap - export_w - gap - copy_w));
         if (ImGui::SmallButton("Hide")) hub.log_expanded = false;
+        ImGui::SameLine();
+        bool file_busy = false;
+        {
+            std::lock_guard<std::mutex> lock(hub.file_pick_mu);
+            file_busy = hub.file_pick_busy;
+        }
+        ImGui::BeginDisabled(file_busy || window == nullptr);
+        if (ImGui::SmallButton("Export")) begin_export_activity_log(hub, window);
+        ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::SmallButton("Copy")) {
             // Tail only — recent errors/status matter more than early startup noise.
@@ -4944,7 +4977,7 @@ int main(int argc, char** argv) {
         ImGui::EndChild(); // body
         if (hub.log_expanded) {
             draw_log_splitter(log_h, log_h_pref, avail_y, th);
-            draw_log(hub, th, log_h);
+            draw_log(hub, th, log_h, window);
         } else {
             draw_log_collapsed_bar(hub, th);
         }
