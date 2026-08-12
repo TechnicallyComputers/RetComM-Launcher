@@ -98,17 +98,16 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
 // Local generate + cmake + stage into releases/build-<ref>/ + install.json.
 InstallResult build_title(const Paths& paths, const Title& title, const BuildOptions& opts = {});
 
-// Setup-host / one-zip titles (build.enabled): release zip is SOURCE → generate+cmake.
-// Dual-mode titles whose release zip already contains the catalog launch binary
-// (e.g. Tomba) take the prebuilt extract path. prefer_prebuilt forces zip extract.
+// Titles with a local generate+cmake recipe: release zip is SOURCE → generate+cmake
+// (even if the archive also ships a launch binary). prefer_prebuilt forces zip extract.
 InstallResult install_title_auto(const Paths& paths, const Title& title,
                                  const InstallOptions& install_opts = {},
                                  const BuildOptions& build_opts = {});
 
-// Setup-host titles: overlay latest release zip onto src/current and cmake-build
-// incrementally; codegen-cache skips regenerate when ROM/BIOS/emitters match.
-// Dual-mode playable zips update via prebuilt extract. Generate & Rebuild sets
-// force_generate.
+// Setup-host / one-zip titles: overlay latest release zip onto src/current and
+// cmake-build incrementally; codegen-cache skips regenerate when ROM/BIOS/emitters
+// match. Generate & Rebuild sets force_generate. Pure prebuilt titles (no local
+// build recipe) still Update via zip extract.
 InstallResult update_title_auto(const Paths& paths, const Title& title,
                                 const InstallOptions& install_opts = {},
                                 const BuildOptions& build_opts = {});

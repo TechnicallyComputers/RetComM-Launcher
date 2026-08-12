@@ -1236,8 +1236,8 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 wire_build_activity(this, bopts);
                 auto r = install_title_auto(paths, *t, opts, bopts);
                 append_log(r.message);
-                // Build path failed with no verified ROM (dual-mode titles used to
-                // skip the pre-install chooser and land here with a quiet fail).
+                // Build path failed with no verified ROM (chooser should have
+                // run first; surface the missing-ROM prompt if it did not).
                 if (!r.ok && will_build) {
                     library = load_library_index(paths.library_index_path);
                     std::error_code rom_ec;

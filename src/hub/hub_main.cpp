@@ -2276,7 +2276,7 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
         }
     } else if (row.supports_local_build) {
         // Default Install uses local generate+cmake whenever a build recipe
-        // exists (install_title_auto), including dual-mode zip+build titles.
+        // exists (install_title_auto); release zip is source, not a Play shortcut.
         if (!row.has_rom) {
             ImGui::PushStyleColor(ImGuiCol_Text, th.warn);
             ImGui::TextWrapped(

@@ -158,8 +158,8 @@ struct Title {
     // True when a prebuilt GitHub release zip can still be installed.
     bool supports_prebuilt_install() const;
     // With prefer_prebuilt=false, true when a local generate+cmake recipe exists.
-    // Hub uses this for ROM prompts. install_title_auto may still choose the
-    // prebuilt zip when that archive already contains the launch binary.
+    // Hub uses this for ROM prompts; install_title_auto / update_title_auto build
+    // whenever this is true (release zip is source, not a Play shortcut).
     bool prefers_local_build_install(bool prefer_prebuilt = false) const;
 };
 

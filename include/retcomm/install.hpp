@@ -255,8 +255,7 @@ ResolvedReleaseZip resolve_title_release_zip(const Paths& paths, const Title& ti
                                              HttpProgressFn on_progress = {});
 
 // True when an archive lists a member whose basename matches ``filename``
-// (case-insensitive). Used to detect dual-mode release zips that already ship
-// the catalog launch binary (e.g. Tomba) vs setup-host-only source packs.
+// (case-insensitive). Used when staging/extracting release archives.
 bool archive_contains_named_file(const fs::path& archive, const std::string& filename);
 
 // Wine helpers for Linux / macOS fallback installs.

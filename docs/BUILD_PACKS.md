@@ -66,14 +66,16 @@ updates that do not touch those inputs skip configure and go straight to
 `cmake --build`. Changing cmake files, the toolchain, `-DPSX_NETPLAY`, or using
 **Generate & Rebuild** (wipes `build/`) forces a fresh configure.
 
-**Setup-host vs raw zip:** catalog titles with `build.enabled` treat the GitHub
-release zip as *source* for generate+cmake (`install_title_auto` /
-`update_title_auto`). Blind zip extract would replace a built Play binary with
-the setup-host wizard — never do that for MotK/BPE-style packs. Pure prebuilt
-titles (no local build recipe) still Update via zip extract. When GitHub
-`/releases/latest` is rate-limited (HTTP 403), Update uses the same durable
-release-zip cache as prefetch (`data_dir/cache/releases/…`) plus the hub tag
-hint — it does **not** fall back to an incomplete `zipball@main`.
+**Setup-host vs raw zip:** catalog titles with a local generate+cmake recipe
+(`build.enabled` + source/toolchain) always Install/Update via generate+cmake
+(`install_title_auto` / `update_title_auto`). The GitHub release zip is *source*
+even when it also ships a launch binary — never take that binary as a Play
+shortcut (that used to skip disc→C for dual-mode packs). Blind zip extract would
+also replace a built Play binary with the setup-host wizard. Pure prebuilt titles
+(no local build recipe) still Update via zip extract; `InstallPrebuilt` / Wine
+still force zip. When GitHub `/releases/latest` is rate-limited (HTTP 403), Update
+uses the same durable release-zip cache as prefetch (`data_dir/cache/releases/…`)
+plus the hub tag hint — it does **not** fall back to an incomplete `zipball@main`.
 
 **Shared caches & GC:** after a successful local build (and via Hub → Advanced →
 **Prune shared caches now** / `retcomm cache gc`), RetComM drops old
