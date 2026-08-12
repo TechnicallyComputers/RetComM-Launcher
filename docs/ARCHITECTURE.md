@@ -55,9 +55,12 @@ CLI / (future) ImGui hub
     current -> releases/<tag>/         # symlink (or current.path / junction on Windows)
     releases/<tag>/
       <binary + assets>
-    src/<ref>/                         # game source when method=build
+    src/current/                       # game source when method=build
+      psxrecomp -> ../../engines/…     # shared engine link (after promote)
+      recomp-ui -> ../../engines/…
   toolchains/<id>/<tag>/               # managed C/cmake packs
-  sdks/<id>/<tag>/                     # snesrecomp tools packs
+  sdks/<id>/<tag>/                     # snesrecomp / psxrecomp tools packs
+  engines/<name>/<pin>/                # shared psxrecomp / recomp-ui source (by pin)
   library-index.json
   state.json                           # reserved (hub-wide prefs / last launch)
 ```

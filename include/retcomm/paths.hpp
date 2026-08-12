@@ -14,6 +14,7 @@ struct Paths {
     fs::path apps_dir;            // data_dir/apps
     fs::path toolchains_dir;      // data_dir/toolchains/<id>/<tag>
     fs::path sdks_dir;            // data_dir/sdks/<id>/<tag>
+    fs::path engines_dir;         // data_dir/engines/<name>/<pin> (psxrecomp, recomp-ui, …)
     fs::path state_path;          // data_dir/state.json
     fs::path config_path;         // config_dir/config.json
     fs::path library_index_path;  // data_dir/library-index.json

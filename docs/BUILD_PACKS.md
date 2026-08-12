@@ -7,12 +7,22 @@ tools may be a separate pack **or** embedded in the game release zip.
 |---|---|---|
 | Toolchain (`cmake-clang-v1`) | `~/.local/share/retcomm/toolchains/<id>/<tag>/` (Windows: `%LOCALAPPDATA%\retcomm\toolchains\…`) — shared with standalone setup wizards | `RETCOMM_TOOLCHAIN_DIR` |
 | SDK tools (`snesrecomp-tools` / `psxrecomp-tools`) | `~/.local/share/retcomm/sdks/<id>/<tag>/` | `RETCOMM_SDK_DIR` |
+| Engine source (`psxrecomp` / `recomp-ui` / …) | `~/.local/share/retcomm/engines/<name>/<pin>/` — keyed by `framework_pins.txt` SHA (else content fingerprint) | `RETCOMM_ENGINES_DIR` |
 | Game source | `…/apps/<install>/src/current/` (stable; tag in `.retcomm-source.json`) | `RETCOMM_SOURCE_DIR` |
 
 Game source prefers the host **release zip** (`release.asset_glob`) when that
 archive vendors a cmake-buildable tree (e.g. BPE `bpe-*.zip` ships `psxrecomp/` +
 `recomp-ui/` + emitters at the release pins). Otherwise RetComM falls back to the
 GitHub source zipball at `build.source.ref` (note: zipballs omit git submodules).
+
+**Shared engines:** after extract/sync, RetComM harvests each vendored framework
+tree into `engines/<name>/<pin>/` (content-aware) and replaces the per-title
+copy with a symlink (Unix) or directory junction (Windows). Titles that pin the
+same `psxrecomp` / `recomp-ui` commit therefore share one source tree on disk.
+BIOS generated C under `psxrecomp/generated/` lives in that shared pin (OpenBIOS
+/ SCPH1001 are pin-identical). Content-sync of game updates never writes through
+those links — engines are re-harvested from the staging zip instead. Developer
+overrides via `RETCOMM_SOURCE_DIR` skip promotion so local checkouts stay intact.
 
 **One-zip titles (BPE):** the same `bpe-*.zip` is used for install and update.
 RetComM harvests CLI + `psxrecomp-game` / `psxrecomp-bios` into the shared SDK
@@ -29,13 +39,15 @@ Ninja only recompiles real diffs. Sync never touches `src/current/build/` **or**
 local-only trees omitted from setup zips: codegen (`generated/`,
 `psxrecomp/generated/`, `src/gen/`, `variants/*/generated`,
 `gbarecomp/.../generated_bios`, `.retcomm-codegen.json`) and disc work dirs
-(`bpe/`, `motk/`, `disc/`). Deleting those used to force a full codegen-cache
-restore + Ninja rebuild of every shard. Legacy `src/<tag>/` trees are migrated
-to `current` once, then pruned. Disk cost: the cmake tree stays after install
-(often hundreds of MiB) unless Library Settings → **Advanced** → **Auto-clean
-cmake build directories after install** is enabled (`auto_clean_build_dirs` in
-`config.json`). Hub **Generate & Rebuild** (`force_generate`) wipes `build/`
-and regenerates C from the disc.
+(`bpe/`, `motk/`, `disc/`). Shared engine trees (`psxrecomp/`, `recomp-ui/`, …)
+are also skipped during sync — RetComM re-harvests them from the staging zip
+into `engines/<name>/<pin>/` and relinks. Deleting codegen used to force a full
+codegen-cache restore + Ninja rebuild of every shard. Legacy `src/<tag>/` trees
+are migrated to `current` once, then pruned. Disk cost: the cmake tree stays
+after install (often hundreds of MiB) unless Library Settings → **Advanced** →
+**Auto-clean cmake build directories after install** is enabled
+(`auto_clean_build_dirs` in `config.json`). Hub **Generate & Rebuild**
+(`force_generate`) wipes `build/` and regenerates C from the disc.
 
 **Codegen reuse on update:** after the first successful generate, RetComM keeps
 `apps/<title>/codegen-cache/` keyed by ROM/BIOS + **content hashes** of the
@@ -63,8 +75,19 @@ titles (no local build recipe) still Update via zip extract. When GitHub
 release-zip cache as prefetch (`data_dir/cache/releases/…`) plus the hub tag
 hint — it does **not** fall back to an incomplete `zipball@main`.
 
+**Shared caches & GC:** after a successful local build (and via Hub → Advanced →
+**Prune shared caches now** / `retcomm cache gc`), RetComM drops old
+`toolchains/<id>/` and `sdks/<id>/` versions beyond the keep counts (default 2 /
+3; always keeps whatever `latest` points at), unreferenced
+`engines/<name>/<pin>/` trees (keeps one newest orphan per name by default),
+stale `cache/releases/<repo>/<tag>/` folders, and idle `src/current/build/`
+trees older than `idle_build_keep_days` (default 14; skipped when
+`auto_clean_build_dirs` is on). Shared **ccache** lives at
+`data_dir/ccache` with `CCACHE_MAXSIZE` from `ccache_max_gb` (default 5).
+
 Optional: `RETCOMM_PYTHON` selects the interpreter for SDK CLIs
-(default `python3` / `python` on Windows).
+(default `python3` / `python` on Windows). `RETCOMM_ENGINES_DIR` overrides the
+shared engine cache root (default `…/retcomm/engines`).
 
 ## Toolchain pack layout
 

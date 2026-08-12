@@ -30,10 +30,11 @@ struct BuildOptions {
     // Pass --force-bios so SCPH1001 + OpenBIOS C are regenerated (not skipped).
     bool force_bios = false;
     // Optional overrides (also accepted via RETCOMM_TOOLCHAIN_DIR / RETCOMM_SDK_DIR /
-    // RETCOMM_SOURCE_DIR).
+    // RETCOMM_SOURCE_DIR / RETCOMM_ENGINES_DIR).
     fs::path toolchain_dir;
     fs::path sdk_dir;
     fs::path source_dir;
+    fs::path engines_dir; // shared engine cache root (default: data_dir/engines)
     // Hub row / ReleaseTagCache hint — used when GitHub /releases/latest is 403.
     std::string hint_latest_tag;
     // Override Paths::apps_dir for this build (multi-root installs).
@@ -83,11 +84,16 @@ PackEnsureResult update_toolchain_to_latest(
 // Fetch release/zipball source into apps/<install>/src/current/ (or override).
 // Package updates overlay in place and preserve cmake build/, local generated/,
 // and disc work dirs (bpe/motk/disc) for incremental ninja.
+// Vendored engine/UI trees (psxrecomp/, recomp-ui/, …) are harvested into
+// data_dir/engines/<name>/<pin>/ and replaced with symlink/junction so titles
+// that pin the same commit share one copy. Override cache root with
+// RETCOMM_ENGINES_DIR / engines_dir. Skipped for RETCOMM_SOURCE_DIR overrides.
 // hint_latest_tag: same offline fallback as zip install when the live API fails.
 PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
                                     const fs::path& override_dir = {}, bool force = false,
                                     BuildProgressFn on_progress = {},
-                                    const std::string& hint_latest_tag = {});
+                                    const std::string& hint_latest_tag = {},
+                                    const fs::path& engines_dir = {});
 
 // Local generate + cmake + stage into releases/build-<ref>/ + install.json.
 InstallResult build_title(const Paths& paths, const Title& title, const BuildOptions& opts = {});

@@ -1,6 +1,7 @@
 #include "retcomm/app_state.hpp"
 #include "retcomm/bios_index.hpp"
 #include "retcomm/build.hpp"
+#include "retcomm/cache_gc.hpp"
 #include "retcomm/catalog.hpp"
 #include "retcomm/catalog_sync.hpp"
 #include "retcomm/config.hpp"
@@ -64,6 +65,7 @@ void print_help(const char* argv0) {
         << "      --delete-saves           Also wipe saves / preserved stash\n"
         << "      --dry-run                Show what would be removed\n"
         << "      --no-prune               Don't prune stale index/state entries\n"
+        << "  cache gc                     Prune old toolchains/SDKs/engines/zips/idle builds\n"
         << "  launch <title-id> [opts]     Launch title into its dedicated launcher\n"
         << "      --rom PATH               ROM/disc path (else library index)\n"
         << "      --bios PATH              BIOS path (else bios index)\n"
@@ -1110,6 +1112,18 @@ int main(int argc, char** argv) {
                 }
             }
             return cmd_orphans(paths, catalog, do_remove, opts);
+        }
+        if (cmd == "cache") {
+            if (args.size() < 2 || args[1] != "gc") {
+                std::cerr << "usage: retcomm cache gc\n";
+                return 2;
+            }
+            retcomm::AppConfig gc_cfg = cfg;
+            gc_cfg.auto_gc_caches = true;
+            const auto cr = retcomm::run_cache_gc(paths, gc_cfg);
+            for (const auto& m : cr.messages) std::cout << m << "\n";
+            std::cout << cr.message << "\n";
+            return cr.ok ? 0 : 1;
         }
         if (cmd == "launch") {
             if (args.size() < 2) {

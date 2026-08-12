@@ -2215,37 +2215,47 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
         const bool reinstall_w_bios =
             row.built_with_openbios && row.supports_local_build &&
             row.bios_choice != retcomm::kOpenBiosChoice && !row.bios_choice.empty();
-        // Play (+ update preflight) uses launch_worker — stays free during Install.
-        const bool play_blocked =
-            reinstall_w_bios ? block_title_mutate : hub.launch_running.load();
-        ImGui::BeginDisabled(play_blocked);
-        bool play_clicked = false;
         if (reinstall_w_bios) {
-            play_clicked = good_button("Reinstall w BIOS", th, ImVec2(btn_w, 0));
+            // Same queue pattern as Update — GenerateRebuild is hub_job_is_queueable.
+            const bool reb_active =
+                job_busy && hub.job == HubJob::GenerateRebuild && hub.job_title_id == row.id;
+            const bool reb_queued = hub.is_job_queued(HubJob::GenerateRebuild, row.id);
+            const char* reb_label =
+                reb_active  ? "Reinstalling…"
+                : reb_queued ? "Queued"
+                : job_busy   ? "Queue Reinstall w BIOS"
+                             : "Reinstall w BIOS";
+            ImGui::BeginDisabled(reb_active || reb_queued ||
+                                 (!job_busy && block_title_mutate));
+            const bool reb_click = good_button(reb_label, th, ImVec2(btn_w, 0));
             if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
                 ImGui::SetTooltip(
                     "This install was built with OpenBIOS only.\n"
                     "Regenerate and rebuild with your selected retail BIOS "
-                    "(SCPH1001) and OpenBIOS.");
+                    "(SCPH1001) and OpenBIOS.\n"
+                    "Can be queued while another install/update is running.");
             }
+            if (reb_click) hub.start_job(HubJob::GenerateRebuild, row.id);
+            ImGui::EndDisabled();
         } else {
-            play_clicked = row.update_available ? ImGui::Button("Play", ImVec2(btn_w, 0))
-                                                : good_button("Play", th, ImVec2(btn_w, 0));
-        }
-        if (play_clicked) {
-            if (reinstall_w_bios) {
-                hub.start_job(HubJob::GenerateRebuild, row.id);
-            } else if (hub.cfg.check_updates_before_launch) {
-                const auto* t = hub.catalog.find(row.id);
-                if (t && !t->release.github.empty())
-                    hub.start_job(HubJob::CheckLaunchUpdate, row.id);
-                else
+            // Play (+ update preflight) uses launch_worker — stays free during Install.
+            ImGui::BeginDisabled(hub.launch_running.load());
+            const bool play_clicked =
+                row.update_available ? ImGui::Button("Play", ImVec2(btn_w, 0))
+                                     : good_button("Play", th, ImVec2(btn_w, 0));
+            if (play_clicked) {
+                if (hub.cfg.check_updates_before_launch) {
+                    const auto* t = hub.catalog.find(row.id);
+                    if (t && !t->release.github.empty())
+                        hub.start_job(HubJob::CheckLaunchUpdate, row.id);
+                    else
+                        hub.start_job(HubJob::Launch, row.id);
+                } else {
                     hub.start_job(HubJob::Launch, row.id);
-            } else {
-                hub.start_job(HubJob::Launch, row.id);
+                }
             }
+            ImGui::EndDisabled();
         }
-        ImGui::EndDisabled();
         ImGui::SameLine(0, 8);
         {
             const bool upd_active =
@@ -2673,6 +2683,56 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
             "local build to free disk space. Leave off for faster package updates (incremental "
             "Ninja). Save to apply.");
         ImGui::PopStyleColor();
+
+        ImGui::Dummy(ImVec2(0, 8));
+        if (ImGui::Checkbox("Auto-prune shared caches after builds", &hub.settings.auto_gc_caches))
+            hub.settings.dirty = true;
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Keeps a few recent toolchain/SDK versions, drops unreferenced engine pins, old "
+            "release zip downloads, and cmake build/ trees idle longer than the day limit. "
+            "Shared ccache lives under the RetComM data dir with a size cap.");
+        ImGui::PopStyleColor();
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::InputInt("Keep toolchain versions", &hub.settings.keep_toolchain_versions)) {
+            if (hub.settings.keep_toolchain_versions < 1) hub.settings.keep_toolchain_versions = 1;
+            hub.settings.dirty = true;
+        }
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::InputInt("Keep SDK versions", &hub.settings.keep_sdk_versions)) {
+            if (hub.settings.keep_sdk_versions < 1) hub.settings.keep_sdk_versions = 1;
+            hub.settings.dirty = true;
+        }
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::InputInt("Keep orphan engine pins", &hub.settings.keep_orphan_engine_pins)) {
+            if (hub.settings.keep_orphan_engine_pins < 0) hub.settings.keep_orphan_engine_pins = 0;
+            hub.settings.dirty = true;
+        }
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::InputInt("Idle build keep days", &hub.settings.idle_build_keep_days)) {
+            if (hub.settings.idle_build_keep_days < 0) hub.settings.idle_build_keep_days = 0;
+            hub.settings.dirty = true;
+        }
+        ImGui::SetNextItemWidth(120);
+        if (ImGui::InputInt("ccache max GiB", &hub.settings.ccache_max_gb)) {
+            if (hub.settings.ccache_max_gb < 0) hub.settings.ccache_max_gb = 0;
+            hub.settings.dirty = true;
+        }
+
+        ImGui::Dummy(ImVec2(0, 6));
+        {
+            const bool busy = hub.job_running.load();
+            ImGui::BeginDisabled(busy);
+            if (ImGui::Button("Prune shared caches now", ImVec2(-1, 0)))
+                hub.start_job(HubJob::CleanupSharedCaches);
+            ImGui::EndDisabled();
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Runs the same GC as post-build pruning (toolchains, SDKs, engines, release zips, "
+            "idle builds). Safe: never deletes Play binaries or generated game C.");
+        ImGui::PopStyleColor();
+
         ImGui::Dummy(ImVec2(0, 6));
         {
             const bool busy = hub.job_running.load();
@@ -4473,6 +4533,55 @@ void draw_psx_settings_panel(HubModel& hub, const Theme& th, BoxartCache& boxart
 
         psx_settings_row_label("Skip FMVs", th, kCol);
         if (ImGui::Checkbox("##skipfmv", &s.auto_skip_fmv)) mark();
+
+        psx_settings_row_label("Rewind buffer", th, kCol);
+        {
+            int d = s.rewind_depth;
+            if (d != 50 && d != 100 && d != 150 && d != 200) d = 50;
+            char lab[16];
+            std::snprintf(lab, sizeof(lab), "%d", d);
+            if (cycle_btn("rwbuf", lab, 80.f)) {
+                static const int kDepth[] = {50, 100, 150, 200};
+                int idx = 0;
+                for (int i = 0; i < 4; ++i)
+                    if (kDepth[i] == d) {
+                        idx = i;
+                        break;
+                    }
+                s.rewind_depth = kDepth[(idx + 1) % 4];
+                mark();
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "How many local rewind snapshots to keep (50 / 100 / 150 / 200).\n"
+                    "Applied when a title launches.");
+            }
+        }
+
+        psx_settings_row_label("Rewind interval", th, kCol);
+        {
+            int iv = s.rewind_interval;
+            if (iv != 1 && iv != 4 && iv != 8 && iv != 12 && iv != 15) iv = 15;
+            char lab[16];
+            std::snprintf(lab, sizeof(lab), "%d", iv);
+            if (cycle_btn("rwint", lab, 80.f)) {
+                static const int kIv[] = {1, 4, 8, 12, 15};
+                int idx = 4;
+                for (int i = 0; i < 5; ++i)
+                    if (kIv[i] == iv) {
+                        idx = i;
+                        break;
+                    }
+                s.rewind_interval = kIv[(idx + 1) % 5];
+                mark();
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+                ImGui::SetTooltip(
+                    "Frames between rewind snapshots (1 / 4 / 8 / 12 / 15).\n"
+                    "FMV still densifies toward 4 when this is sparser.\n"
+                    "Applied when a title launches.");
+            }
+        }
 
         psx_settings_row_label("Low-latency input", th, kCol);
         if (ImGui::Checkbox("##lli", &s.low_latency_input)) mark();

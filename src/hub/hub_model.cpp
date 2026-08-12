@@ -2,6 +2,7 @@
 #include "hub/hub_boxart.hpp"
 
 #include "retcomm/build.hpp"
+#include "retcomm/cache_gc.hpp"
 #include "retcomm/psx_platform_settings.hpp"
 #include "retcomm/psx_input_profiles.hpp"
 #include "retcomm/romm_fetch.hpp"
@@ -755,7 +756,7 @@ static const char* queued_hub_job_kind(HubJob j) {
     case HubJob::Update:
         return "Update";
     case HubJob::GenerateRebuild:
-        return "Rebuild";
+        return "Reinstall w BIOS";
     case HubJob::MoveInstall:
         return "Move install";
     case HubJob::ScanRoms:
@@ -2122,6 +2123,18 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 set_status(oss.str());
                 break;
             }
+            case HubJob::CleanupSharedCaches: {
+                set_status("Pruning shared caches…");
+                // Force-run even if auto_gc_caches was toggled off in the live cfg —
+                // the button is an explicit user request.
+                AppConfig gc_cfg = cfg;
+                gc_cfg.auto_gc_caches = true;
+                auto cr = run_cache_gc(paths, gc_cfg);
+                for (const auto& m : cr.messages) append_log(m);
+                append_log(cr.message);
+                set_status(cr.message);
+                break;
+            }
             case HubJob::DeleteAllAppsAndSaves: {
                 set_status("Deleting all apps and save data…");
                 int removed = 0;
@@ -2521,6 +2534,13 @@ void HubModel::open_settings() {
     settings.check_updates_on_startup = cfg.check_updates_on_startup;
     settings.check_updates_before_launch = cfg.check_updates_before_launch;
     settings.auto_clean_build_dirs = cfg.auto_clean_build_dirs;
+    settings.auto_gc_caches = cfg.auto_gc_caches;
+    settings.keep_toolchain_versions = cfg.keep_toolchain_versions;
+    settings.keep_sdk_versions = cfg.keep_sdk_versions;
+    settings.keep_orphan_engine_pins = cfg.keep_orphan_engine_pins;
+    settings.keep_release_zips_per_repo = cfg.keep_release_zips_per_repo;
+    settings.idle_build_keep_days = cfg.idle_build_keep_days;
+    settings.ccache_max_gb = cfg.ccache_max_gb;
     settings.install_roots.clear();
     settings.default_install_root_index = 0;
     {
@@ -2557,6 +2577,13 @@ void HubModel::open_setup() {
     settings.check_updates_on_startup = cfg.check_updates_on_startup;
     settings.check_updates_before_launch = cfg.check_updates_before_launch;
     settings.auto_clean_build_dirs = cfg.auto_clean_build_dirs;
+    settings.auto_gc_caches = cfg.auto_gc_caches;
+    settings.keep_toolchain_versions = cfg.keep_toolchain_versions;
+    settings.keep_sdk_versions = cfg.keep_sdk_versions;
+    settings.keep_orphan_engine_pins = cfg.keep_orphan_engine_pins;
+    settings.keep_release_zips_per_repo = cfg.keep_release_zips_per_repo;
+    settings.idle_build_keep_days = cfg.idle_build_keep_days;
+    settings.ccache_max_gb = cfg.ccache_max_gb;
     settings.platform_folders.clear();
     settings.dirty = false;
     apply_suggested_library_roots(/*overwrite_nonempty=*/false);
@@ -2981,6 +3008,13 @@ bool HubModel::save_settings(std::string* error) {
     next.check_updates_on_startup = settings.check_updates_on_startup;
     next.check_updates_before_launch = settings.check_updates_before_launch;
     next.auto_clean_build_dirs = settings.auto_clean_build_dirs;
+    next.auto_gc_caches = settings.auto_gc_caches;
+    next.keep_toolchain_versions = settings.keep_toolchain_versions;
+    next.keep_sdk_versions = settings.keep_sdk_versions;
+    next.keep_orphan_engine_pins = settings.keep_orphan_engine_pins;
+    next.keep_release_zips_per_repo = settings.keep_release_zips_per_repo;
+    next.idle_build_keep_days = settings.idle_build_keep_days;
+    next.ccache_max_gb = settings.ccache_max_gb;
     next.install_roots.clear();
     next.default_install_root.clear();
     for (int i = 0; i < static_cast<int>(settings.install_roots.size()); ++i) {
@@ -3018,6 +3052,13 @@ bool HubModel::save_settings(std::string* error) {
     settings.check_updates_on_startup = cfg.check_updates_on_startup;
     settings.check_updates_before_launch = cfg.check_updates_before_launch;
     settings.auto_clean_build_dirs = cfg.auto_clean_build_dirs;
+    settings.auto_gc_caches = cfg.auto_gc_caches;
+    settings.keep_toolchain_versions = cfg.keep_toolchain_versions;
+    settings.keep_sdk_versions = cfg.keep_sdk_versions;
+    settings.keep_orphan_engine_pins = cfg.keep_orphan_engine_pins;
+    settings.keep_release_zips_per_repo = cfg.keep_release_zips_per_repo;
+    settings.idle_build_keep_days = cfg.idle_build_keep_days;
+    settings.ccache_max_gb = cfg.ccache_max_gb;
     settings.dirty = false;
     set_status("Saved library settings");
     append_log("Wrote " + paths.config_path.string());

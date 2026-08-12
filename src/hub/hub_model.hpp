@@ -72,6 +72,8 @@ enum class HubJob : int {
     CleanupOldReleases,
     // Wipe apps/*/src/*/build/ cmake trees for every install (keeps Play + saves).
     CleanupCmakeBuildDirs,
+    // Prune old toolchains / sdks / unreferenced engines / release zips / idle builds.
+    CleanupSharedCaches,
     // Purge every install root + managed saves_root + platform/game config prefs.
     DeleteAllAppsAndSaves,
     // Wipe library/RomM config + indexes, clear setup marker, relaunch into wizard.
@@ -306,6 +308,13 @@ struct SettingsDraft {
     bool check_updates_on_startup = true;
     bool check_updates_before_launch = true;
     bool auto_clean_build_dirs = false;
+    bool auto_gc_caches = true;
+    int keep_toolchain_versions = 2;
+    int keep_sdk_versions = 3;
+    int keep_orphan_engine_pins = 1;
+    int keep_release_zips_per_repo = 1;
+    int idle_build_keep_days = 14;
+    int ccache_max_gb = 5;
     std::vector<PlatformFolderEdit> platform_folders;
     std::vector<InstallRootEdit> install_roots;
     int default_install_root_index = 0;

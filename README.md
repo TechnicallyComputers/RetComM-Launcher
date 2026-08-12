@@ -32,7 +32,8 @@ Feedback is welcome while the project keeps evolving.
 Shipping pre-generated recomp C from commercial ROMs is a legal grey area we
 prefer to avoid. Catalog titles that use **psxrecomp + recomp-ui** (and similar
 self-compiling stacks) ask each user to generate and compile on their own PC.
-RetComM’s job is to make that tolerable: shared toolchains, incremental rebuilds,
+RetComM’s job is to make that tolerable: shared toolchains, shared engine
+source (one `psxrecomp` / `recomp-ui` pin across titles), incremental rebuilds,
 queued installs, and automatic ROM/BIOS/save plumbing.
 
 Submit a title via the

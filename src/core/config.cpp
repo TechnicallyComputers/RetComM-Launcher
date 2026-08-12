@@ -104,6 +104,12 @@ AppConfig normalize_config(AppConfig cfg) {
     }
     if (cfg.exclude_dirs.empty()) cfg.exclude_dirs = default_exclude_dirs();
     if (cfg.netplay.lobby_url.empty()) cfg.netplay.lobby_url = kDefaultNetplayLobbyUrl;
+    if (cfg.keep_toolchain_versions < 1) cfg.keep_toolchain_versions = 1;
+    if (cfg.keep_sdk_versions < 1) cfg.keep_sdk_versions = 1;
+    if (cfg.keep_orphan_engine_pins < 0) cfg.keep_orphan_engine_pins = 0;
+    if (cfg.keep_release_zips_per_repo < 1) cfg.keep_release_zips_per_repo = 1;
+    if (cfg.idle_build_keep_days < 0) cfg.idle_build_keep_days = 0;
+    if (cfg.ccache_max_gb < 0) cfg.ccache_max_gb = 0;
 
     // Drop empty install-root rows; keep first label for a path.
     {
@@ -275,6 +281,19 @@ AppConfig load_app_config(const fs::path& config_path) {
             cfg.check_updates_before_launch = j.value("check_updates_before_launch", true);
         if (j.contains("auto_clean_build_dirs"))
             cfg.auto_clean_build_dirs = j.value("auto_clean_build_dirs", false);
+        if (j.contains("auto_gc_caches"))
+            cfg.auto_gc_caches = j.value("auto_gc_caches", true);
+        if (j.contains("keep_toolchain_versions"))
+            cfg.keep_toolchain_versions = j.value("keep_toolchain_versions", 2);
+        if (j.contains("keep_sdk_versions"))
+            cfg.keep_sdk_versions = j.value("keep_sdk_versions", 3);
+        if (j.contains("keep_orphan_engine_pins"))
+            cfg.keep_orphan_engine_pins = j.value("keep_orphan_engine_pins", 1);
+        if (j.contains("keep_release_zips_per_repo"))
+            cfg.keep_release_zips_per_repo = j.value("keep_release_zips_per_repo", 1);
+        if (j.contains("idle_build_keep_days"))
+            cfg.idle_build_keep_days = j.value("idle_build_keep_days", 14);
+        if (j.contains("ccache_max_gb")) cfg.ccache_max_gb = j.value("ccache_max_gb", 5);
 
         if (j.contains("default_install_root") && j.at("default_install_root").is_string())
             cfg.default_install_root = j.at("default_install_root").get<std::string>();
@@ -353,6 +372,13 @@ bool save_app_config(const fs::path& config_path, const AppConfig& cfg, std::str
               {"check_updates_on_startup", cfg.check_updates_on_startup},
               {"check_updates_before_launch", cfg.check_updates_before_launch},
               {"auto_clean_build_dirs", cfg.auto_clean_build_dirs},
+              {"auto_gc_caches", cfg.auto_gc_caches},
+              {"keep_toolchain_versions", cfg.keep_toolchain_versions},
+              {"keep_sdk_versions", cfg.keep_sdk_versions},
+              {"keep_orphan_engine_pins", cfg.keep_orphan_engine_pins},
+              {"keep_release_zips_per_repo", cfg.keep_release_zips_per_repo},
+              {"idle_build_keep_days", cfg.idle_build_keep_days},
+              {"ccache_max_gb", cfg.ccache_max_gb},
               {"catalog",
                {{"url", cfg.catalog.url},
                 {"github_repo", cfg.catalog.github_repo},

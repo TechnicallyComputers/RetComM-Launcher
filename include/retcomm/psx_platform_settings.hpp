@@ -36,6 +36,12 @@ struct PsxPlatformSettings {
     bool low_latency_input = false;
     // -1 adaptive, 0 immediate, 1 on
     int vsync = 1;
+    // Local rewind snap capacity (settings.toml [video] rewind_depth).
+    // UI offers 50 / 100 / 150 / 200; default 50.
+    int rewind_depth = 50;
+    // Frames between snaps (settings.toml [video] rewind_interval).
+    // UI offers 1 / 4 / 8 / 12 / 15; default 15.
+    int rewind_interval = 15;
 
     // --- Audio ([audio]) ---
     bool spu_hq = true;
@@ -56,8 +62,8 @@ struct PsxPlatformSettings {
 
     // --- Hotkeys (config.ini [KeyMap]) ---
     // Keys match recomp-ui / psxrecomp: Fullscreen, Reset, Pause, Turbo,
-    // VolumeUp, VolumeDown, DisplayPerf, ToggleRenderer.
-    static constexpr int kHotkeyCount = 8;
+    // VolumeUp, VolumeDown, DisplayPerf, ToggleRenderer, Rewind.
+    static constexpr int kHotkeyCount = 9;
     std::array<std::string, kHotkeyCount> hotkeys{};
 
     static const char* hotkey_ini_key(int i);

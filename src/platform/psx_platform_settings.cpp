@@ -293,6 +293,38 @@ void parse_toml_settings(const std::string& body, PsxPlatformSettings& s) {
                 if (ieq(val, "immediate")) s.vsync = 0;
                 else if (ieq(val, "adaptive")) s.vsync = -1;
                 else s.vsync = 1;
+            } else if (key == "rewind_depth") {
+                try {
+                    int d = std::stoi(val);
+                    static const int opts[4] = {50, 100, 150, 200};
+                    int best = opts[0];
+                    int best_d = d > best ? d - best : best - d;
+                    for (int i = 1; i < 4; ++i) {
+                        int dd = d > opts[i] ? d - opts[i] : opts[i] - d;
+                        if (dd < best_d) {
+                            best_d = dd;
+                            best = opts[i];
+                        }
+                    }
+                    s.rewind_depth = best;
+                } catch (...) {
+                }
+            } else if (key == "rewind_interval") {
+                try {
+                    int d = std::stoi(val);
+                    static const int opts[5] = {1, 4, 8, 12, 15};
+                    int best = opts[0];
+                    int best_d = d > best ? d - best : best - d;
+                    for (int i = 1; i < 5; ++i) {
+                        int dd = d > opts[i] ? d - opts[i] : opts[i] - d;
+                        if (dd < best_d) {
+                            best_d = dd;
+                            best = opts[i];
+                        }
+                    }
+                    s.rewind_interval = best;
+                } catch (...) {
+                }
             }
         } else if (table == "audio") {
             if (key == "spu_hq") parse_bool(val, &s.spu_hq);
@@ -419,6 +451,14 @@ void write_toml_body(std::string& body, const PsxPlatformSettings& s,
     upsert_toml_key(body, "video", "auto_skip_fmv", bool_lit(s.auto_skip_fmv));
     upsert_toml_key(body, "video", "low_latency_input", bool_lit(s.low_latency_input));
     upsert_toml_key(body, "video", "vsync", vsync_lit(s.vsync));
+    {
+        int d = s.rewind_depth;
+        if (d != 50 && d != 100 && d != 150 && d != 200) d = 50;
+        upsert_toml_key(body, "video", "rewind_depth", std::to_string(d));
+        int iv = s.rewind_interval;
+        if (iv != 1 && iv != 4 && iv != 8 && iv != 12 && iv != 15) iv = 15;
+        upsert_toml_key(body, "video", "rewind_interval", std::to_string(iv));
+    }
 
     upsert_toml_key(body, "audio", "spu_hq", bool_lit(s.spu_hq));
     upsert_toml_key(body, "controller", "multitap", bool_lit(s.multitap_enabled));
@@ -502,7 +542,8 @@ void write_ini_body(std::string& body, const PsxPlatformSettings& s) {
 
 const char* PsxPlatformSettings::hotkey_ini_key(int i) {
     static const char* k[] = {"Fullscreen",  "Reset",        "Pause",       "Turbo",
-                              "VolumeUp",    "VolumeDown",   "DisplayPerf", "ToggleRenderer"};
+                              "VolumeUp",    "VolumeDown",   "DisplayPerf", "ToggleRenderer",
+                              "Rewind"};
     if (i < 0 || i >= kHotkeyCount) return "";
     return k[i];
 }
@@ -510,14 +551,15 @@ const char* PsxPlatformSettings::hotkey_ini_key(int i) {
 const char* PsxPlatformSettings::hotkey_label(int i) {
     static const char* k[] = {"Fullscreen",  "Reset",          "Pause",
                               "Fast-forward", "Volume up",     "Volume down",
-                              "Display perf", "Toggle renderer"};
+                              "Display perf", "Toggle renderer", "Rewind"};
     if (i < 0 || i >= kHotkeyCount) return "";
     return k[i];
 }
 
 const char* PsxPlatformSettings::hotkey_default(int i) {
     static const char* k[] = {"Alt+Return", "Ctrl+R", "Shift+P", "Tab",
-                              "Keypad +",   "Keypad -", "F",     "R"};
+                              "Keypad +",   "Keypad -", "F",     "R",
+                              "F8"};
     if (i < 0 || i >= kHotkeyCount) return "";
     return k[i];
 }

@@ -63,6 +63,15 @@ struct AppConfig {
     // After a successful local generate+cmake, delete apps/<title>/src/current/build/
     // to save disk. Off by default so package updates stay incremental.
     bool auto_clean_build_dirs = false;
+    // Shared cache housekeeping (toolchains / sdks / engines / release zips /
+    // idle cmake build dirs). Runs after successful builds and via Hub / CLI.
+    bool auto_gc_caches = true;
+    int keep_toolchain_versions = 2;   // newest N per pack id (always keeps `latest`)
+    int keep_sdk_versions = 3;
+    int keep_orphan_engine_pins = 1;   // newest unreferenced pins to keep per engine name
+    int keep_release_zips_per_repo = 1;
+    int idle_build_keep_days = 14;     // 0 = never auto-prune idle src/.../build/
+    int ccache_max_gb = 5;             // 0 = don't manage CCACHE_DIR / MAXSIZE
     CatalogConfig catalog;
     RommConfig romm;
     NetplayConfig netplay;

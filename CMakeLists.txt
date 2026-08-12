@@ -42,6 +42,7 @@ set(RETCOMM_CORE_SOURCES
     src/install/install.cpp
     src/install/release_tags.cpp
     src/build/build.cpp
+    src/build/cache_gc.cpp
     src/update/self_update.cpp
     src/launch/launch.cpp
     src/platform/psx_platform_settings.cpp

@@ -1,4 +1,5 @@
 #include "retcomm/build.hpp"
+#include "retcomm/cache_gc.hpp"
 #include "retcomm/config.hpp"
 #include "retcomm/hash.hpp"
 #include "retcomm/http.hpp"
@@ -41,6 +42,15 @@ namespace retcomm {
 namespace {
 
 using nlohmann::json;
+
+std::string resolve_generate_engine(const Title& title);
+std::string sanitize_tag(std::string tag);
+std::string path_rel_key(const fs::path& base, const fs::path& p);
+void add_rel_with_parents(std::set<std::string>& out, const std::string& rel);
+bool rel_under_prefix(const std::string& rel, const std::string& prefix);
+bool files_content_equal(const fs::path& a, const fs::path& b);
+fs::path unwrap_single_subdir(const fs::path& root);
+bool path_is_dir_link(const fs::path& p);
 
 void progress(const BuildProgressFn& fn, const std::string& msg, float frac = -1.0f) {
     if (fn) fn(msg, frac);
@@ -493,9 +503,20 @@ bool rel_is_local_work_tree(const std::string& rel) {
            rel_under_prefix(rel, "disc");
 }
 
+/* Vendored framework / UI trees — harvested into data_dir/engines/<name>/<pin>/
+ * and linked into each title. Sync must never write through a shared link. */
+bool rel_is_shared_engine_tree(const std::string& rel) {
+    static const char* kNames[] = {"psxrecomp", "recomp-ui", "gbarecomp", "snesrecomp"};
+    for (const char* n : kNames) {
+        if (rel == n || rel_under_prefix(rel, n)) return true;
+    }
+    return false;
+}
+
 bool rel_is_protected(const std::string& rel, const std::string& build_key,
                       const std::vector<std::string>& extra_prefixes = {}) {
     if (rel.empty()) return false;
+    if (rel_is_shared_engine_tree(rel)) return true;
     if (rel_is_codegen_artifact(rel)) return true;
     if (rel_is_local_work_tree(rel)) return true;
     for (const std::string& p : extra_prefixes) {
@@ -1344,11 +1365,428 @@ PackEnsureResult harvest_embedded_sdk(const Paths& paths, const Title& title,
 void prune_embedded_tool_bins(const fs::path& src_root, const std::string& engine) {
     if (engine != "psxrecomp") return;
     std::error_code ec;
+    // Shared engine links must keep emitters so another title (or a different
+    // release-tag SDK slot) can still harvest into sdks/psxrecomp-tools/<tag>/.
+    if (path_is_dir_link(src_root / "psxrecomp")) return;
     const fs::path build = src_root / "psxrecomp" / "recompiler" / "build";
     if (!fs::is_directory(build, ec)) return;
     for (const char* name : {"psxrecomp-game", "psxrecomp-game.exe", "psxrecomp-bios",
                              "psxrecomp-bios.exe"}) {
         fs::remove(build / name, ec);
+    }
+}
+
+// --- Shared engine cache (psxrecomp / recomp-ui / …) -------------------------
+// Titles pin an exact framework commit. Harvest that tree once into
+// engines/<name>/<pin>/ and replace each title's copy with a symlink/junction.
+
+bool engine_tree_looks_ready(const std::string& name, const fs::path& root) {
+    std::error_code ec;
+    if (!fs::is_directory(root, ec)) return false;
+    if (name == "psxrecomp")
+        return fs::is_regular_file(root / "runtime" / "runtime.cmake", ec);
+    if (name == "gbarecomp") return fs::is_directory(root, ec);
+    if (name == "snesrecomp")
+        return fs::is_regular_file(root / "snesrecomp_cli.py", ec) ||
+               fs::is_directory(root, ec);
+    if (name == "recomp-ui")
+        return fs::is_regular_file(root / "include" / "recomp_launcher.h", ec) ||
+               fs::is_regular_file(root / "CMakeLists.txt", ec) ||
+               fs::is_directory(root, ec);
+    return true;
+}
+
+std::vector<std::string> shared_engine_names_for_title(const Title& title) {
+    std::vector<std::string> out;
+    const std::string eng = resolve_generate_engine(title);
+    if (eng == "psxrecomp") out.push_back("psxrecomp");
+    else if (eng == "gbarecomp") out.push_back("gbarecomp");
+    else if (eng == "snesrecomp") out.push_back("snesrecomp");
+    out.push_back("recomp-ui");
+    return out;
+}
+
+std::string parse_framework_pin_file(const fs::path& pins_path, const std::string& name) {
+    std::error_code ec;
+    if (!fs::is_regular_file(pins_path, ec)) return {};
+    std::ifstream in(pins_path);
+    if (!in) return {};
+    const std::string prefix = name + "=";
+    std::string line;
+    while (std::getline(in, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
+            line.pop_back();
+        if (line.rfind(prefix, 0) != 0) continue;
+        std::string rest = line.substr(prefix.size());
+        if (rest.empty() || rest[0] == '<') return {};
+        // Prefer parenthesized full SHA: short (full40)
+        const auto open = rest.find('(');
+        const auto close = rest.rfind(')');
+        if (open != std::string::npos && close != std::string::npos && close > open + 1) {
+            std::string full = rest.substr(open + 1, close - open - 1);
+            for (char& c : full) {
+                if (c >= 'A' && c <= 'F') c = static_cast<char>(c - 'A' + 'a');
+            }
+            bool hex = !full.empty();
+            for (char c : full) {
+                if (!std::isxdigit(static_cast<unsigned char>(c))) {
+                    hex = false;
+                    break;
+                }
+            }
+            if (hex) return full;
+        }
+        // Else take leading token
+        std::string tok;
+        for (char c : rest) {
+            if (c == ' ' || c == '\t' || c == '(') break;
+            tok.push_back(c);
+        }
+        return tok;
+    }
+    return {};
+}
+
+std::string content_engine_pin(const std::string& name, const fs::path& eng) {
+    std::vector<fs::path> keys;
+    if (name == "psxrecomp") {
+        keys = {eng / "runtime" / "runtime.cmake", eng / "psxrecomp_cli.py",
+                eng / "CMakeLists.txt"};
+    } else if (name == "recomp-ui") {
+        keys = {eng / "CMakeLists.txt", eng / "include" / "recomp_launcher.h"};
+    } else if (name == "gbarecomp") {
+        keys = {eng / "gbarecomp_cli.py", eng / "CMakeLists.txt"};
+    } else {
+        keys = {eng / "CMakeLists.txt"};
+    }
+    std::string acc;
+    for (const fs::path& p : keys) {
+        const std::string h = file_sha256_hex(p);
+        if (!h.empty()) acc += h;
+    }
+    if (acc.empty()) return {};
+    // Fold into a short stable id without hashing the string again.
+    if (acc.size() > 40) acc.resize(40);
+    return "c-" + acc;
+}
+
+std::string resolve_engine_pin(const std::string& name, const fs::path& project_root,
+                               const fs::path& eng) {
+    std::string pin = parse_framework_pin_file(project_root / "framework_pins.txt", name);
+    if (!pin.empty()) return pin;
+    // Prefer an existing cache marker when re-linking.
+    std::error_code ec;
+    const fs::path marker = eng / ".retcomm-engine.json";
+    if (fs::is_regular_file(marker, ec)) {
+        try {
+            std::ifstream in(marker);
+            const json j = json::parse(in);
+            pin = j.value("pin", "");
+            if (!pin.empty()) return pin;
+        } catch (...) {
+        }
+    }
+    pin = content_engine_pin(name, eng);
+    if (!pin.empty()) return pin;
+    return "unknown";
+}
+
+bool path_is_dir_link(const fs::path& p) {
+    std::error_code ec;
+#if defined(_WIN32)
+    const DWORD attrs = GetFileAttributesW(p.wstring().c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) return false;
+    return (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0 &&
+           (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
+    return fs::is_symlink(p, ec);
+#endif
+}
+
+bool remove_dir_entry_nofollow(const fs::path& p, std::string* error) {
+    std::error_code ec;
+#if defined(_WIN32)
+    const DWORD attrs = GetFileAttributesW(p.wstring().c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        fs::remove(p, ec);
+        return true;
+    }
+    if ((attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        const BOOL ok = ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0)
+                            ? RemoveDirectoryW(p.wstring().c_str())
+                            : DeleteFileW(p.wstring().c_str());
+        if (!ok) {
+            if (error) *error = "failed to unlink reparse point " + p.string();
+            return false;
+        }
+        return true;
+    }
+#endif
+    if (fs::is_symlink(p, ec)) {
+        fs::remove(p, ec);
+        if (ec) {
+            if (error) *error = "remove symlink " + p.string() + ": " + ec.message();
+            return false;
+        }
+        return true;
+    }
+    if (fs::is_directory(p, ec)) {
+        fs::remove_all(p, ec);
+        if (ec) {
+            if (error) *error = "remove directory " + p.string() + ": " + ec.message();
+            return false;
+        }
+        return true;
+    }
+    fs::remove(p, ec);
+    return true;
+}
+
+#if defined(_WIN32)
+bool win_create_directory_junction_build(const fs::path& link, const fs::path& target) {
+    std::wstring cmd = L"cmd.exe /C mklink /J \"";
+    cmd += link.wstring();
+    cmd += L"\" \"";
+    cmd += target.wstring();
+    cmd += L"\"";
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    if (!CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                        nullptr, nullptr, &si, &pi)) {
+        return false;
+    }
+    WaitForSingleObject(pi.hProcess, 15000);
+    DWORD code = 1;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return code == 0 && path_is_dir_link(link);
+}
+#endif
+
+bool link_directory_replace(const fs::path& link_path, const fs::path& target,
+                            std::string* error) {
+    std::error_code ec;
+    const fs::path abs_target = fs::weakly_canonical(target, ec);
+    const fs::path use_target = (!ec && !abs_target.empty()) ? abs_target : target;
+    ec.clear();
+    if (fs::exists(link_path, ec) || path_is_dir_link(link_path)) {
+        if (fs::equivalent(link_path, use_target, ec)) return true;
+        ec.clear();
+        if (!remove_dir_entry_nofollow(link_path, error)) return false;
+    }
+    fs::create_directories(link_path.parent_path(), ec);
+#if defined(_WIN32)
+#ifndef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+#define SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE 0x2
+#endif
+    const std::wstring link_w = link_path.wstring();
+    const std::wstring target_w = use_target.wstring();
+    if (CreateSymbolicLinkW(link_w.c_str(), target_w.c_str(),
+                            SYMBOLIC_LINK_FLAG_DIRECTORY |
+                                SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) ||
+        CreateSymbolicLinkW(link_w.c_str(), target_w.c_str(), SYMBOLIC_LINK_FLAG_DIRECTORY)) {
+        return true;
+    }
+    if (win_create_directory_junction_build(link_path, use_target)) return true;
+    if (error)
+        *error = "cannot create directory link " + link_path.string() + " → " +
+                 use_target.string() + " (need Developer Mode or junction)";
+    return false;
+#else
+    fs::create_directory_symlink(use_target, link_path, ec);
+    if (!ec) return true;
+    if (error)
+        *error = "cannot create symlink " + link_path.string() + ": " + ec.message();
+    return false;
+#endif
+}
+
+bool path_under_prefix(const fs::path& path, const fs::path& prefix) {
+    std::error_code ec;
+    const fs::path a = fs::weakly_canonical(path, ec);
+    const fs::path b = fs::weakly_canonical(prefix, ec);
+    if (a.empty() || b.empty()) return false;
+    auto ait = a.begin(), bit = b.begin();
+    for (; ait != a.end() && bit != b.end(); ++ait, ++bit) {
+        if (*ait != *bit) return false;
+    }
+    return bit == b.end();
+}
+
+// Content-aware copy into the engine cache; skip VCS metadata.
+bool sync_engine_tree_into_cache(const fs::path& from, const fs::path& to, std::string* error) {
+    std::error_code ec;
+    if (!fs::is_directory(from, ec)) {
+        if (error) *error = "missing engine tree: " + from.string();
+        return false;
+    }
+    fs::create_directories(to, ec);
+
+    std::set<std::string> wanted;
+    std::vector<fs::path> src_files;
+    for (auto it = fs::recursive_directory_iterator(
+             from, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        const fs::path p = it->path();
+        const std::string rel = path_rel_key(from, p);
+        if (rel.empty()) continue;
+        if (rel == ".git" || rel_under_prefix(rel, ".git")) {
+            if (it->is_directory(ec)) it.disable_recursion_pending();
+            continue;
+        }
+        add_rel_with_parents(wanted, rel);
+        if (it->is_regular_file(ec)) src_files.push_back(p);
+    }
+    if (ec) {
+        if (error) *error = "scan engine: " + ec.message();
+        return false;
+    }
+
+    for (const fs::path& src_file : src_files) {
+        const std::string rel = path_rel_key(from, src_file);
+        if (rel.empty()) continue;
+        const fs::path dst_file = to / fs::path(rel);
+        std::error_code tec;
+        if (fs::is_regular_file(dst_file, tec) && files_content_equal(src_file, dst_file))
+            continue;
+        fs::create_directories(dst_file.parent_path(), tec);
+        fs::copy_file(src_file, dst_file, fs::copy_options::overwrite_existing, tec);
+        if (tec) {
+            if (error) *error = "engine sync copy " + rel + ": " + tec.message();
+            return false;
+        }
+    }
+
+    for (const std::string& rel : wanted) {
+        if (!fs::is_directory(from / fs::path(rel), ec)) continue;
+        fs::create_directories(to / fs::path(rel), ec);
+    }
+
+    std::vector<fs::path> stale;
+    for (auto it = fs::recursive_directory_iterator(
+             to, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        const fs::path p = it->path();
+        const std::string rel = path_rel_key(to, p);
+        if (rel.empty() || wanted.count(rel)) continue;
+        if (rel == ".retcomm-engine.json") continue;
+        stale.push_back(p);
+    }
+    std::sort(stale.begin(), stale.end(), [](const fs::path& a, const fs::path& b) {
+        return a.native().size() > b.native().size();
+    });
+    for (const fs::path& p : stale) {
+        ec.clear();
+        if (!fs::exists(p, ec)) continue;
+        fs::remove_all(p, ec);
+    }
+    return true;
+}
+
+fs::path resolve_engines_root(const Paths& paths, const fs::path& override_dir) {
+    if (!override_dir.empty()) return override_dir;
+    if (const char* e = std::getenv("RETCOMM_ENGINES_DIR")) {
+        if (e && *e) return fs::path(e);
+    }
+    return paths.engines_dir;
+}
+
+// Harvest vendored engine trees into the shared cache and replace per-title
+// copies with symlink/junction. Safe to call repeatedly. Soft-fails (keeps
+// full local copy) when linking is unavailable.
+void promote_shared_engines(const Paths& paths, const Title& title, const fs::path& dest,
+                            const fs::path& engine_source, const BuildProgressFn& on_progress,
+                            const fs::path& engines_override = {}) {
+    std::error_code ec;
+    if (!fs::is_directory(dest, ec)) return;
+    const fs::path engines_root = resolve_engines_root(paths, engines_override);
+    if (engines_root.empty()) return;
+    fs::create_directories(engines_root, ec);
+
+    const fs::path src_root =
+        fs::is_directory(engine_source, ec) ? unwrap_single_subdir(engine_source) : dest;
+
+    for (const std::string& name : shared_engine_names_for_title(title)) {
+        const fs::path link_path = dest / name;
+        const fs::path harvest_from = src_root / name;
+
+        // Resolve a real directory to harvest from (prefer staging / source).
+        fs::path real_from;
+        if (fs::is_directory(harvest_from, ec) && !path_is_dir_link(harvest_from)) {
+            real_from = harvest_from;
+        } else if (path_is_dir_link(harvest_from) || fs::is_directory(harvest_from, ec)) {
+            // Already a link — only re-target if needed; don't harvest through it
+            // unless we can resolve a non-cache materialization.
+            real_from.clear();
+        } else if (fs::is_directory(link_path, ec) && !path_is_dir_link(link_path)) {
+            real_from = link_path;
+        }
+
+        if (real_from.empty() && !engine_tree_looks_ready(name, link_path) &&
+            !engine_tree_looks_ready(name, harvest_from)) {
+            continue;
+        }
+
+        // Pin from project pins file (staging or dest) + tree content.
+        const fs::path pins_root =
+            fs::is_regular_file(src_root / "framework_pins.txt", ec) ? src_root : dest;
+        fs::path pin_tree = !real_from.empty() ? real_from : harvest_from;
+        if (pin_tree.empty() || !fs::exists(pin_tree, ec)) pin_tree = link_path;
+        if (!engine_tree_looks_ready(name, pin_tree) && real_from.empty()) continue;
+
+        const std::string pin = resolve_engine_pin(name, pins_root, pin_tree);
+        const std::string safe = sanitize_tag(pin.empty() ? "unknown" : pin);
+        const fs::path cache = engines_root / name / safe;
+
+        if (!engine_tree_looks_ready(name, cache)) {
+            if (real_from.empty()) {
+                // Linked elsewhere / incomplete — cannot populate cache.
+                continue;
+            }
+            // Don't harvest a tree that already lives under the engines cache.
+            if (path_under_prefix(real_from, engines_root)) {
+                // Ensure dest links at that cache entry.
+            } else {
+                progress(on_progress, "Caching shared engine " + name + "@" + safe + "…");
+                std::string err;
+                if (!sync_engine_tree_into_cache(real_from, cache, &err)) {
+                    progress(on_progress, "Shared engine cache skipped (" + name + "): " + err);
+                    continue;
+                }
+                try {
+                    json meta = {{"id", name},
+                                 {"pin", pin},
+                                 {"title", title.id},
+                                 {"source", "harvested-from-game-source"}};
+                    std::ofstream out(cache / ".retcomm-engine.json");
+                    out << meta.dump(2) << "\n";
+                } catch (...) {
+                }
+            }
+        } else if (!real_from.empty() && !path_under_prefix(real_from, engines_root) &&
+                   !path_is_dir_link(real_from)) {
+            // Refresh cache from newer staging bytes (content-aware; no-op if identical).
+            std::string err;
+            if (!sync_engine_tree_into_cache(real_from, cache, &err)) {
+                progress(on_progress, "Shared engine refresh skipped (" + name + "): " + err);
+            }
+        }
+
+        if (!engine_tree_looks_ready(name, cache)) continue;
+
+        if (fs::equivalent(link_path, cache, ec)) continue;
+        ec.clear();
+
+        progress(on_progress, "Linking " + name + " → engines/" + name + "/" + safe);
+        std::string err;
+        if (!link_directory_replace(link_path, cache, &err)) {
+            progress(on_progress, "Keeping local " + name + " (" + err + ")");
+            continue;
+        }
     }
 }
 
@@ -2579,7 +3017,8 @@ PackEnsureResult ensure_pack(const Paths& paths, const TitleBuildPack& pack, boo
 PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
                                     const fs::path& override_dir, bool force,
                                     BuildProgressFn on_progress,
-                                    const std::string& hint_latest_tag) {
+                                    const std::string& hint_latest_tag,
+                                    const fs::path& engines_dir) {
     PackEnsureResult r;
     std::error_code ec;
 
@@ -2623,7 +3062,12 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
                                    ? fs::path("build")
                                    : fs::path(title.build.cmake.build_dir);
 
-    auto finish_ok = [&](const std::string& tag, const std::string& asset, const char* kind) {
+    auto finish_ok = [&](const std::string& tag, const std::string& asset, const char* kind,
+                         const fs::path& engine_src = {}) {
+        // Dedup framework/UI trees into data_dir/engines/<name>/<pin>/ before
+        // marking the source ready (harvest from staging when available).
+        const fs::path eng_src = engine_src.empty() ? dest : engine_src;
+        promote_shared_engines(paths, title, dest, eng_src, on_progress, engines_dir);
         json meta = {{"github", gh},
                      {"ref", tag},
                      {"asset", asset},
@@ -2696,6 +3140,8 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
         if (zip.ok && !zip.zip_path.empty() && !zip.tag.empty()) {
             ensure_working_source_dir(title, src_base, dest, zip.tag, on_progress);
             if (source_up_to_date(zip.tag)) {
+                // Convert any leftover full engine copies on cached source trees.
+                promote_shared_engines(paths, title, dest, dest, on_progress, engines_dir);
                 r.ok = true;
                 r.root = dest;
                 r.tag = zip.tag;
@@ -2711,8 +3157,11 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
             std::string err;
             if (extract_archive_to(zip.zip_path, staging, &err) &&
                 install_into_working(staging, &err)) {
+                // Engines are excluded from content-sync; link them before the
+                // cmake-buildable check so a fresh preserving install still passes.
+                promote_shared_engines(paths, title, dest, staging, on_progress, engines_dir);
                 if (source_tree_buildable(title, dest)) {
-                    finish_ok(zip.tag, zip.asset_name, "release");
+                    finish_ok(zip.tag, zip.asset_name, "release", staging);
                     if (zip.from_cache) r.message += " [" + zip.message + "]";
                     return r;
                 }
@@ -2747,6 +3196,7 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
     }
     ensure_working_source_dir(title, src_base, dest, ref, on_progress);
     if (source_up_to_date(ref)) {
+        promote_shared_engines(paths, title, dest, dest, on_progress, engines_dir);
         r.ok = true;
         r.root = dest;
         r.tag = ref;
@@ -2781,6 +3231,7 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
         return r;
     }
     fs::remove(download, ec);
+    promote_shared_engines(paths, title, dest, staging, on_progress, engines_dir);
     if (!source_tree_buildable(title, dest)) {
         r.message =
             "source zipball is not cmake-buildable (git submodules omitted). "
@@ -2788,7 +3239,7 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
             "RETCOMM_SOURCE_DIR to a full checkout.";
         return r;
     }
-    finish_ok(ref, safe_ref + "-zipball.zip", "zipball");
+    finish_ok(ref, safe_ref + "-zipball.zip", "zipball", staging);
     return r;
 }
 
@@ -2827,7 +3278,7 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
     }
 
     auto src = ensure_source_tree(paths, title, opts.source_dir, opts.force, opts.on_progress,
-                                  opts.hint_latest_tag);
+                                  opts.hint_latest_tag, opts.engines_dir);
     if (!src.ok) {
         result.message = src.message;
         return result;
@@ -3164,6 +3615,9 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
         {
             const auto tc_env = toolchain_cmake_env(path_prefix);
             gen_env.insert(gen_env.end(), tc_env.begin(), tc_env.end());
+            const AppConfig ccache_cfg = load_app_config(paths.config_path);
+            const auto cc_env = shared_ccache_env(paths, ccache_cfg);
+            gen_env.insert(gen_env.end(), cc_env.begin(), cc_env.end());
         }
 
         if (opts.on_output) opts.on_output("$ " + gen_preview.str());
@@ -3322,7 +3776,12 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
     const auto stream_cli = [&](const std::string& line) {
         if (opts.on_output) opts.on_output(line);
     };
-    const auto tc_cmake_env = toolchain_cmake_env(path_prefix);
+    auto tc_cmake_env = toolchain_cmake_env(path_prefix);
+    {
+        const AppConfig ccache_cfg = load_app_config(paths.config_path);
+        const auto cc_env = shared_ccache_env(paths, ccache_cfg);
+        tc_cmake_env.insert(tc_cmake_env.end(), cc_env.begin(), cc_env.end());
+    }
 
     if (skip_configure) {
         progress(opts.on_progress, "Reusing cmake configure (inputs unchanged)…", 0.55f);
@@ -3439,12 +3898,18 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
 
     // Free disk: optional cmake build/ wipe (Library Settings → Advanced) + always
     // drop leftover embedded toolchain/ (compilers live in the shared cache).
-    const bool auto_clean =
-        load_app_config(paths.config_path).auto_clean_build_dirs;
+    const AppConfig post_cfg = load_app_config(paths.config_path);
+    const bool auto_clean = post_cfg.auto_clean_build_dirs;
     if (auto_clean)
         progress(opts.on_progress, "Cleaning cmake build directory…", 0.97f);
     prune_build_tree_after_success(src.root, build_dir, auto_clean);
     prune_stale_source_tag_dirs(paths.apps_dir / title.install_dir_name / "src", src.root);
+
+    CacheGcResult gc;
+    if (post_cfg.auto_gc_caches) {
+        progress(opts.on_progress, "Pruning shared caches…", 0.98f);
+        gc = run_cache_gc(paths, post_cfg);
+    }
 
     result.plan = inspect_install(paths, title);
     result.plan.latest_tag = pin_tag;
@@ -3453,6 +3918,11 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
                      "  binary: " + result.plan.binary_path.string() + "\n" +
                      "  sdk: " + sdk.tag + "  toolchain: " + tc.tag + "\n";
     if (auto_clean) result.message += "  cleaned cmake build/ (auto_clean_build_dirs)\n";
+    if (!gc.message.empty() &&
+        (gc.removed_toolchains + gc.removed_sdks + gc.removed_engines + gc.removed_release_zips +
+             gc.removed_idle_builds >
+         0))
+        result.message += "  " + gc.message + "\n";
     if (!stash_note.empty()) result.message += "  " + stash_note;
     if (!restore_note.empty()) result.message += "  " + restore_note;
     if (!prune_note.empty()) result.message += "  " + prune_note;
