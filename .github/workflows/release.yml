@@ -1,14 +1,27 @@
 name: Release
 
-# Manual only — does not run on push/PR. Creates tag v<version> and publishes
-# GitHub Release assets after a successful multi-platform build.
+# Manual only — does not run on push/PR. Leave version empty to auto-bump the
+# next x.x.x from the latest vX.Y.Z tag, then publish a GitHub Release after a
+# successful multi-platform build.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Semver without leading v (e.g. 0.1.2). Empty = RETCOMM_VERSION from CMakeLists.txt"
+        description: >-
+          Semver without leading v (e.g. 0.6.4). Leave empty to auto-bump from
+          the latest vX.Y.Z git tag (see bump).
         required: false
+        type: string
         default: ""
+      bump:
+        description: "When version is empty, which semver component to increment"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        required: false
+        default: patch
       prerelease:
         description: "Mark GitHub release as prerelease"
         type: boolean
@@ -29,27 +42,66 @@ jobs:
       tag: ${{ steps.v.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - id: v
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -n "${{ inputs.version }}" ]]; then
-            VER="${{ inputs.version }}"
+          RAW="$(printf '%s' "${{ inputs.version }}" | tr -d '[:space:]')"
+          BUMP="${{ inputs.bump || 'patch' }}"
+
+          bump_semver() {
+            local base="$1" which="${2:-patch}"
+            local ma mi pa
+            base="${base#v}"
+            base="${base%%[-+]*}"
+            if [[ ! "${base}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::cannot bump non-semver base '${base}'" >&2
+              exit 1
+            fi
+            IFS=. read -r ma mi pa <<<"${base}"
+            ma="${ma:-0}"; mi="${mi:-0}"; pa="${pa:-0}"
+            case "${which}" in
+              major) ma=$((ma + 1)); mi=0; pa=0 ;;
+              minor) mi=$((mi + 1)); pa=0 ;;
+              patch) pa=$((pa + 1)) ;;
+              *)
+                echo "::error::unknown bump '${which}' (want patch|minor|major)" >&2
+                exit 1
+                ;;
+            esac
+            printf '%s.%s.%s' "${ma}" "${mi}" "${pa}"
+          }
+
+          if [[ -z "${RAW}" ]]; then
+            LATEST="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -1 || true)"
+            BASE="${LATEST#v}"
+            if [[ -z "${BASE}" ]]; then
+              # Seed from CMakeLists only when the repo has no release tags yet.
+              BASE="$(sed -n 's/.*set(RETCOMM_VERSION "\([^"]*\)".*/\1/p' CMakeLists.txt | head -1 || true)"
+              BASE="${BASE#v}"
+              BASE="${BASE%%[-+]*}"
+            fi
+            BASE="${BASE:-0.0.0}"
+            VER="$(bump_semver "${BASE}" "${BUMP}")"
+            echo "Auto-bumped ${BUMP}: ${LATEST:-none (${BASE})} → ${VER}"
           else
-            VER="$(sed -n 's/.*set(RETCOMM_VERSION "\([^"]*\)".*/\1/p' CMakeLists.txt | head -1)"
-            if [[ -z "$VER" ]]; then
-              echo "Could not read RETCOMM_VERSION from CMakeLists.txt" >&2
+            VER="${RAW#v}"
+            if [[ ! "${VER}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.+-][A-Za-z0-9.+-]*)?$ ]]; then
+              echo "::error::Invalid version: ${VER} (expected semver like 0.1.2)" >&2
               exit 1
             fi
           fi
-          # Normalize: strip a leading v if the operator typed one.
-          VER="${VER#v}"
-          if [[ ! "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].*)?$ ]]; then
-            echo "Invalid version: ${VER} (expected semver like 0.1.2)" >&2
+
+          TAG="v${VER}"
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null 2>&1 || \
+             git ls-remote --tags origin "refs/tags/${TAG}" | grep -q .; then
+            echo "::error::tag ${TAG} already exists — bump again or pass an explicit version" >&2
             exit 1
           fi
-          TAG="v${VER}"
+
           echo "version=${VER}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Building RetComM ${VER} (tag ${TAG})"

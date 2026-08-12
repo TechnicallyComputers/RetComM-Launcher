@@ -143,10 +143,12 @@ exclude dirs, update checks, etc.).
 | `RetComM-Launcher-macos-arm64.dmg` | macOS Apple Silicon |
 | `RetComM-Launcher-macos-x86_64.dmg` | macOS Intel |
 
-Releases are published manually via Actions → **Release**. Hub **Update RetComM**
-pulls the matching asset for your install channel. Windows portable: unzip and run
-`RetComM Launcher.exe` (hub), or `RetComM Launcher.exe cli <command>` for the CLI
-(same idea as the Linux AppImage `cli` dispatch).
+Releases are published manually via Actions → **Release**. Leave **version**
+empty to auto-bump the next `x.x.x` from the latest `vX.Y.Z` tag (`bump`
+defaults to patch). Hub **Update RetComM** pulls the matching asset for your
+install channel. Windows portable: unzip and run `RetComM Launcher.exe` (hub),
+or `RetComM Launcher.exe cli <command>` for the CLI (same idea as the Linux
+AppImage `cli` dispatch).
 
 ## Build from source
 
