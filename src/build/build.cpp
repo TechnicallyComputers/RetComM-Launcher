@@ -2825,6 +2825,14 @@ bool stage_build_output(const fs::path& src_root, const fs::path& build_dir,
             copy_tree_if_exists(exe_dir / cfg_name, staging / cfg_name, error);
         }
     }
+    // Optional in-game OPTION defaults (titles that ship game_options.toml).
+    {
+        const fs::path opt_name = "game_options.toml";
+        if (!copy_tree_if_exists(src_root / opt_name, staging / opt_name, error)) return false;
+        if (!fs::exists(staging / opt_name, ec)) {
+            copy_tree_if_exists(exe_dir / opt_name, staging / opt_name, error);
+        }
+    }
     // Fallback assets from source tree (recomp-ui POST_BUILD may not have run yet).
     if (!fs::exists(staging / "assets" / "fonts", ec)) {
         copy_tree_if_exists(src_root / "recomp-ui" / "assets" / "fonts",
