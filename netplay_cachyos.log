@@ -1,3 +1,20 @@
 retcomm-hub: loaded UI font /home/alex/Documents/GitHub/retcomm-launcher/assets/fonts/LatoLatin-Regular.ttf
 retcomm-hub: merged symbol/emoji font /usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf
 retcomm-hub: merged color-emoji font /usr/share/fonts/noto/NotoColorEmoji.ttf
+psxrecomp: main() entered
+psxrecomp: idle_skip disabled
+psxrecomp: overlay_region_floor = 0x59800 (game text end)
+psxrecomp: loaded game config /mnt/raid0/Retcomm-Games/TwistedMetal4Recomp/releases/build-v0.3.8/game.toml (TwistedMetal4Recomp, SCUS-94560)
+psx_lobby: WS connected peer 172.86.88.70 (url host netplay.retcomm.net)
+psx_lobby: turn_credentials ok stun=coturn.retcomm.net:3478 turn=coturn.retcomm.net:3478 user=1786670921:ba254a4d-2ba8-4311-a634-d49826660be8 ttl=86400s
+psx_lobby: LAN beacon publish e09f1b84-1077-4cd1-a276-e847fa750c67 → 192.168.66.3:7777
+psx_lobby: LAN beacon publish e09f1b84-1077-4cd1-a276-e847fa750c67 → 192.168.66.3:7777
+psx_lobby: advertised host_endpoint=216.154.76.149:7777 (LAN via local beacon)
+psx_lobby: LAN beacon publish 853c44da-8f7e-433a-8b21-08f0eae61b21 → 192.168.66.3:7777
+psx_lobby: LAN beacon publish 853c44da-8f7e-433a-8b21-08f0eae61b21 → 192.168.66.3:7777
+psx_lobby: advertised host_endpoint=216.154.76.149:7777 (LAN via local beacon)
+psxrecomp: main() entered
+psxrecomp: idle_skip disabled
+psxrecomp: overlay_region_floor = 0x59800 (game text end)
+psxrecomp: loaded game config /mnt/raid0/Retcomm-Games/TwistedMetal4Recomp/releases/build-v0.3.8/game.toml (TwistedMetal4Recomp, SCUS-94560)
+psxrecomp: launcher closed; exiting.

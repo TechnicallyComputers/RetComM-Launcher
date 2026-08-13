@@ -142,15 +142,15 @@ void set_latest_pointer(const fs::path& cache_base, const fs::path& pack_root) {
 
     const std::wstring target = pack_root.wstring();
     const std::wstring link = latest.wstring();
-    // Dev Mode / elevated: real directory symlink.
+    // Junction first — no Developer Mode; same-volume toolchain cache.
+    if (win_create_directory_junction(latest, pack_root)) return;
+    // Dev Mode / elevated: real directory symlink (cross-volume fallback).
     if (CreateSymbolicLinkW(link.c_str(), target.c_str(),
                             SYMBOLIC_LINK_FLAG_DIRECTORY |
                                 SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) ||
         CreateSymbolicLinkW(link.c_str(), target.c_str(), SYMBOLIC_LINK_FLAG_DIRECTORY)) {
         return;
     }
-    // No privilege needed; preferred portable Windows approach.
-    if (win_create_directory_junction(latest, pack_root)) return;
 
     // Never fs::copy the whole toolchain — that hung the Hub for minutes.
     // publish_toolchain_user_env will fall back to pack_root for PATH.

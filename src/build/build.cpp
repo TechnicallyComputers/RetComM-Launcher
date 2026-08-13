@@ -411,6 +411,54 @@ bool source_tree_buildable(const Title& title, const fs::path& root) {
     return true;
 }
 
+/* Diagnose failed source_tree_buildable after a release/zipball install.
+ * Distinguishes a bad archive from unfollowable engine links (Windows). */
+std::string describe_unbuildable_source(const Title& title, const fs::path& root,
+                                        const std::string& asset_label) {
+    std::error_code ec;
+    const std::string label = asset_label.empty() ? "source" : asset_label;
+    if (!fs::is_regular_file(root / "CMakeLists.txt", ec)) {
+        return "source tree missing CMakeLists.txt after install (" + label + ")";
+    }
+    const std::string eng = to_lower(title.build.generate.engine);
+    const std::string plat = to_lower(title.platform);
+    auto engine_issue = [&](const char* name, const fs::path& marker) -> std::string {
+        const fs::path eng_root = root / name;
+        if (path_is_dir_link(eng_root) && !fs::exists(marker, ec)) {
+            return std::string(name) +
+                   " engine link not traversable after install (" + label +
+                   ") — delete src/current/" + name +
+                   " and retry Update (junction preferred; enable Developer Mode if needed)";
+        }
+        if (!fs::exists(marker, ec) && !fs::is_directory(eng_root, ec)) {
+            return std::string(name) + " missing from install (" + label +
+                   ") — release zip may be incomplete";
+        }
+        if (!fs::exists(marker, ec)) {
+            return std::string(name) + " present but incomplete (" + label + ")";
+        }
+        return {};
+    };
+    if (eng == "psxrecomp" || (eng.empty() && plat == "psx")) {
+        if (std::string m =
+                engine_issue("psxrecomp", root / "psxrecomp" / "runtime" / "runtime.cmake");
+            !m.empty())
+            return m;
+        if (std::string m = engine_issue("recomp-ui", root / "recomp-ui" / "CMakeLists.txt");
+            !m.empty())
+            return m;
+        if (!fs::is_directory(root / "recomp-ui", ec)) {
+            return "recomp-ui missing from install (" + label + ")";
+        }
+    } else if (eng == "gbarecomp" || (eng.empty() && plat == "gba")) {
+        if (std::string m = engine_issue("gbarecomp", root / "gbarecomp"); !m.empty()) return m;
+        if (std::string m = engine_issue("recomp-ui", root / "recomp-ui" / "CMakeLists.txt");
+            !m.empty())
+            return m;
+    }
+    return "source tree not cmake-buildable after install (" + label + ")";
+}
+
 bool install_extracted_tree(const fs::path& staging, const fs::path& dest, std::string* error) {
     std::error_code ec;
     fs::remove_all(dest, ec);
@@ -1567,6 +1615,18 @@ bool win_create_directory_junction_build(const fs::path& link, const fs::path& t
 }
 #endif
 
+/* True when link resolves to target for ordinary filesystem reads.
+ * Windows can create an unprivileged directory symlink that still cannot be
+ * followed without Developer Mode — CreateSymbolicLinkW succeeds but
+ * equivalent / nested is_regular_file fail. */
+bool dir_link_resolves_to(const fs::path& link, const fs::path& target) {
+    std::error_code ec;
+    if (!fs::is_directory(link, ec)) return false;
+    ec.clear();
+    if (fs::equivalent(link, target, ec)) return true;
+    return false;
+}
+
 bool link_directory_replace(const fs::path& link_path, const fs::path& target,
                             std::string* error) {
     std::error_code ec;
@@ -1574,7 +1634,7 @@ bool link_directory_replace(const fs::path& link_path, const fs::path& target,
     const fs::path use_target = (!ec && !abs_target.empty()) ? abs_target : target;
     ec.clear();
     if (fs::exists(link_path, ec) || path_is_dir_link(link_path)) {
-        if (fs::equivalent(link_path, use_target, ec)) return true;
+        if (dir_link_resolves_to(link_path, use_target)) return true;
         ec.clear();
         if (!remove_dir_entry_nofollow(link_path, error)) return false;
     }
@@ -1583,24 +1643,41 @@ bool link_directory_replace(const fs::path& link_path, const fs::path& target,
 #ifndef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
 #define SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE 0x2
 #endif
+    /* Prefer junction: same-volume apps↔engines under LocalAppData, no Dev Mode.
+     * Symlinks that "succeed" but are not followable used to trip Update with a
+     * false "release zip lacks buildable engine/UI tree". */
+    if (win_create_directory_junction_build(link_path, use_target) &&
+        dir_link_resolves_to(link_path, use_target)) {
+        return true;
+    }
+    remove_dir_entry_nofollow(link_path, nullptr);
+
     const std::wstring link_w = link_path.wstring();
     const std::wstring target_w = use_target.wstring();
     if (CreateSymbolicLinkW(link_w.c_str(), target_w.c_str(),
                             SYMBOLIC_LINK_FLAG_DIRECTORY |
                                 SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) ||
         CreateSymbolicLinkW(link_w.c_str(), target_w.c_str(), SYMBOLIC_LINK_FLAG_DIRECTORY)) {
+        if (dir_link_resolves_to(link_path, use_target)) return true;
+        remove_dir_entry_nofollow(link_path, nullptr);
+    }
+
+    if (win_create_directory_junction_build(link_path, use_target) &&
+        dir_link_resolves_to(link_path, use_target)) {
         return true;
     }
-    if (win_create_directory_junction_build(link_path, use_target)) return true;
+    remove_dir_entry_nofollow(link_path, nullptr);
+
     if (error)
-        *error = "cannot create directory link " + link_path.string() + " → " +
-                 use_target.string() + " (need Developer Mode or junction)";
+        *error = "cannot create traversable directory link " + link_path.string() + " → " +
+                 use_target.string() + " (junction/symlink failed; enable Developer Mode)";
     return false;
 #else
     fs::create_directory_symlink(use_target, link_path, ec);
-    if (!ec) return true;
+    if (!ec && dir_link_resolves_to(link_path, use_target)) return true;
     if (error)
-        *error = "cannot create symlink " + link_path.string() + ": " + ec.message();
+        *error = "cannot create symlink " + link_path.string() + ": " +
+                 (ec ? ec.message() : "link not traversable");
     return false;
 #endif
 }
@@ -1778,7 +1855,10 @@ void promote_shared_engines(const Paths& paths, const Title& title, const fs::pa
 
         if (!engine_tree_looks_ready(name, cache)) continue;
 
-        if (fs::equivalent(link_path, cache, ec)) continue;
+        /* Skip only when the link both points at cache and is followable.
+         * Unfollowable Windows symlinks look "linked" but break buildable. */
+        if (dir_link_resolves_to(link_path, cache) && engine_tree_looks_ready(name, link_path))
+            continue;
         ec.clear();
 
         progress(on_progress, "Linking " + name + " → engines/" + name + "/" + safe);
@@ -1786,6 +1866,11 @@ void promote_shared_engines(const Paths& paths, const Title& title, const fs::pa
         if (!link_directory_replace(link_path, cache, &err)) {
             progress(on_progress, "Keeping local " + name + " (" + err + ")");
             continue;
+        }
+        if (!engine_tree_looks_ready(name, link_path)) {
+            progress(on_progress,
+                     "Engine link not traversable (" + name +
+                         ") — Update may fail cmake-buildable check");
         }
     }
 }
@@ -3218,8 +3303,7 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
                     if (zip.from_cache) r.message += " [" + zip.message + "]";
                     return r;
                 }
-                r.message =
-                    "release zip lacks buildable engine/UI tree (" + zip.asset_name + ")";
+                r.message = describe_unbuildable_source(title, dest, zip.asset_name);
                 return r;
             }
             r.message = "release source extract failed: " +
@@ -3286,10 +3370,10 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
     fs::remove(download, ec);
     promote_shared_engines(paths, title, dest, staging, on_progress, engines_dir);
     if (!source_tree_buildable(title, dest)) {
-        r.message =
-            "source zipball is not cmake-buildable (git submodules omitted). "
-            "Publish a setup/release zip that vendors psxrecomp+recomp-ui, or set "
-            "RETCOMM_SOURCE_DIR to a full checkout.";
+        r.message = describe_unbuildable_source(title, dest, safe_ref + "-zipball.zip") +
+                    ". Zipballs omit git submodules — prefer a setup/release zip that "
+                    "vendors psxrecomp+recomp-ui, or set RETCOMM_SOURCE_DIR to a full "
+                    "checkout.";
         return r;
     }
     finish_ok(ref, safe_ref + "-zipball.zip", "zipball", staging);
