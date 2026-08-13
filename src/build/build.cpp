@@ -2760,6 +2760,51 @@ bool copy_tree_if_exists(const fs::path& src, const fs::path& dest, std::string*
     return true;
 }
 
+/* Titles like Tomba POST_BUILD-copy game_options.toml even when the release zip
+ * omits it. Create a comment-only stub so cmake --build and generate can proceed;
+ * load_game_options treats a file with no [[option]] rows as empty. */
+bool ensure_game_options_toml(const fs::path& src_root, BuildOutputFn on_output) {
+    const fs::path path = src_root / "game_options.toml";
+    std::error_code ec;
+    if (fs::is_regular_file(path, ec)) {
+        const auto sz = fs::file_size(path, ec);
+        // Non-empty file: leave alone. Zero-byte stubs (broken releases / prior
+        // touch) get refreshed so toml::parse does not choke on an empty file.
+        if (!ec && sz > 0) return true;
+    }
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        if (on_output) {
+            on_output("could not create missing game_options.toml at " + path.string());
+        }
+        return false;
+    }
+    static constexpr char kStub[] =
+        "# Native in-game OPTION persistence (optional).\n"
+        "# Add [[option]] rows when the title needs them; leave empty otherwise.\n"
+        "# See psxrecomp GameOptions / runtime game_options.c.\n"
+        "#\n"
+        "# [[option]]\n"
+        "# name = \"example\"\n"
+        "# addr = \"0x80000000\"\n"
+        "# size = 1\n"
+        "# init_store_pc = \"0x80000000\"\n"
+        "# min = 0\n"
+        "# max = 1\n";
+    out << kStub;
+    out.flush();
+    if (!out) {
+        if (on_output) {
+            on_output("failed writing game_options.toml stub at " + path.string());
+        }
+        return false;
+    }
+    if (on_output) {
+        on_output("created missing game_options.toml stub at " + path.string());
+    }
+    return true;
+}
+
 bool stage_build_output(const fs::path& src_root, const fs::path& build_dir,
                         const std::string& launch_name, const fs::path& release_dir,
                         const std::string& game_config_rel, std::string* error) {
@@ -3289,6 +3334,13 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
                                   opts.hint_latest_tag, opts.engines_dir);
     if (!src.ok) {
         result.message = src.message;
+        return result;
+    }
+    // Before generate/cmake: some title CMakeLists POST_BUILD-copy game_options.toml
+    // unconditionally (Tomba release zip ships the rule but not the file).
+    if (!ensure_game_options_toml(src.root, opts.on_output)) {
+        result.message = "missing game_options.toml under " + src.root.string() +
+                         " and could not create a stub (check permissions)";
         return result;
     }
 

@@ -98,6 +98,9 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
 // Local generate + cmake + stage into releases/build-<ref>/ + install.json.
 InstallResult build_title(const Paths& paths, const Title& title, const BuildOptions& opts = {});
 
+// Local generate+cmake also ensures src/game_options.toml exists (comment stub)
+// so title CMakeLists that POST_BUILD-copy it cannot fail the link step.
+//
 // Titles with a local generate+cmake recipe: release zip is SOURCE → generate+cmake
 // (even if the archive also ships a launch binary). prefer_prebuilt forces zip extract.
 InstallResult install_title_auto(const Paths& paths, const Title& title,
