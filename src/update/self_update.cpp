@@ -424,13 +424,38 @@ std::wstring find_powershell_exe() {
     return L"powershell.exe";
 }
 
+std::string base64_encode_bytes(const unsigned char* data, size_t len) {
+    static const char kTbl[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((len + 2) / 3) * 4);
+    for (size_t i = 0; i < len; i += 3) {
+        const unsigned n = (static_cast<unsigned>(data[i]) << 16) |
+                           (i + 1 < len ? static_cast<unsigned>(data[i + 1]) << 8 : 0u) |
+                           (i + 2 < len ? static_cast<unsigned>(data[i + 2]) : 0u);
+        out.push_back(kTbl[(n >> 18) & 63u]);
+        out.push_back(kTbl[(n >> 12) & 63u]);
+        out.push_back(i + 1 < len ? kTbl[(n >> 6) & 63u] : '=');
+        out.push_back(i + 2 < len ? kTbl[n & 63u] : '=');
+    }
+    return out;
+}
+
+/* PowerShell -EncodedCommand wants Base64(UTF-16LE command bytes), no BOM. */
+std::wstring ps_encoded_command_b64(const std::wstring& command) {
+    const auto* bytes = reinterpret_cast<const unsigned char*>(command.data());
+    const size_t nbytes = command.size() * sizeof(wchar_t);
+    const std::string b64 = base64_encode_bytes(bytes, nbytes);
+    return std::wstring(b64.begin(), b64.end());
+}
+
 bool write_text_file(const fs::path& path, const std::string& utf8_body, std::string* error) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out) {
         if (error) *error = "cannot write " + path.string();
         return false;
     }
-    // UTF-8 BOM so Windows PowerShell 5.1 parses non-ASCII in -File scripts reliably.
+    // UTF-8 BOM kept for optional manual -File debugging of the on-disk copy.
     const unsigned char bom[] = {0xEF, 0xBB, 0xBF};
     out.write(reinterpret_cast<const char*>(bom), 3);
     out.write(utf8_body.data(), static_cast<std::streamsize>(utf8_body.size()));
@@ -457,30 +482,52 @@ bool write_ready_marker(const fs::path& ready_marker) {
     return static_cast<bool>(out);
 }
 
-// Hidden powershell -File <script> <args…>. Rebuilds the CreateProcess command line on
+// Hidden powershell -EncodedCommand (& { script } @args). Avoids -File so Group
+// Policy Restricted ("running scripts is disabled") cannot block apply. Still
+// writes script_path for diagnostics. Rebuilds the CreateProcess command line on
 // every attempt (CreateProcessW mutates the buffer). Prefers BREAKAWAY so ExitProcess
 // on a kill-on-close job does not take the apply child with it. Falls back to
 // ShellExecuteEx (often escapes the parent job). Waits briefly for a script-written
 // ready marker, then falls back to writing the marker from the hub if the child is
 // still alive (avoids Ready↔WaitPid deadlock with older apply scripts).
-bool schedule_powershell(const fs::path& script, const std::wstring& extra_args,
-                         const fs::path& ready_marker, std::string* error) {
+bool schedule_powershell(const fs::path& script_path, const std::string& utf8_body,
+                         const std::wstring& extra_args, const fs::path& ready_marker,
+                         std::string* error) {
     const std::wstring ps = find_powershell_exe();
-    const std::wstring cwd = script.parent_path().wstring();
-    const fs::path diag = script.parent_path() / "apply_spawn.log";
+    const std::wstring cwd = script_path.parent_path().wstring();
+    const fs::path diag = script_path.parent_path() / "apply_spawn.log";
 
     std::error_code ec;
     if (!ready_marker.empty()) fs::remove(ready_marker, ec);
 
+    std::wstring command = L"& {\r\n";
+    command += utf8_to_wstring(utf8_body);
+    command += L"\r\n}";
+    if (!extra_args.empty()) {
+        command.push_back(L' ');
+        command += extra_args;
+    }
+    const std::wstring encoded = ps_encoded_command_b64(command);
+    if (encoded.empty()) {
+        if (error) *error = "failed to encode apply PowerShell command";
+        write_spawn_diag(diag, 0, 0, "EncodedCommand encode failed");
+        return false;
+    }
+    // CreateProcess command-line cap is 32767 WCHARs; leave headroom for exe path.
+    if (encoded.size() > 28000) {
+        if (error)
+            *error = "apply PowerShell EncodedCommand too large (" +
+                     std::to_string(encoded.size()) + " chars)";
+        write_spawn_diag(diag, 0, 0, "EncodedCommand too large");
+        return false;
+    }
+
     auto build_ps_args = [&]() -> std::wstring {
-        std::wstring a = L"-NoProfile -NonInteractive -WindowStyle Hidden "
-                         L"-ExecutionPolicy Bypass -File \"" +
-                         script.wstring() + L"\"";
-        if (!extra_args.empty()) {
-            a += L" ";
-            a += extra_args;
-        }
-        return a;
+        // Keep Bypass for LocalMachine/CurrentUser; EncodedCommand is what beats
+        // MachinePolicy Restricted blocking of -File.
+        return L"-NoProfile -NonInteractive -WindowStyle Hidden "
+               L"-ExecutionPolicy Bypass -EncodedCommand " +
+               encoded;
     };
 
     STARTUPINFOW si{};
@@ -585,7 +632,7 @@ bool schedule_powershell(const fs::path& script, const std::wstring& extra_args,
         return true;
     }
 
-    // Handshake: prefer a script-written ready marker (proves -File body started).
+    // Handshake: prefer a script-written ready marker (proves apply body started).
     // If the child is still alive after a short grace but has not signaled — e.g.
     // leftover pre-Ready .ps1 blocked in WaitPid, or Set-Content failed — write
     // the marker from the hub so we cannot deadlock (hub waits Ready, script waits
@@ -756,7 +803,7 @@ exit 0
                               ps_single_quote(new_portable) + L" -Dest " +
                               ps_single_quote(dest_portable) + L" -Log " + ps_single_quote(log_path) +
                               L" -Ready " + ps_single_quote(ready_path);
-    return schedule_powershell(script, args, ready_path, error);
+    return schedule_powershell(script, body, args, ready_path, error);
 }
 
 bool schedule_run_setup_and_restart(const fs::path& setup_exe, const fs::path& install_dir,
@@ -835,7 +882,7 @@ exit 0
         L"-WaitPid " + std::to_wstring(pid) + L" -Setup " + ps_single_quote(setup_exe) +
         L" -Dir " + ps_single_quote(install_dir) + L" -Hub " + ps_single_quote(hub_exe) +
         L" -Log " + ps_single_quote(log_path) + L" -Ready " + ps_single_quote(ready_path);
-    return schedule_powershell(script, args, ready_path, error);
+    return schedule_powershell(script, body, args, ready_path, error);
 }
 #else
 bool schedule_shell(const fs::path& script, std::string* error) {
@@ -968,7 +1015,7 @@ if (Test-Path -LiteralPath $Launch) { Start-Process -FilePath $Launch }
     if (!write_text_file(script, body, error)) return false;
     const std::wstring args = L"-WaitPid " + std::to_wstring(pid) + L" -Launch " +
                               ps_single_quote(launch) + L" -Ready " + ps_single_quote(ready);
-    return schedule_powershell(script, args, ready, error);
+    return schedule_powershell(script, body, args, ready, error);
 #else
     const pid_t pid = ::getpid();
     const fs::path script = script_dir / ("retcomm_relaunch_" + std::to_string(pid) + ".sh");

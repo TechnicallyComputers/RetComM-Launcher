@@ -135,11 +135,13 @@ Self-update channels (detected via `channel.json` / env from the portable stub):
 Apply scripts/logs (Windows PowerShell; Unicode-safe path args):
 `%LOCALAPPDATA%\retcomm\self-update\bin\apply_setup_update.ps1` /
 `apply_setup_update.log`, or `apply_portable_update.ps1` /
-`apply_portable_update.log`. Spawn handshake diagnostics:
-`apply_spawn.log` plus a `.ready` marker. The hub prefers a script-written
-marker, then falls back to writing the marker itself after ~1.5s if the child
-is still alive (avoids deadlock with a leftover pre-Ready apply script that
-waits on the hub PID). Installer apply aborts if the hub PID is still alive
-after 120s (avoids Inno fighting locked files).
+`apply_portable_update.log`. The `.ps1` is written for diagnostics only —
+apply runs via `powershell -EncodedCommand` (not `-File`) so Group Policy
+Restricted ("running scripts is disabled on this system") cannot block it.
+Spawn handshake diagnostics: `apply_spawn.log` plus a `.ready` marker. The hub
+prefers a script-written marker, then falls back to writing the marker itself
+after ~1.5s if the child is still alive (avoids deadlock with a leftover
+pre-Ready apply script that waits on the hub PID). Installer apply aborts if
+the hub PID is still alive after 120s (avoids Inno fighting locked files).
 
 Loose/dev copies without `channel.json` cannot self-update.
