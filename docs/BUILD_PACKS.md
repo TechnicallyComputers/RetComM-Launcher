@@ -18,7 +18,11 @@ GitHub source zipball at `build.source.ref` (note: zipballs omit git submodules)
 **Shared engines:** after extract/sync, RetComM harvests each vendored framework
 tree into `engines/<name>/<pin>/` (content-aware) and replaces the per-title
 copy with a symlink (Unix) or directory junction (Windows; junction first so
-Update works without Developer Mode). Titles that pin the
+Update works without Developer Mode). On Windows, junction targets are passed as
+normal DOS paths (not `\\?\…`) and the per-title tree is parked/restored if
+linking fails — so a failed `mklink` never leaves Install without `psxrecomp`.
+If linking is still impossible, RetComM falls back to a private copy from the
+engines cache. Titles that pin the
 same `psxrecomp` / `recomp-ui` commit therefore share one source tree on disk.
 BIOS generated C under `psxrecomp/generated/` lives in that shared pin (OpenBIOS
 / SCPH1001 are pin-identical). Content-sync of game updates never writes through

@@ -104,10 +104,41 @@ void win_remove_latest_entry(const fs::path& latest) {
 
 bool win_create_directory_junction(const fs::path& link, const fs::path& target) {
     // mklink /J does not require admin / Developer Mode.
-    std::wstring cmd = L"cmd.exe /C mklink /J \"";
-    cmd += link.wstring();
+    // Strip \\?\ — mklink rejects extended paths from weakly_canonical.
+    auto strip = [](std::wstring p) {
+        if (p.size() >= 8 && _wcsnicmp(p.c_str(), L"\\\\?\\UNC\\", 8) == 0)
+            p.replace(0, 8, L"\\\\");
+        else if (p.size() >= 4 && _wcsnicmp(p.c_str(), L"\\\\?\\", 4) == 0)
+            p.erase(0, 4);
+        return p;
+    };
+    std::error_code ec;
+    fs::path link_abs = fs::absolute(link, ec);
+    if (ec || link_abs.empty()) link_abs = link;
+    ec.clear();
+    fs::path target_abs = fs::absolute(target, ec);
+    if (ec || target_abs.empty()) target_abs = target;
+    ec.clear();
+    fs::path link_c = fs::weakly_canonical(link_abs, ec);
+    if (!ec && !link_c.empty()) link_abs = std::move(link_c);
+    ec.clear();
+    fs::path target_c = fs::weakly_canonical(target_abs, ec);
+    if (!ec && !target_c.empty()) target_abs = std::move(target_c);
+
+    wchar_t sysdir[MAX_PATH]{};
+    const UINT n = GetSystemDirectoryW(sysdir, MAX_PATH);
+    std::wstring cmd;
+    if (n > 0 && n < MAX_PATH) {
+        cmd.assign(sysdir, n);
+        if (cmd.back() != L'\\') cmd.push_back(L'\\');
+        cmd += L"cmd.exe";
+    } else {
+        cmd = L"cmd.exe";
+    }
+    cmd += L" /C mklink /J \"";
+    cmd += strip(link_abs.wstring());
     cmd += L"\" \"";
-    cmd += target.wstring();
+    cmd += strip(target_abs.wstring());
     cmd += L"\"";
 
     STARTUPINFOW si{};

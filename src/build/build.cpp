@@ -1591,11 +1591,46 @@ bool remove_dir_entry_nofollow(const fs::path& p, std::string* error) {
 }
 
 #if defined(_WIN32)
+/* mklink / CreateSymbolicLinkW reject or mishandle \\?\ extended paths from
+ * weakly_canonical; strip to a normal DOS/UNC path for link creation. */
+std::wstring win_strip_extended_path_prefix(std::wstring p) {
+    static const wchar_t kUnc[] = L"\\\\?\\UNC\\";
+    static const wchar_t kDos[] = L"\\\\?\\";
+    if (p.size() >= 8 && _wcsnicmp(p.c_str(), kUnc, 8) == 0) {
+        p.replace(0, 8, L"\\\\");
+    } else if (p.size() >= 4 && _wcsnicmp(p.c_str(), kDos, 4) == 0) {
+        p.erase(0, 4);
+    }
+    return p;
+}
+
+fs::path win_path_for_dir_link(const fs::path& p) {
+    std::error_code ec;
+    fs::path abs = fs::absolute(p, ec);
+    if (ec || abs.empty()) abs = p;
+    ec.clear();
+    fs::path canon = fs::weakly_canonical(abs, ec);
+    if (!ec && !canon.empty()) abs = std::move(canon);
+    return fs::path(win_strip_extended_path_prefix(abs.wstring()));
+}
+
 bool win_create_directory_junction_build(const fs::path& link, const fs::path& target) {
-    std::wstring cmd = L"cmd.exe /C mklink /J \"";
-    cmd += link.wstring();
+    const fs::path link_n = win_path_for_dir_link(link);
+    const fs::path target_n = win_path_for_dir_link(target);
+    wchar_t sysdir[MAX_PATH]{};
+    const UINT n = GetSystemDirectoryW(sysdir, MAX_PATH);
+    std::wstring cmd;
+    if (n > 0 && n < MAX_PATH) {
+        cmd.assign(sysdir, n);
+        if (cmd.back() != L'\\') cmd.push_back(L'\\');
+        cmd += L"cmd.exe";
+    } else {
+        cmd = L"cmd.exe";
+    }
+    cmd += L" /C mklink /J \"";
+    cmd += link_n.wstring();
     cmd += L"\" \"";
-    cmd += target.wstring();
+    cmd += target_n.wstring();
     cmd += L"\"";
     STARTUPINFOW si{};
     si.cb = sizeof(si);
@@ -1623,21 +1658,78 @@ bool dir_link_resolves_to(const fs::path& link, const fs::path& target) {
     std::error_code ec;
     if (!fs::is_directory(link, ec)) return false;
     ec.clear();
+    if (!fs::is_directory(target, ec)) return false;
+    ec.clear();
     if (fs::equivalent(link, target, ec)) return true;
+#if defined(_WIN32)
+    /* equivalent() often fails when one side is \\?\ and the other is DOS form. */
+    ec.clear();
+    const fs::path a = fs::weakly_canonical(link, ec);
+    ec.clear();
+    const fs::path b = fs::weakly_canonical(target, ec);
+    if (!a.empty() && !b.empty()) {
+        const std::wstring sa = win_strip_extended_path_prefix(a.wstring());
+        const std::wstring sb = win_strip_extended_path_prefix(b.wstring());
+        if (!sa.empty() && _wcsicmp(sa.c_str(), sb.c_str()) == 0) return true;
+    }
+#endif
     return false;
 }
 
 bool link_directory_replace(const fs::path& link_path, const fs::path& target,
                             std::string* error) {
     std::error_code ec;
+#if defined(_WIN32)
+    const fs::path use_target = win_path_for_dir_link(target);
+#else
     const fs::path abs_target = fs::weakly_canonical(target, ec);
     const fs::path use_target = (!ec && !abs_target.empty()) ? abs_target : target;
     ec.clear();
-    if (fs::exists(link_path, ec) || path_is_dir_link(link_path)) {
-        if (dir_link_resolves_to(link_path, use_target)) return true;
+#endif
+    if (dir_link_resolves_to(link_path, use_target) || dir_link_resolves_to(link_path, target))
+        return true;
+
+    /* Park real trees aside before linking. Deleting first left Install with
+     * "psxrecomp missing" when mklink failed (e.g. \\?\ paths). */
+    fs::path parked;
+    const bool was_reparse = path_is_dir_link(link_path);
+    ec.clear();
+    const bool was_real_dir = !was_reparse && fs::is_directory(link_path, ec);
+    if (was_reparse) {
+        if (!remove_dir_entry_nofollow(link_path, error)) return false;
+    } else if (was_real_dir) {
+        parked = link_path;
+        parked += ".retcomm-promote-bak";
+        remove_dir_entry_nofollow(parked, nullptr);
         ec.clear();
+        fs::rename(link_path, parked, ec);
+        if (ec) {
+            if (error)
+                *error = "cannot park local engine tree " + link_path.string() + ": " +
+                         ec.message();
+            return false;
+        }
+    } else if (fs::exists(link_path, ec) || path_is_dir_link(link_path)) {
         if (!remove_dir_entry_nofollow(link_path, error)) return false;
     }
+
+    auto restore_parked = [&]() {
+        if (parked.empty()) return;
+        remove_dir_entry_nofollow(link_path, nullptr);
+        std::error_code rec;
+        fs::rename(parked, link_path, rec);
+        if (!rec) parked.clear();
+    };
+    auto drop_parked = [&]() {
+        if (parked.empty()) return;
+        remove_dir_entry_nofollow(parked, nullptr);
+        parked.clear();
+    };
+    auto link_ok = [&]() {
+        return dir_link_resolves_to(link_path, use_target) ||
+               dir_link_resolves_to(link_path, target);
+    };
+
     fs::create_directories(link_path.parent_path(), ec);
 #if defined(_WIN32)
 #ifndef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
@@ -1646,27 +1738,31 @@ bool link_directory_replace(const fs::path& link_path, const fs::path& target,
     /* Prefer junction: same-volume apps↔engines under LocalAppData, no Dev Mode.
      * Symlinks that "succeed" but are not followable used to trip Update with a
      * false "release zip lacks buildable engine/UI tree". */
-    if (win_create_directory_junction_build(link_path, use_target) &&
-        dir_link_resolves_to(link_path, use_target)) {
+    if (win_create_directory_junction_build(link_path, use_target) && link_ok()) {
+        drop_parked();
         return true;
     }
     remove_dir_entry_nofollow(link_path, nullptr);
 
-    const std::wstring link_w = link_path.wstring();
+    const std::wstring link_w = win_path_for_dir_link(link_path).wstring();
     const std::wstring target_w = use_target.wstring();
     if (CreateSymbolicLinkW(link_w.c_str(), target_w.c_str(),
                             SYMBOLIC_LINK_FLAG_DIRECTORY |
                                 SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE) ||
         CreateSymbolicLinkW(link_w.c_str(), target_w.c_str(), SYMBOLIC_LINK_FLAG_DIRECTORY)) {
-        if (dir_link_resolves_to(link_path, use_target)) return true;
+        if (link_ok()) {
+            drop_parked();
+            return true;
+        }
         remove_dir_entry_nofollow(link_path, nullptr);
     }
 
-    if (win_create_directory_junction_build(link_path, use_target) &&
-        dir_link_resolves_to(link_path, use_target)) {
+    if (win_create_directory_junction_build(link_path, use_target) && link_ok()) {
+        drop_parked();
         return true;
     }
     remove_dir_entry_nofollow(link_path, nullptr);
+    restore_parked();
 
     if (error)
         *error = "cannot create traversable directory link " + link_path.string() + " → " +
@@ -1674,7 +1770,11 @@ bool link_directory_replace(const fs::path& link_path, const fs::path& target,
     return false;
 #else
     fs::create_directory_symlink(use_target, link_path, ec);
-    if (!ec && dir_link_resolves_to(link_path, use_target)) return true;
+    if (!ec && link_ok()) {
+        drop_parked();
+        return true;
+    }
+    restore_parked();
     if (error)
         *error = "cannot create symlink " + link_path.string() + ": " +
                  (ec ? ec.message() : "link not traversable");
@@ -1864,7 +1964,24 @@ void promote_shared_engines(const Paths& paths, const Title& title, const fs::pa
         progress(on_progress, "Linking " + name + " → engines/" + name + "/" + safe);
         std::string err;
         if (!link_directory_replace(link_path, cache, &err)) {
-            progress(on_progress, "Keeping local " + name + " (" + err + ")");
+            if (engine_tree_looks_ready(name, link_path)) {
+                progress(on_progress, "Keeping local " + name + " (" + err + ")");
+                continue;
+            }
+            /* Link failed and local tree missing — materialize from cache so
+             * Install still passes cmake-buildable (dedup skipped this title). */
+            if (engine_tree_looks_ready(name, cache)) {
+                progress(on_progress,
+                         "Copying " + name + " from engines cache (link unavailable)…");
+                std::string copy_err;
+                if (sync_engine_tree_into_cache(cache, link_path, &copy_err) &&
+                    engine_tree_looks_ready(name, link_path)) {
+                    progress(on_progress, "Using private " + name + " copy (" + err + ")");
+                    continue;
+                }
+                if (!copy_err.empty()) err += "; copy: " + copy_err;
+            }
+            progress(on_progress, "Engine link failed for " + name + " (" + err + ")");
             continue;
         }
         if (!engine_tree_looks_ready(name, link_path)) {
