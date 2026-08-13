@@ -434,6 +434,7 @@ bool write_text_file(const fs::path& path, const std::string& utf8_body, std::st
     const unsigned char bom[] = {0xEF, 0xBB, 0xBF};
     out.write(reinterpret_cast<const char*>(bom), 3);
     out.write(utf8_body.data(), static_cast<std::streamsize>(utf8_body.size()));
+    out.flush();
     return static_cast<bool>(out);
 }
 
@@ -447,11 +448,21 @@ bool write_spawn_diag(const fs::path& diag, DWORD child_pid, DWORD flags, const 
     return static_cast<bool>(out);
 }
 
+bool write_ready_marker(const fs::path& ready_marker) {
+    if (ready_marker.empty()) return false;
+    std::ofstream out(ready_marker, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out << "1\n";
+    out.flush();
+    return static_cast<bool>(out);
+}
+
 // Hidden powershell -File <script> <args…>. Rebuilds the CreateProcess command line on
 // every attempt (CreateProcessW mutates the buffer). Prefers BREAKAWAY so ExitProcess
 // on a kill-on-close job does not take the apply child with it. Falls back to
-// ShellExecuteEx (often escapes the parent job). Waits for a ready marker the script
-// writes before returning — hub must not exit until then.
+// ShellExecuteEx (often escapes the parent job). Waits briefly for a script-written
+// ready marker, then falls back to writing the marker from the hub if the child is
+// still alive (avoids Ready↔WaitPid deadlock with older apply scripts).
 bool schedule_powershell(const fs::path& script, const std::wstring& extra_args,
                          const fs::path& ready_marker, std::string* error) {
     const std::wstring ps = find_powershell_exe();
@@ -574,13 +585,17 @@ bool schedule_powershell(const fs::path& script, const std::wstring& extra_args,
         return true;
     }
 
-    // Handshake: script must touch ready_marker while still alive. If the child is
-    // killed with the hub (job object) we fail here instead of leaving a staged
-    // installer with no apply process.
+    // Handshake: prefer a script-written ready marker (proves -File body started).
+    // If the child is still alive after a short grace but has not signaled — e.g.
+    // leftover pre-Ready .ps1 blocked in WaitPid, or Set-Content failed — write
+    // the marker from the hub so we cannot deadlock (hub waits Ready, script waits
+    // hub PID). Breakaway spawn already succeeded in that case.
+    constexpr DWORD kScriptReadyGraceMs = 1500;
     constexpr DWORD kReadyWaitMs = 10000;
     constexpr DWORD kPollMs = 50;
     DWORD waited = 0;
     bool ready = false;
+    bool hub_wrote_ready = false;
     while (waited <= kReadyWaitMs) {
         DWORD code = STILL_ACTIVE;
         if (!GetExitCodeProcess(pi.hProcess, &code)) {
@@ -588,6 +603,10 @@ bool schedule_powershell(const fs::path& script, const std::wstring& extra_args,
             break;
         }
         if (code != STILL_ACTIVE) {
+            if (fs::is_regular_file(ready_marker, ec) && !ec) {
+                ready = true;
+                break;
+            }
             if (error)
                 *error = "apply script exited before ready (exit=" + std::to_string(code) +
                          ", pid=" + std::to_string(child_pid) + "). See " + diag.string();
@@ -600,6 +619,17 @@ bool schedule_powershell(const fs::path& script, const std::wstring& extra_args,
         if (fs::is_regular_file(ready_marker, ec) && !ec) {
             ready = true;
             break;
+        }
+        if (!hub_wrote_ready && waited >= kScriptReadyGraceMs) {
+            if (write_ready_marker(ready_marker)) {
+                hub_wrote_ready = true;
+                write_spawn_diag(diag, child_pid, used_flags,
+                                 "ready fallback: hub wrote marker (script silent)");
+                ready = true;
+                break;
+            }
+            write_spawn_diag(diag, child_pid, used_flags,
+                             "ready fallback: hub failed to write marker");
         }
         Sleep(kPollMs);
         waited += kPollMs;
@@ -652,11 +682,11 @@ param(
   [Parameter(Mandatory=$true)][string]$New,
   [Parameter(Mandatory=$true)][string]$Dest,
   [Parameter(Mandatory=$true)][string]$Log,
-  [Parameter(Mandatory=$true)][string]$Ready
+  [Parameter(Mandatory=$false)][string]$Ready = ''
 )
 $ErrorActionPreference = 'Continue'
-# Signal hub immediately so it can ExitProcess without killing us mid-start.
-try { Set-Content -LiteralPath $Ready -Value '1' -Encoding ASCII -Force } catch {}
+# Signal hub early so it can ExitProcess without killing us mid-start.
+if ($Ready) { try { Set-Content -LiteralPath $Ready -Value '1' -Encoding ASCII -Force } catch {} }
 function Log([string]$m) { Add-Content -LiteralPath $Log -Value $m -Encoding UTF8 }
 function Fail-And-Relaunch([string]$OldPath) {
   Log 'FAILED'
@@ -744,11 +774,11 @@ param(
   [Parameter(Mandatory=$true)][string]$Dir,
   [Parameter(Mandatory=$true)][string]$Hub,
   [Parameter(Mandatory=$true)][string]$Log,
-  [Parameter(Mandatory=$true)][string]$Ready
+  [Parameter(Mandatory=$false)][string]$Ready = ''
 )
 $ErrorActionPreference = 'Continue'
-# Signal hub immediately so it can ExitProcess without killing us mid-start.
-try { Set-Content -LiteralPath $Ready -Value '1' -Encoding ASCII -Force } catch {}
+# Signal hub early so it can ExitProcess without killing us mid-start.
+if ($Ready) { try { Set-Content -LiteralPath $Ready -Value '1' -Encoding ASCII -Force } catch {} }
 function Log([string]$m) { Add-Content -LiteralPath $Log -Value $m -Encoding UTF8 }
 function Fail-And-Relaunch {
   Log 'FAILED'
