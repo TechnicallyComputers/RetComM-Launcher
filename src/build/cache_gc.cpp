@@ -6,8 +6,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <fstream>
 #include <map>
+#include <new>
 #include <set>
 #include <sstream>
 
@@ -73,7 +75,15 @@ std::uint64_t dir_byte_size(const fs::path& root) {
 bool remove_path_accounting(const fs::path& p, CacheGcResult& r, const char* kind) {
     std::error_code ec;
     if (!fs::exists(p, ec) && !fs::is_symlink(p, ec)) return false;
-    const std::uint64_t bytes = dir_byte_size(p);
+    // Byte walk can OOM on huge trees after a game build; never block delete on that.
+    std::uint64_t bytes = 0;
+    try {
+        bytes = dir_byte_size(p);
+    } catch (const std::bad_alloc&) {
+        bytes = 0;
+    } catch (const std::exception&) {
+        bytes = 0;
+    }
     fs::remove_all(p, ec);
     if (ec) {
         r.messages.push_back(std::string("failed to remove ") + kind + " " + p.string() +
@@ -365,39 +375,52 @@ CacheGcResult run_cache_gc(const Paths& paths, const AppConfig& cfg) {
         return r;
     }
 
-    ensure_dirs(paths);
-    gc_toolchains_and_sdks(paths, cfg, r);
-    gc_engines(paths, cfg, r);
-    gc_release_zips(paths, cfg, r);
-    gc_idle_build_dirs(paths, cfg, r);
+    try {
+        ensure_dirs(paths);
+        gc_toolchains_and_sdks(paths, cfg, r);
+        gc_engines(paths, cfg, r);
+        gc_release_zips(paths, cfg, r);
+        gc_idle_build_dirs(paths, cfg, r);
 
-    // Best-effort: apply ccache max size via CLI when present.
-    if (cfg.ccache_max_gb > 0) {
-        std::error_code ec;
-        fs::create_directories(shared_ccache_dir(paths), ec);
-        // Env alone is enough for future runs; try `ccache -M` when on PATH.
-        const std::string max = std::to_string(cfg.ccache_max_gb) + "G";
+        // Best-effort: apply ccache max size via CLI when present.
+        if (cfg.ccache_max_gb > 0) {
+            std::error_code ec;
+            fs::create_directories(shared_ccache_dir(paths), ec);
+            // Env alone is enough for future runs; try `ccache -M` when on PATH.
+            const std::string max = std::to_string(cfg.ccache_max_gb) + "G";
 #if defined(_WIN32)
-        const std::string cmd = "ccache.exe -M " + max;
+            const std::string cmd = "ccache.exe -M " + max;
 #else
-        const std::string cmd = "CCACHE_DIR=\"" + shared_ccache_dir(paths).string() +
-                                "\" ccache -M " + max + " >/dev/null 2>&1";
+            const std::string cmd = "CCACHE_DIR=\"" + shared_ccache_dir(paths).string() +
+                                    "\" ccache -M " + max + " >/dev/null 2>&1";
 #endif
-        (void)std::system(cmd.c_str());
-    }
+            (void)std::system(cmd.c_str());
+        }
 
-    std::ostringstream oss;
-    oss << "Cache GC: removed " << r.removed_toolchains << " toolchain(s), " << r.removed_sdks
-        << " sdk(s), " << r.removed_engines << " engine pin(s), " << r.removed_release_zips
-        << " release zip folder(s), " << r.removed_idle_builds << " idle build dir(s)";
-    if (r.bytes_freed > 0) {
-        const double gib = static_cast<double>(r.bytes_freed) / (1024.0 * 1024.0 * 1024.0);
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "%.2f", gib);
-        oss << " (~" << buf << " GiB)";
+        std::ostringstream oss;
+        oss << "Cache GC: removed " << r.removed_toolchains << " toolchain(s), " << r.removed_sdks
+            << " sdk(s), " << r.removed_engines << " engine pin(s), " << r.removed_release_zips
+            << " release zip folder(s), " << r.removed_idle_builds << " idle build dir(s)";
+        if (r.bytes_freed > 0) {
+            const double gib = static_cast<double>(r.bytes_freed) / (1024.0 * 1024.0 * 1024.0);
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.2f", gib);
+            oss << " (~" << buf << " GiB)";
+        }
+        r.message = oss.str();
+        return r;
+    } catch (const std::bad_alloc&) {
+        r.ok = false;
+        r.message = "Cache GC aborted (out of memory) — install/build result unchanged";
+        r.messages.push_back(r.message);
+        return r;
+    } catch (const std::exception& e) {
+        r.ok = false;
+        r.message = std::string("Cache GC aborted: ") + e.what() +
+                    " — install/build result unchanged";
+        r.messages.push_back(r.message);
+        return r;
     }
-    r.message = oss.str();
-    return r;
 }
 
 } // namespace retcomm

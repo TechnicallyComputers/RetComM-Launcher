@@ -17,6 +17,7 @@
 #include <cctype>
 #include <cstring>
 #include <fstream>
+#include <new>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -2131,7 +2132,16 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 // the button is an explicit user request.
                 AppConfig gc_cfg = cfg;
                 gc_cfg.auto_gc_caches = true;
-                auto cr = run_cache_gc(paths, gc_cfg);
+                CacheGcResult cr;
+                try {
+                    cr = run_cache_gc(paths, gc_cfg);
+                } catch (const std::bad_alloc&) {
+                    cr.ok = false;
+                    cr.message = "Cache GC aborted (out of memory)";
+                } catch (const std::exception& e) {
+                    cr.ok = false;
+                    cr.message = std::string("Cache GC aborted: ") + e.what();
+                }
                 for (const auto& m : cr.messages) append_log(m);
                 append_log(cr.message);
                 set_status(cr.message);

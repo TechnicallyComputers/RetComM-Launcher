@@ -29,6 +29,8 @@ struct CacheGcResult {
 // Safe to call after successful builds or from Hub / `retcomm cache gc`.
 // Never deletes the Play binary, generated C, or the toolchain/SDK currently
 // pointed at by `latest` / in-use symlinks.
+// Soft-fails on OOM/exceptions (ok=false + message); callers must not treat GC
+// failure as install/build failure.
 CacheGcResult run_cache_gc(const Paths& paths, const AppConfig& cfg);
 
 // Ensure data_dir/ccache exists and return env pairs for cmake/ninja children

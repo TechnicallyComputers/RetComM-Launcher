@@ -27,6 +27,7 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+#include <new>
 
 #if defined(_WIN32)
 #ifndef NOMINMAX
@@ -4212,21 +4213,44 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
     CacheGcResult gc;
     if (post_cfg.auto_gc_caches) {
         progress(opts.on_progress, "Pruning shared caches…", 0.98f);
-        gc = run_cache_gc(paths, post_cfg);
+        // Post-build RSS can be high (large generated C link). GC must never
+        // turn a successful stage into Install failed.
+        try {
+            gc = run_cache_gc(paths, post_cfg);
+        } catch (const std::bad_alloc&) {
+            gc.ok = false;
+            gc.message = "Cache GC skipped (out of memory) — build succeeded";
+        } catch (const std::exception& e) {
+            gc.ok = false;
+            gc.message = std::string("Cache GC skipped (") + e.what() + ") — build succeeded";
+        }
     }
 
-    result.plan = inspect_install(paths, title);
+    try {
+        result.plan = inspect_install(paths, title);
+    } catch (const std::exception& e) {
+        result.plan.install_root = install_root;
+        result.plan.installed = true;
+        result.plan.binary_path = binary;
+        result.message = "built " + title.id + " (inspect_install: " + e.what() + ")";
+        result.ok = true;
+        progress(opts.on_progress, "Build complete", 1.0f);
+        return result;
+    }
     result.plan.latest_tag = pin_tag;
     result.ok = true;
     result.message = "built " + title.id + " from " + rec.source_ref + "\n" +
                      "  binary: " + result.plan.binary_path.string() + "\n" +
                      "  sdk: " + sdk.tag + "  toolchain: " + tc.tag + "\n";
     if (auto_clean) result.message += "  cleaned cmake build/ (auto_clean_build_dirs)\n";
-    if (!gc.message.empty() &&
-        (gc.removed_toolchains + gc.removed_sdks + gc.removed_engines + gc.removed_release_zips +
-             gc.removed_idle_builds >
-         0))
-        result.message += "  " + gc.message + "\n";
+    if (!gc.message.empty()) {
+        if (!gc.ok)
+            result.message += "  " + gc.message + "\n";
+        else if (gc.removed_toolchains + gc.removed_sdks + gc.removed_engines +
+                     gc.removed_release_zips + gc.removed_idle_builds >
+                 0)
+            result.message += "  " + gc.message + "\n";
+    }
     if (!stash_note.empty()) result.message += "  " + stash_note;
     if (!restore_note.empty()) result.message += "  " + restore_note;
     if (!prune_note.empty()) result.message += "  " + prune_note;
