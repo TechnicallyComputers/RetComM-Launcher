@@ -64,6 +64,9 @@ target_compile_definitions(retcomm_core PUBLIC
     "RETCOMM_CATALOG_DOWNLOAD_URL=\"${RETCOMM_CATALOG_DOWNLOAD_URL}\""
 )
 target_link_libraries(retcomm_core PUBLIC CURL::libcurl)
+if(WIN32)
+    target_link_libraries(retcomm_core PUBLIC shell32)
+endif()
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 9)
     target_link_libraries(retcomm_core PUBLIC stdc++fs)
 endif()

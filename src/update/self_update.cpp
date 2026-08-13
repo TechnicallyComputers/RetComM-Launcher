@@ -18,6 +18,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <shellapi.h>
 #elif defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <unistd.h>
@@ -423,47 +424,6 @@ std::wstring find_powershell_exe() {
     return L"powershell.exe";
 }
 
-// Fire-and-forget hidden powershell -File <script> <args…>.
-// Paths must be passed as -Arg '…' (ps_single_quote) — never embed in .bat.
-bool schedule_powershell(const fs::path& script, const std::wstring& extra_args, std::string* error) {
-    const std::wstring ps = find_powershell_exe();
-    std::wstring cmdline = L"\"" + ps +
-                           L"\" -NoProfile -NonInteractive -WindowStyle Hidden "
-                           L"-ExecutionPolicy Bypass -File \"" +
-                           script.wstring() + L"\"";
-    if (!extra_args.empty()) {
-        cmdline += L" ";
-        cmdline += extra_args;
-    }
-    std::vector<wchar_t> mutable_cmd(cmdline.begin(), cmdline.end());
-    mutable_cmd.push_back(L'\0');
-
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi{};
-    const std::wstring cwd = script.parent_path().wstring();
-    auto try_spawn = [&](DWORD flags) -> bool {
-        ZeroMemory(&pi, sizeof(pi));
-        return CreateProcessW(ps.c_str(), mutable_cmd.data(), nullptr, nullptr, FALSE, flags,
-                              nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si, &pi) != 0;
-    };
-    DWORD flags = CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB;
-    if (!try_spawn(flags)) {
-        flags &= ~static_cast<DWORD>(CREATE_BREAKAWAY_FROM_JOB);
-        if (!try_spawn(flags)) {
-            if (error)
-                *error = "failed to launch apply script (CreateProcess " +
-                         std::to_string(GetLastError()) + ")";
-            return false;
-        }
-    }
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    return true;
-}
-
 bool write_text_file(const fs::path& path, const std::string& utf8_body, std::string* error) {
     std::ofstream out(path, std::ios::binary | std::ios::trunc);
     if (!out) {
@@ -475,6 +435,192 @@ bool write_text_file(const fs::path& path, const std::string& utf8_body, std::st
     out.write(reinterpret_cast<const char*>(bom), 3);
     out.write(utf8_body.data(), static_cast<std::streamsize>(utf8_body.size()));
     return static_cast<bool>(out);
+}
+
+bool write_spawn_diag(const fs::path& diag, DWORD child_pid, DWORD flags, const char* note) {
+    std::ofstream out(diag, std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out << "retcomm apply spawn\n"
+        << "pid=" << child_pid << "\n"
+        << "flags=0x" << std::hex << flags << std::dec << "\n"
+        << "note=" << (note ? note : "") << "\n";
+    return static_cast<bool>(out);
+}
+
+// Hidden powershell -File <script> <args…>. Rebuilds the CreateProcess command line on
+// every attempt (CreateProcessW mutates the buffer). Prefers BREAKAWAY so ExitProcess
+// on a kill-on-close job does not take the apply child with it. Falls back to
+// ShellExecuteEx (often escapes the parent job). Waits for a ready marker the script
+// writes before returning — hub must not exit until then.
+bool schedule_powershell(const fs::path& script, const std::wstring& extra_args,
+                         const fs::path& ready_marker, std::string* error) {
+    const std::wstring ps = find_powershell_exe();
+    const std::wstring cwd = script.parent_path().wstring();
+    const fs::path diag = script.parent_path() / "apply_spawn.log";
+
+    std::error_code ec;
+    if (!ready_marker.empty()) fs::remove(ready_marker, ec);
+
+    auto build_ps_args = [&]() -> std::wstring {
+        std::wstring a = L"-NoProfile -NonInteractive -WindowStyle Hidden "
+                         L"-ExecutionPolicy Bypass -File \"" +
+                         script.wstring() + L"\"";
+        if (!extra_args.empty()) {
+            a += L" ";
+            a += extra_args;
+        }
+        return a;
+    };
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    ZeroMemory(&pi, sizeof(pi));
+
+    // Avoid DETACHED_PROCESS: with CREATE_NO_WINDOW it can let console helpers flash.
+    // CREATE_NEW_PROCESS_GROUP helps the child outlive an abrupt parent teardown.
+    const DWORD flag_attempts[] = {
+        CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP,
+        CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB,
+        CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+        CREATE_NO_WINDOW,
+    };
+
+    DWORD used_flags = 0;
+    DWORD last_err = 0;
+    bool spawned = false;
+    const char* spawn_note = "CreateProcess";
+
+    // 1) CreateProcess with job breakaway (survives ExitProcess on kill-on-close jobs).
+    for (DWORD flags : flag_attempts) {
+        if ((flags & CREATE_BREAKAWAY_FROM_JOB) == 0) continue;
+        std::wstring cmdline = L"\"" + ps + L"\" " + build_ps_args();
+        std::vector<wchar_t> mutable_cmd(cmdline.begin(), cmdline.end());
+        mutable_cmd.push_back(L'\0');
+        ZeroMemory(&pi, sizeof(pi));
+        if (CreateProcessW(ps.c_str(), mutable_cmd.data(), nullptr, nullptr, FALSE, flags,
+                           nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si, &pi)) {
+            used_flags = flags;
+            spawned = true;
+            spawn_note = "CreateProcess+breakaway";
+            break;
+        }
+        last_err = GetLastError();
+    }
+
+    // 2) ShellExecuteEx — often starts outside a restrictive job when breakaway fails.
+    if (!spawned) {
+        if (!ready_marker.empty()) fs::remove(ready_marker, ec);
+        const std::wstring params = build_ps_args();
+        SHELLEXECUTEINFOW sei{};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC;
+        sei.lpVerb = L"open";
+        sei.lpFile = ps.c_str();
+        sei.lpParameters = params.c_str();
+        sei.lpDirectory = cwd.empty() ? nullptr : cwd.c_str();
+        sei.nShow = SW_HIDE;
+        if (ShellExecuteExW(&sei) && sei.hProcess) {
+            pi.hProcess = sei.hProcess;
+            pi.dwProcessId = GetProcessId(sei.hProcess);
+            spawned = true;
+            used_flags = 0;
+            spawn_note = "ShellExecuteEx";
+        } else {
+            last_err = GetLastError();
+        }
+    }
+
+    // 3) Last resort: CreateProcess without breakaway (child may die with hub on some jobs).
+    if (!spawned) {
+        if (!ready_marker.empty()) fs::remove(ready_marker, ec);
+        for (DWORD flags : flag_attempts) {
+            if ((flags & CREATE_BREAKAWAY_FROM_JOB) != 0) continue;
+            std::wstring cmdline = L"\"" + ps + L"\" " + build_ps_args();
+            std::vector<wchar_t> mutable_cmd(cmdline.begin(), cmdline.end());
+            mutable_cmd.push_back(L'\0');
+            ZeroMemory(&pi, sizeof(pi));
+            if (CreateProcessW(ps.c_str(), mutable_cmd.data(), nullptr, nullptr, FALSE, flags,
+                               nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si, &pi)) {
+                used_flags = flags;
+                spawned = true;
+                spawn_note = "CreateProcess";
+                break;
+            }
+            last_err = GetLastError();
+        }
+    }
+
+    if (!spawned) {
+        const std::string msg =
+            "failed to launch apply script (CreateProcess/ShellExecute " +
+            std::to_string(last_err) + ")";
+        if (error) *error = msg;
+        write_spawn_diag(diag, 0, 0, msg.c_str());
+        return false;
+    }
+
+    if (pi.hThread) CloseHandle(pi.hThread);
+    const DWORD child_pid = pi.dwProcessId;
+    {
+        std::string note = std::string(spawn_note) + "; waiting for ready marker";
+        write_spawn_diag(diag, child_pid, used_flags, note.c_str());
+    }
+
+    if (ready_marker.empty()) {
+        CloseHandle(pi.hProcess);
+        return true;
+    }
+
+    // Handshake: script must touch ready_marker while still alive. If the child is
+    // killed with the hub (job object) we fail here instead of leaving a staged
+    // installer with no apply process.
+    constexpr DWORD kReadyWaitMs = 10000;
+    constexpr DWORD kPollMs = 50;
+    DWORD waited = 0;
+    bool ready = false;
+    while (waited <= kReadyWaitMs) {
+        DWORD code = STILL_ACTIVE;
+        if (!GetExitCodeProcess(pi.hProcess, &code)) {
+            last_err = GetLastError();
+            break;
+        }
+        if (code != STILL_ACTIVE) {
+            if (error)
+                *error = "apply script exited before ready (exit=" + std::to_string(code) +
+                         ", pid=" + std::to_string(child_pid) + "). See " + diag.string();
+            write_spawn_diag(
+                diag, child_pid, used_flags,
+                ("child exited before ready, code=" + std::to_string(code)).c_str());
+            CloseHandle(pi.hProcess);
+            return false;
+        }
+        if (fs::is_regular_file(ready_marker, ec) && !ec) {
+            ready = true;
+            break;
+        }
+        Sleep(kPollMs);
+        waited += kPollMs;
+    }
+
+    if (!ready) {
+        if (error)
+            *error = "apply script did not signal ready within " +
+                     std::to_string(kReadyWaitMs / 1000) + "s (pid=" +
+                     std::to_string(child_pid) + "). See " + diag.string() + " and the apply log.";
+        write_spawn_diag(diag, child_pid, used_flags, "ready marker timeout");
+        CloseHandle(pi.hProcess);
+        return false;
+    }
+
+    {
+        std::string note = std::string(spawn_note) + "; ready; hub may exit";
+        write_spawn_diag(diag, child_pid, used_flags, note.c_str());
+    }
+    CloseHandle(pi.hProcess);
+    return true;
 }
 
 /* Trailer: uint64 LE payload size + "RCM1" (see win_portable_main.cpp). */
@@ -497,6 +643,7 @@ bool schedule_replace_portable_and_restart(const fs::path& new_portable, const f
     const DWORD pid = GetCurrentProcessId();
     const fs::path script = new_portable.parent_path() / "apply_portable_update.ps1";
     const fs::path log_path = new_portable.parent_path() / "apply_portable_update.log";
+    const fs::path ready_path = new_portable.parent_path() / "apply_portable_update.ready";
     // Paths are CLI args (Unicode-safe). Stub is not locked by the hub process, so a
     // wait timeout still attempts replace.
     const char* body = R"ps1(
@@ -504,9 +651,12 @@ param(
   [Parameter(Mandatory=$true)][int]$WaitPid,
   [Parameter(Mandatory=$true)][string]$New,
   [Parameter(Mandatory=$true)][string]$Dest,
-  [Parameter(Mandatory=$true)][string]$Log
+  [Parameter(Mandatory=$true)][string]$Log,
+  [Parameter(Mandatory=$true)][string]$Ready
 )
 $ErrorActionPreference = 'Continue'
+# Signal hub immediately so it can ExitProcess without killing us mid-start.
+try { Set-Content -LiteralPath $Ready -Value '1' -Encoding ASCII -Force } catch {}
 function Log([string]$m) { Add-Content -LiteralPath $Log -Value $m -Encoding UTF8 }
 function Fail-And-Relaunch([string]$OldPath) {
   Log 'FAILED'
@@ -521,6 +671,7 @@ function Fail-And-Relaunch([string]$OldPath) {
   if (Test-Path -LiteralPath $Dest) { Start-Process -FilePath $Dest }
   exit 1
 }
+try { Remove-Item -LiteralPath $Log -Force -ErrorAction SilentlyContinue } catch {}
 Log 'RetComM portable update'
 Log ("NEW=" + $New)
 Log ("DEST=" + $Dest)
@@ -569,10 +720,13 @@ if (Test-Path -LiteralPath $Dest) { Start-Process -FilePath $Dest }
 exit 0
 )ps1";
     if (!write_text_file(script, body, error)) return false;
+    std::error_code ec;
+    fs::remove(log_path, ec);
     const std::wstring args = L"-WaitPid " + std::to_wstring(pid) + L" -New " +
                               ps_single_quote(new_portable) + L" -Dest " +
-                              ps_single_quote(dest_portable) + L" -Log " + ps_single_quote(log_path);
-    return schedule_powershell(script, args, error);
+                              ps_single_quote(dest_portable) + L" -Log " + ps_single_quote(log_path) +
+                              L" -Ready " + ps_single_quote(ready_path);
+    return schedule_powershell(script, args, ready_path, error);
 }
 
 bool schedule_run_setup_and_restart(const fs::path& setup_exe, const fs::path& install_dir,
@@ -580,6 +734,7 @@ bool schedule_run_setup_and_restart(const fs::path& setup_exe, const fs::path& i
     const DWORD pid = GetCurrentProcessId();
     const fs::path script = setup_exe.parent_path() / "apply_setup_update.ps1";
     const fs::path log_path = setup_exe.parent_path() / "apply_setup_update.log";
+    const fs::path ready_path = setup_exe.parent_path() / "apply_setup_update.ready";
     const fs::path hub_exe = install_dir / "retcomm-hub.exe";
     // Hub holds install-dir locks — do NOT run setup if it is still alive after timeout.
     const char* body = R"ps1(
@@ -588,9 +743,12 @@ param(
   [Parameter(Mandatory=$true)][string]$Setup,
   [Parameter(Mandatory=$true)][string]$Dir,
   [Parameter(Mandatory=$true)][string]$Hub,
-  [Parameter(Mandatory=$true)][string]$Log
+  [Parameter(Mandatory=$true)][string]$Log,
+  [Parameter(Mandatory=$true)][string]$Ready
 )
 $ErrorActionPreference = 'Continue'
+# Signal hub immediately so it can ExitProcess without killing us mid-start.
+try { Set-Content -LiteralPath $Ready -Value '1' -Encoding ASCII -Force } catch {}
 function Log([string]$m) { Add-Content -LiteralPath $Log -Value $m -Encoding UTF8 }
 function Fail-And-Relaunch {
   Log 'FAILED'
@@ -604,6 +762,7 @@ function Fail-And-Relaunch {
   }
   exit 1
 }
+try { Remove-Item -LiteralPath $Log -Force -ErrorAction SilentlyContinue } catch {}
 Log 'RetComM installer update'
 Log ("SETUP=" + $Setup)
 Log ("DIR=" + $Dir)
@@ -640,11 +799,13 @@ Start-Process -FilePath $Hub -WorkingDirectory $Dir
 exit 0
 )ps1";
     if (!write_text_file(script, body, error)) return false;
+    std::error_code ec;
+    fs::remove(log_path, ec);
     const std::wstring args =
         L"-WaitPid " + std::to_wstring(pid) + L" -Setup " + ps_single_quote(setup_exe) +
         L" -Dir " + ps_single_quote(install_dir) + L" -Hub " + ps_single_quote(hub_exe) +
-        L" -Log " + ps_single_quote(log_path);
-    return schedule_powershell(script, args, error);
+        L" -Log " + ps_single_quote(log_path) + L" -Ready " + ps_single_quote(ready_path);
+    return schedule_powershell(script, args, ready_path, error);
 }
 #else
 bool schedule_shell(const fs::path& script, std::string* error) {
@@ -759,11 +920,14 @@ bool schedule_retcomm_relaunch_impl(std::string* error) {
 #if defined(_WIN32)
     const DWORD pid = GetCurrentProcessId();
     const fs::path script = script_dir / "retcomm_relaunch.ps1";
+    const fs::path ready = script_dir / ("retcomm_relaunch_" + std::to_string(pid) + ".ready");
     const char* body = R"ps1(
 param(
   [Parameter(Mandatory=$true)][int]$WaitPid,
-  [Parameter(Mandatory=$true)][string]$Launch
+  [Parameter(Mandatory=$true)][string]$Launch,
+  [Parameter(Mandatory=$true)][string]$Ready
 )
+try { Set-Content -LiteralPath $Ready -Value '1' -Encoding ASCII -Force } catch {}
 $deadline = (Get-Date).AddSeconds(120)
 while ((Get-Date) -lt $deadline) {
   if (-not (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue)) { break }
@@ -772,9 +936,9 @@ while ((Get-Date) -lt $deadline) {
 if (Test-Path -LiteralPath $Launch) { Start-Process -FilePath $Launch }
 )ps1";
     if (!write_text_file(script, body, error)) return false;
-    const std::wstring args =
-        L"-WaitPid " + std::to_wstring(pid) + L" -Launch " + ps_single_quote(launch);
-    return schedule_powershell(script, args, error);
+    const std::wstring args = L"-WaitPid " + std::to_wstring(pid) + L" -Launch " +
+                              ps_single_quote(launch) + L" -Ready " + ps_single_quote(ready);
+    return schedule_powershell(script, args, ready, error);
 #else
     const pid_t pid = ::getpid();
     const fs::path script = script_dir / ("retcomm_relaunch_" + std::to_string(pid) + ".sh");
