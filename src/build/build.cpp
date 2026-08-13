@@ -1795,7 +1795,9 @@ bool path_under_prefix(const fs::path& path, const fs::path& prefix) {
     return bit == b.end();
 }
 
-// Content-aware copy into the engine cache; skip VCS metadata.
+// Content-aware copy into the engine cache; skip VCS metadata and local
+// codegen under generated/ (BIOS backends live there and must survive harvest
+// from release zips that omit them — otherwise Ninja rebuilds everything).
 bool sync_engine_tree_into_cache(const fs::path& from, const fs::path& to, std::string* error) {
     std::error_code ec;
     if (!fs::is_directory(from, ec)) {
@@ -1813,6 +1815,11 @@ bool sync_engine_tree_into_cache(const fs::path& from, const fs::path& to, std::
         const std::string rel = path_rel_key(from, p);
         if (rel.empty()) continue;
         if (rel == ".git" || rel_under_prefix(rel, ".git")) {
+            if (it->is_directory(ec)) it.disable_recursion_pending();
+            continue;
+        }
+        // Title-local BIOS / emit output — never harvest or stale-delete.
+        if (rel == "generated" || rel_under_prefix(rel, "generated")) {
             if (it->is_directory(ec)) it.disable_recursion_pending();
             continue;
         }
@@ -1852,6 +1859,10 @@ bool sync_engine_tree_into_cache(const fs::path& from, const fs::path& to, std::
         const std::string rel = path_rel_key(to, p);
         if (rel.empty() || wanted.count(rel)) continue;
         if (rel == ".retcomm-engine.json") continue;
+        if (rel == "generated" || rel_under_prefix(rel, "generated")) {
+            if (it->is_directory(ec)) it.disable_recursion_pending();
+            continue;
+        }
         stale.push_back(p);
     }
     std::sort(stale.begin(), stale.end(), [](const fs::path& a, const fs::path& b) {
@@ -1863,6 +1874,43 @@ bool sync_engine_tree_into_cache(const fs::path& from, const fs::path& to, std::
         fs::remove_all(p, ec);
     }
     return true;
+}
+
+bool bios_generated_present(const fs::path& eng_or_src) {
+    std::error_code ec;
+    const fs::path bios_gen = eng_or_src / "generated";
+    return fs::is_regular_file(bios_gen / "OpenBIOS_dispatch.c", ec) ||
+           fs::is_regular_file(bios_gen / "SCPH1001_dispatch.c", ec);
+}
+
+// Prefer an existing engines/<name>/<pin>/ tree whose key-file content_id matches
+// so a new git pin with identical bytes reuses the same directory (stable mtimes).
+fs::path find_engine_cache_by_content(const fs::path& name_root, const std::string& name,
+                                      const std::string& content_id) {
+    if (content_id.empty() || name_root.empty()) return {};
+    std::error_code ec;
+    if (!fs::is_directory(name_root, ec)) return {};
+    for (auto it = fs::directory_iterator(name_root, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_directory(ec)) continue;
+        const fs::path child = it->path();
+        const std::string leaf = child.filename().string();
+        if (leaf.empty() || leaf[0] == '.') continue;
+        if (!engine_tree_looks_ready(name, child)) continue;
+        std::string marked;
+        const fs::path marker = child / ".retcomm-engine.json";
+        if (fs::is_regular_file(marker, ec)) {
+            try {
+                std::ifstream in(marker);
+                const json j = json::parse(in);
+                marked = j.value("content_id", "");
+            } catch (...) {
+            }
+        }
+        if (marked.empty()) marked = content_engine_pin(name, child);
+        if (marked == content_id) return child;
+    }
+    return {};
 }
 
 fs::path resolve_engines_root(const Paths& paths, const fs::path& override_dir) {
@@ -1918,7 +1966,45 @@ void promote_shared_engines(const Paths& paths, const Title& title, const fs::pa
 
         const std::string pin = resolve_engine_pin(name, pins_root, pin_tree);
         const std::string safe = sanitize_tag(pin.empty() ? "unknown" : pin);
-        const fs::path cache = engines_root / name / safe;
+        const std::string content_id = content_engine_pin(name, pin_tree);
+        const fs::path name_root = engines_root / name;
+        fs::path cache = name_root / safe;
+
+        // New git pin + identical key bytes → reuse existing cache dir so Ninja
+        // keeps prior object mtimes (avoids ~100+ runtime rebuilds per update).
+        if (!content_id.empty()) {
+            const fs::path reused =
+                find_engine_cache_by_content(name_root, name, content_id);
+            if (!reused.empty()) {
+                if (reused != cache) {
+                    progress(on_progress, "Reusing shared engine " + name + " @" +
+                                              reused.filename().string() +
+                                              " (content match for pin " + safe + ")");
+                }
+                cache = reused;
+            }
+        }
+
+        // Stash BIOS backends before parking/replacing a real local tree.
+        if (name == "psxrecomp") {
+            const fs::path stash_to =
+                codegen_cache_dir(paths, title) / "psxrecomp" / "generated";
+            auto try_stash = [&](const fs::path& eng) {
+                if (!bios_generated_present(eng)) return;
+                std::string err;
+                if (sync_tree_content_aware(eng / "generated", stash_to, &err)) {
+                    progress(on_progress, "Stashed BIOS generated → codegen-cache");
+                } else if (!err.empty()) {
+                    progress(on_progress, "BIOS stash skipped: " + err);
+                }
+            };
+            if (!real_from.empty() && !path_is_dir_link(real_from)) try_stash(real_from);
+            if (!path_is_dir_link(link_path) && fs::is_directory(link_path, ec))
+                try_stash(link_path);
+            // When already linked into a cache that still holds BIOS, keep a copy.
+            if (path_is_dir_link(link_path) && bios_generated_present(link_path))
+                try_stash(link_path);
+        }
 
         if (!engine_tree_looks_ready(name, cache)) {
             if (real_from.empty()) {
@@ -1929,7 +2015,8 @@ void promote_shared_engines(const Paths& paths, const Title& title, const fs::pa
             if (path_under_prefix(real_from, engines_root)) {
                 // Ensure dest links at that cache entry.
             } else {
-                progress(on_progress, "Caching shared engine " + name + "@" + safe + "…");
+                progress(on_progress, "Caching shared engine " + name + "@" +
+                                          cache.filename().string() + "…");
                 std::string err;
                 if (!sync_engine_tree_into_cache(real_from, cache, &err)) {
                     progress(on_progress, "Shared engine cache skipped (" + name + "): " + err);
@@ -1938,6 +2025,7 @@ void promote_shared_engines(const Paths& paths, const Title& title, const fs::pa
                 try {
                     json meta = {{"id", name},
                                  {"pin", pin},
+                                 {"content_id", content_id},
                                  {"title", title.id},
                                  {"source", "harvested-from-game-source"}};
                     std::ofstream out(cache / ".retcomm-engine.json");
@@ -1951,6 +2039,39 @@ void promote_shared_engines(const Paths& paths, const Title& title, const fs::pa
             std::string err;
             if (!sync_engine_tree_into_cache(real_from, cache, &err)) {
                 progress(on_progress, "Shared engine refresh skipped (" + name + "): " + err);
+            } else {
+                try {
+                    json meta = {{"id", name},
+                                 {"pin", pin},
+                                 {"content_id", content_id},
+                                 {"title", title.id},
+                                 {"source", "harvested-from-game-source"}};
+                    std::ofstream out(cache / ".retcomm-engine.json");
+                    out << meta.dump(2) << "\n";
+                } catch (...) {
+                }
+            }
+        } else {
+            // Still refresh pin/content_id metadata when reusing.
+            try {
+                const fs::path marker = cache / ".retcomm-engine.json";
+                json meta = {{"id", name},
+                             {"pin", pin},
+                             {"content_id", content_id},
+                             {"title", title.id},
+                             {"source", "reused-by-content"}};
+                if (fs::is_regular_file(marker, ec)) {
+                    try {
+                        std::ifstream in(marker);
+                        json prev = json::parse(in);
+                        if (prev.contains("source") && meta.value("content_id", "").empty())
+                            meta["content_id"] = prev.value("content_id", "");
+                    } catch (...) {
+                    }
+                }
+                std::ofstream out(marker);
+                out << meta.dump(2) << "\n";
+            } catch (...) {
             }
         }
 
@@ -1958,11 +2079,23 @@ void promote_shared_engines(const Paths& paths, const Title& title, const fs::pa
 
         /* Skip only when the link both points at cache and is followable.
          * Unfollowable Windows symlinks look "linked" but break buildable. */
-        if (dir_link_resolves_to(link_path, cache) && engine_tree_looks_ready(name, link_path))
+        if (dir_link_resolves_to(link_path, cache) && engine_tree_looks_ready(name, link_path)) {
+            if (name == "psxrecomp" && !bios_generated_present(link_path)) {
+                const fs::path stash =
+                    codegen_cache_dir(paths, title) / "psxrecomp" / "generated";
+                std::error_code sec;
+                if (fs::is_directory(stash, sec)) {
+                    std::string err;
+                    if (sync_tree_content_aware(stash, link_path / "generated", &err))
+                        progress(on_progress, "Restored BIOS generated from codegen-cache");
+                }
+            }
             continue;
+        }
         ec.clear();
 
-        progress(on_progress, "Linking " + name + " → engines/" + name + "/" + safe);
+        progress(on_progress, "Linking " + name + " → engines/" + name + "/" +
+                                  cache.filename().string());
         std::string err;
         if (!link_directory_replace(link_path, cache, &err)) {
             if (engine_tree_looks_ready(name, link_path)) {
@@ -1989,6 +2122,18 @@ void promote_shared_engines(const Paths& paths, const Title& title, const fs::pa
             progress(on_progress,
                      "Engine link not traversable (" + name +
                          ") — Update may fail cmake-buildable check");
+        }
+        if (name == "psxrecomp" && !bios_generated_present(link_path)) {
+            const fs::path stash =
+                codegen_cache_dir(paths, title) / "psxrecomp" / "generated";
+            std::error_code sec;
+            if (fs::is_directory(stash, sec)) {
+                std::string rerr;
+                if (sync_tree_content_aware(stash, link_path / "generated", &rerr))
+                    progress(on_progress, "Restored BIOS generated from codegen-cache");
+                else if (!rerr.empty())
+                    progress(on_progress, "BIOS restore skipped: " + rerr);
+            }
         }
     }
 }
