@@ -9,7 +9,9 @@
 namespace retcomm {
 
 // How long a cached GitHub latest-tag is reused before re-fetching.
-inline constexpr std::int64_t kReleaseTagCacheTtlSeconds = 4 * 60 * 60; // 4 hours
+// Web latest-tag checks are cheap (github.com, not api.github.com); still cache
+// so Check Updates does not fan out once per title on every hub refresh.
+inline constexpr std::int64_t kReleaseTagCacheTtlSeconds = 24 * 60 * 60; // 24 hours
 
 fs::path release_tags_cache_path(const Paths& paths);
 

@@ -602,7 +602,7 @@ void HubModel::refresh_rows(bool check_updates, bool force_github_tags) {
             if (check_updates) {
                 std::string err;
                 // One network fetch per unique repo; shared repos reuse in-session.
-                // TTL (4h) applies unless force_github_tags (manual Check for Updates).
+                // TTL applies unless force_github_tags (manual Check for Updates).
                 row.latest_tag = tag_cache.latest_tag(t.release.github, t.release.allow_prerelease,
                                                       force_github_tags, &err);
             } else if (const auto it = prev_updates.find(row.id); it != prev_updates.end()) {
@@ -1742,10 +1742,9 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
             case HubJob::CheckUpdates: {
                 set_status("Checking updates…");
                 // Catalog → launcher → toolchain → games (prompt order matches).
-                // Catalog sync always asks GitHub for the latest catalog release
-                // (downloads only when newer). Game tags use force_github_tags so
-                // the 4h release-tag TTL cannot hide a new title release — GitHub
-                // latest is authoritative for installed versions.
+                // Catalog sync resolves latest via github.com (not api.github.com)
+                // and downloads only when newer. Game tags use force_github_tags so
+                // the release-tag TTL cannot hide a new title release.
                 {
                     set_status("Checking catalog…");
                     auto cr = sync_remote_catalog(paths, cfg, /*force=*/false);

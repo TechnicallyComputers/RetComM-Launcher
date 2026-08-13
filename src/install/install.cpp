@@ -1748,8 +1748,38 @@ bool host_supports_wine() {
 
 std::string fetch_latest_release_tag(const std::string& github_slug, std::string* error,
                                      bool allow_prerelease) {
+    // Prefer github.com redirect (no api.github.com quota). /releases/latest is the
+    // latest stable release. API is only a fallback (private repos / odd redirects /
+    // when a newer prerelease is required and web is insufficient).
+    std::string web_err;
+    const std::string web_tag = github_latest_release_tag_web(github_slug, &web_err);
+    if (!web_tag.empty() && !allow_prerelease) {
+        if (error) error->clear();
+        return web_tag;
+    }
+
+    // Prerelease-aware: try API for a possibly newer pre tag; on API failure keep web.
+    if (allow_prerelease) {
+        GhRelease rel;
+        std::string api_err;
+        if (fetch_latest_release(github_slug, rel, &api_err, /*allow_prerelease=*/true) &&
+            !rel.tag.empty()) {
+            if (error) error->clear();
+            return rel.tag;
+        }
+        if (!web_tag.empty()) {
+            if (error) error->clear();
+            return web_tag;
+        }
+        if (error) *error = api_err.empty() ? web_err : api_err;
+        return {};
+    }
+
     GhRelease rel;
-    if (!fetch_latest_release(github_slug, rel, error, allow_prerelease)) return {};
+    if (!fetch_latest_release(github_slug, rel, error, /*allow_prerelease=*/false)) {
+        if (error && error->empty()) *error = web_err;
+        return {};
+    }
     return rel.tag;
 }
 

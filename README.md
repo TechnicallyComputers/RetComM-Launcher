@@ -160,9 +160,11 @@ cmake --build build -j
 ```
 
 Requires CMake 3.24+, a C++17 compiler, and **libcurl**. Runtime archive tools:
-`bsdtar` (preferred), `unzip`, or `7z`. Optional GitHub PAT for API rate limits:
-Library Settings → **GitHub token**, `config.json` `github_token`, or env
-`GITHUB_TOKEN` / `GH_TOKEN` (env wins). Hub UI needs system **SDL3** + OpenGL and Dear ImGui (sibling
+`bsdtar` (preferred), `unzip`, or `7z`. Update *checks* (catalog / launcher /
+toolchain / game tags) use `github.com` redirects and do not need a token.
+Optional GitHub PAT for `api.github.com` when listing/downloading release
+assets: Library Settings → **GitHub token**, `config.json` `github_token`, or
+env `GITHUB_TOKEN` / `GH_TOKEN` (env wins). Hub UI needs system **SDL3** + OpenGL and Dear ImGui (sibling
 `../recomp-ui`, or CMake FetchContent). Wine installs need `wine` / `wine64` on
 `PATH`.
 

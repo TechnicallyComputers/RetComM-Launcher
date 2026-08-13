@@ -134,6 +134,102 @@ bool http_download_once(const std::string& url, const fs::path& part, curl_off_t
     return true;
 }
 
+size_t discard_write(char*, size_t size, size_t nmemb, void*) { return size * nmemb; }
+
+// Percent-decode a short path segment (release tags).
+std::string url_decode_tag(std::string s) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size()) {
+            auto hex = [](char c) -> int {
+                if (c >= '0' && c <= '9') return c - '0';
+                if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+                if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+                return -1;
+            };
+            const int hi = hex(s[i + 1]);
+            const int lo = hex(s[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                out.push_back(static_cast<char>((hi << 4) | lo));
+                i += 2;
+                continue;
+            }
+        } else if (s[i] == '+') {
+            out.push_back(' ');
+            continue;
+        }
+        out.push_back(s[i]);
+    }
+    return out;
+}
+
+std::string tag_from_github_release_url(const std::string& url) {
+    // …/releases/tag/v1.2.3 or …/releases/tag/v1.2.3?… / #…
+    const std::string marker = "/releases/tag/";
+    const auto pos = url.find(marker);
+    if (pos == std::string::npos) return {};
+    std::string tag = url.substr(pos + marker.size());
+    const auto cut = tag.find_first_of("?#");
+    if (cut != std::string::npos) tag.resize(cut);
+    while (!tag.empty() && tag.back() == '/') tag.pop_back();
+    return url_decode_tag(std::move(tag));
+}
+
+// Follow redirects for github.com/{slug}/releases/latest → tag URL (no API).
+std::string resolve_github_latest_tag_web(const std::string& github_slug, std::string* error) {
+    if (github_slug.empty() || github_slug.find('/') == std::string::npos) {
+        if (error) *error = "invalid github slug";
+        return {};
+    }
+    const std::string url = "https://github.com/" + github_slug + "/releases/latest";
+
+    auto try_once = [&](bool head_only) -> std::string {
+        CURL* curl = make_easy(url);
+        curl_slist* hdrs = nullptr;
+        // Browser-ish Accept — avoid JSON API negotiation on github.com.
+        std::vector<std::pair<std::string, std::string>> headers = {
+            {"Accept", "text/html,application/xhtml+xml"},
+        };
+        apply_headers(curl, headers, &hdrs);
+        if (head_only) {
+            curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
+        } else {
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, discard_write);
+            // Cap body — we only need redirects / final URL.
+            curl_easy_setopt(curl, CURLOPT_MAXFILESIZE_LARGE, static_cast<curl_off_t>(256 * 1024));
+        }
+        const CURLcode code = curl_easy_perform(curl);
+        long status = 0;
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+        char* effective = nullptr;
+        curl_easy_getinfo(curl, CURLINFO_EFFECTIVE_URL, &effective);
+        std::string eff = effective ? effective : "";
+        if (hdrs) curl_slist_free_all(hdrs);
+        curl_easy_cleanup(curl);
+        if (code != CURLE_OK) {
+            if (error) *error = curl_easy_strerror(code);
+            return {};
+        }
+        // 3xx should already be followed; still accept 200 on the tag page.
+        if (status < 200 || status >= 400) {
+            if (error) *error = "HTTP " + std::to_string(status) + " from " + url;
+            return {};
+        }
+        return tag_from_github_release_url(eff);
+    };
+
+    std::string tag = try_once(true);
+    if (tag.empty()) {
+        // Some edges reject HEAD; fall back to a truncated GET.
+        if (error) error->clear();
+        tag = try_once(false);
+    }
+    if (tag.empty() && error && error->empty())
+        *error = "could not parse release tag from " + url;
+    return tag;
+}
+
 } // namespace
 
 void set_github_token(std::string token) {
@@ -330,6 +426,16 @@ HttpResponse http_post_multipart(
     if (hdrs) curl_slist_free_all(hdrs);
     curl_easy_cleanup(curl);
     return res;
+}
+
+std::string github_latest_release_tag_web(const std::string& github_slug, std::string* error) {
+    return resolve_github_latest_tag_web(github_slug, error);
+}
+
+std::string github_release_asset_url(const std::string& github_slug, const std::string& tag,
+                                     const std::string& asset_name) {
+    if (github_slug.empty() || tag.empty() || asset_name.empty()) return {};
+    return "https://github.com/" + github_slug + "/releases/download/" + tag + "/" + asset_name;
 }
 
 } // namespace retcomm

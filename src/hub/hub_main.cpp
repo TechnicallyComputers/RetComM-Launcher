@@ -2626,9 +2626,10 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
         hub.settings.dirty = true;
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
     ImGui::TextWrapped(
-        "Personal access token for api.github.com (catalog, launcher, toolchain, and game "
-        "release checks). Avoids unauthenticated rate limits (~60/hour). classic: public_repo "
-        "or fine-grained: Contents read on public repos. GITHUB_TOKEN / GH_TOKEN in the "
+        "Optional PAT for api.github.com when downloading release assets (Install / Apply "
+        "Update). Catalog, launcher, toolchain, and game *version checks* use github.com and "
+        "do not need a token. Use a classic public_repo token or fine-grained Contents read "
+        "if you hit API rate limits during downloads. GITHUB_TOKEN / GH_TOKEN in the "
         "environment still overrides this. Save to apply.");
     ImGui::PopStyleColor();
 

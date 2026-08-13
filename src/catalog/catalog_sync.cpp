@@ -219,31 +219,18 @@ bool write_catalog_state(const Paths& paths, const json& state, std::string* err
 bool fetch_latest_catalog_release(const AppConfig& cfg, RemoteCatalogRelease* out,
                                   std::string* error) {
     if (!out) return false;
+    // Prefer github.com /releases/latest redirect (no api.github.com quota).
+    // Asset download still uses …/releases/latest/download/catalog.zip.
     const std::string repo = effective_catalog_repo(cfg);
-    const std::string url = "https://api.github.com/repos/" + repo + "/releases/latest";
-    const auto res = http_get(url, github_http_headers());
-    if (!res.ok()) {
-        if (error)
-            *error = res.error.empty()
-                         ? ("HTTP " + std::to_string(res.status) + " from " + url)
-                         : res.error;
+    std::string err;
+    out->tag = github_latest_release_tag_web(repo, &err);
+    out->published_at.clear();
+    if (out->tag.empty()) {
+        if (error) *error = err.empty() ? ("could not resolve latest tag for " + repo) : err;
         return false;
     }
-    try {
-        const json j = json::parse(res.body);
-        out->tag = j.value("tag_name", "");
-        out->published_at = j.value("published_at", "");
-        if (out->tag.empty()) {
-            if (error) *error = "latest release missing tag_name";
-            return false;
-        }
-        out->catalog_date =
-            catalog_date_from_tag_or_published(out->tag, out->published_at);
-        return true;
-    } catch (const std::exception& e) {
-        if (error) *error = e.what();
-        return false;
-    }
+    out->catalog_date = catalog_date_from_tag_or_published(out->tag, out->published_at);
+    return true;
 }
 
 // Decide whether the local cache already satisfies the remote latest release.

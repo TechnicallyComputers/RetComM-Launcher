@@ -1082,13 +1082,15 @@ SelfUpdateCheckInfo check_retcomm_update(const Paths& /*paths*/, const SelfUpdat
     }
     const std::string slug = retcomm_github_slug();
     std::string err;
-    GhRelease rel;
-    if (!fetch_latest_release(slug, rel, &err, opts.allow_prerelease)) {
+    // Tag-only via github.com redirect (or API fallback) — no release asset listing.
+    const std::string latest =
+        fetch_latest_release_tag(slug, &err, opts.allow_prerelease);
+    if (latest.empty()) {
         info.message = "GitHub release check failed for " + slug + ": " + err;
         return info;
     }
     info.ok = true;
-    info.latest_tag = rel.tag;
+    info.latest_tag = latest;
     info.update_available =
         normalize_tag(info.current_tag) != normalize_tag(info.latest_tag);
     if (info.update_available) {
@@ -1112,13 +1114,15 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
 
     const std::string slug = retcomm_github_slug();
     std::string err;
-    GhRelease rel;
-    if (!fetch_latest_release(slug, rel, &err, opts.allow_prerelease)) {
+    // Cheap tag check first (github.com); only hit api.github.com when downloading.
+    const std::string latest_tag =
+        fetch_latest_release_tag(slug, &err, opts.allow_prerelease);
+    if (latest_tag.empty()) {
         return fail(result, "GitHub release check failed for " + slug + ": " + err +
                                 "\nPublish a Release with host installers "
                                 "(AppImage / DMG / Windows setup.exe).");
     }
-    result.latest_tag = rel.tag;
+    result.latest_tag = latest_tag;
 
     if (!opts.force &&
         normalize_tag(result.current_tag) == normalize_tag(result.latest_tag)) {
@@ -1127,6 +1131,14 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
         result.message = "RetComM Launcher is up to date (" + result.latest_tag + ").";
         return result;
     }
+
+    GhRelease rel;
+    if (!fetch_latest_release(slug, rel, &err, opts.allow_prerelease) || rel.tag.empty()) {
+        return fail(result, "GitHub release asset list failed for " + slug + ": " + err +
+                                "\nPublish a Release with host installers "
+                                "(AppImage / DMG / Windows setup.exe).");
+    }
+    result.latest_tag = rel.tag;
 
     const GhAsset* asset = pick_launcher_asset(rel, install.channel);
     if (!asset) {

@@ -49,4 +49,14 @@ HttpResponse http_post_multipart(
 void set_github_token(std::string token);
 std::vector<std::pair<std::string, std::string>> github_http_headers();
 
+// Resolve the latest *stable* release tag without api.github.com by following
+// https://github.com/{owner}/{repo}/releases/latest → …/releases/tag/{tag}.
+// Does not include prereleases (same as GitHub's /releases/latest page).
+std::string github_latest_release_tag_web(const std::string& github_slug,
+                                          std::string* error = nullptr);
+
+// Build a non-API asset URL: https://github.com/{slug}/releases/download/{tag}/{name}
+std::string github_release_asset_url(const std::string& github_slug, const std::string& tag,
+                                     const std::string& asset_name);
+
 } // namespace retcomm

@@ -4245,15 +4245,17 @@ ToolchainUpdateInfo check_toolchain_update(const Paths& paths, const std::string
             info.current_version = cached.filename().string();
     }
 
-    GhRelease rel;
     std::string err;
-    if (!fetch_latest_release(repo, rel, &err, /*allow_prerelease=*/true)) {
+    // Tag-only via github.com (API only if web fails / prerelease needed).
+    const std::string latest =
+        fetch_latest_release_tag(repo, &err, /*allow_prerelease=*/false);
+    if (latest.empty()) {
         info.message = "toolchain update check failed: " + err;
         return info;
     }
     info.ok = true;
-    info.latest_tag = rel.tag;
-    std::string latest_ver = rel.tag;
+    info.latest_tag = latest;
+    std::string latest_ver = latest;
     // Prefer comparing against pack JSON semantics (strip leading v).
     while (!latest_ver.empty() && (latest_ver.front() == 'v' || latest_ver.front() == 'V'))
         latest_ver.erase(latest_ver.begin());

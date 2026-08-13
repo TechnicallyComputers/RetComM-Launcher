@@ -74,11 +74,13 @@ even when it also ships a launch binary — never take that binary as a Play
 shortcut (that used to skip disc→C for dual-mode packs). Blind zip extract would
 also replace a built Play binary with the setup-host wizard. Pure prebuilt titles
 (no local build recipe) still Update via zip extract; `InstallPrebuilt` / Wine
-still force zip. When GitHub `/releases/latest` is rate-limited (HTTP 403), Update
-uses the same durable release-zip cache as prefetch (`data_dir/cache/releases/…`)
+still force zip. Version *checks* use `github.com` `/releases/latest` redirects
+(no `api.github.com` quota). Asset downloads still use the GitHub release API /
+`releases/download` URLs; when the API is rate-limited (HTTP 403), Update uses
+the same durable release-zip cache as prefetch (`data_dir/cache/releases/…`)
 plus the hub tag hint — it does **not** fall back to an incomplete `zipball@main`.
-Set `github_token` in Library Settings / `config.json` (or `GITHUB_TOKEN`) to raise
-the API quota.
+Set `github_token` in Library Settings / `config.json` (or `GITHUB_TOKEN`) if you
+need a higher API quota for Install / Apply Update downloads.
 
 **Shared caches & GC:** after a successful local build (and via Hub → Advanced →
 **Prune shared caches now** / `retcomm cache gc`), RetComM drops old

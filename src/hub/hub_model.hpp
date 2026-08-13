@@ -507,7 +507,7 @@ struct HubModel {
     std::string file_pick_default_location;
 
     // check_updates: query GitHub latest tags for installed titles.
-    // force_github_tags: ignore the 4h release-tag TTL (manual Check for Updates).
+    // force_github_tags: ignore the release-tag TTL (manual Check for Updates).
     void refresh_rows(bool check_updates, bool force_github_tags = false);
     void append_log(const std::string& line);
     void append_log(const std::string& line, LogLevel level);
