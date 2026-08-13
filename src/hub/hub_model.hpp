@@ -462,6 +462,9 @@ struct HubModel {
     std::atomic<bool> prefetch_running{false};
     std::atomic<bool> prefetch_cancel{false}; // SelfUpdate / exit: stop between titles
     std::thread prefetch_worker;
+    // Set by Install/Update/GenerateRebuild when skip_cache_gc; drained when the
+    // main worker is idle and the queue is empty (out-of-process prune preferred).
+    std::atomic<bool> pending_deferred_cache_gc{false};
     // After idle: CheckUpdates (catalog → launcher → toolchain → games).
     bool pending_startup_update_check = false;
     // Brief top-of-window notice (import / scan results). Main thread times display.
@@ -539,6 +542,9 @@ struct HubModel {
     int queue_all_updates();
     // Pop the next queued job and start it (no-op if busy or empty).
     bool start_next_queued_job();
+    // When the worker is idle and the queue is empty, run deferred post-build
+    // cache GC out-of-process (no-op if nothing pending / auto_gc off).
+    void maybe_run_deferred_cache_gc();
     void join_worker();
     // Download pending game update zips into the release cache (non-blocking job slot).
     // empty ids → all rows with update_available. Safe to call from worker or UI thread.

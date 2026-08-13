@@ -12,6 +12,14 @@
 #include <new>
 #include <set>
 #include <sstream>
+#include <vector>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace retcomm {
 namespace {
@@ -421,6 +429,94 @@ CacheGcResult run_cache_gc(const Paths& paths, const AppConfig& cfg) {
         r.messages.push_back(r.message);
         return r;
     }
+}
+
+fs::path resolve_retcomm_cli(const fs::path& hint_exe) {
+    std::error_code ec;
+    std::vector<fs::path> candidates;
+    if (!hint_exe.empty()) {
+        const fs::path dir = hint_exe.has_parent_path() ? hint_exe.parent_path() : fs::path(".");
+#if defined(_WIN32)
+        candidates.push_back(dir / "retcomm.exe");
+#else
+        candidates.push_back(dir / "retcomm");
+#endif
+        // Portable / AppImage: hub next to CLI under the same prefix.
+        candidates.push_back(dir / "retcomm");
+    }
+#if defined(_WIN32)
+    wchar_t mod[MAX_PATH]{};
+    if (GetModuleFileNameW(nullptr, mod, MAX_PATH) > 0) {
+        const fs::path self = fs::path(mod).parent_path();
+        candidates.push_back(self / "retcomm.exe");
+    }
+#else
+    // Best-effort: /proc/self/exe on Linux.
+    std::error_code lec;
+    const fs::path self = fs::read_symlink("/proc/self/exe", lec);
+    if (!lec && !self.empty()) candidates.push_back(self.parent_path() / "retcomm");
+#endif
+    for (const fs::path& c : candidates) {
+        if (!c.empty() && fs::is_regular_file(c, ec)) return c;
+    }
+    return {};
+}
+
+CacheGcResult spawn_or_run_cache_gc(const Paths& paths, const AppConfig& cfg,
+                                    const fs::path& hint_exe) {
+    CacheGcResult r;
+    if (!cfg.auto_gc_caches) {
+        r.message = "cache GC disabled (auto_gc_caches=false)";
+        return r;
+    }
+
+    const fs::path cli = resolve_retcomm_cli(hint_exe);
+    if (cli.empty()) {
+        r = run_cache_gc(paths, cfg);
+        if (r.message.find("deferred") == std::string::npos && r.ok)
+            r.message = "Cache GC (in-process; CLI not found): " + r.message;
+        return r;
+    }
+
+#if defined(_WIN32)
+#ifndef CREATE_BREAKAWAY_FROM_JOB
+#define CREATE_BREAKAWAY_FROM_JOB 0x01000000
+#endif
+    std::wstring cmd = L"\"" + cli.wstring() + L"\" cache gc";
+    std::vector<wchar_t> mutable_cmd(cmd.begin(), cmd.end());
+    mutable_cmd.push_back(L'\0');
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+    const DWORD flags = CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB | CREATE_NEW_PROCESS_GROUP;
+    if (CreateProcessW(cli.wstring().c_str(), mutable_cmd.data(), nullptr, nullptr, FALSE, flags,
+                       nullptr, cli.parent_path().wstring().c_str(), &si, &pi)) {
+        if (pi.hThread) CloseHandle(pi.hThread);
+        if (pi.hProcess) CloseHandle(pi.hProcess);
+        r.ok = true;
+        r.message = "Cache GC started in background (" + cli.filename().string() + " cache gc)";
+        r.messages.push_back(r.message);
+        return r;
+    }
+    // Fall through to in-process if spawn failed.
+    r = run_cache_gc(paths, cfg);
+    r.messages.insert(r.messages.begin(),
+                      "Cache GC spawn failed; ran in-process instead");
+    return r;
+#else
+    const std::string cmd = "\"" + cli.string() + "\" cache gc >/dev/null 2>&1 &";
+    if (std::system(cmd.c_str()) == 0) {
+        r.ok = true;
+        r.message = "Cache GC started in background (" + cli.filename().string() + " cache gc)";
+        r.messages.push_back(r.message);
+        return r;
+    }
+    r = run_cache_gc(paths, cfg);
+    r.messages.insert(r.messages.begin(), "Cache GC spawn failed; ran in-process instead");
+    return r;
+#endif
 }
 
 } // namespace retcomm

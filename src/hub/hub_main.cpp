@@ -5026,6 +5026,10 @@ int main(int argc, char** argv) {
         // Drain Install/Update queue when the main worker is free.
         if (!hub.job_running.load() && hub.queued_job_count() > 0)
             hub.start_next_queued_job();
+        // After the queue drains, prune shared caches out-of-process (skipped
+        // during each build so multi-title updates do not OOM the hub).
+        if (!hub.job_running.load() && hub.queued_job_count() == 0)
+            hub.maybe_run_deferred_cache_gc();
 
         ImGui_ImplOpenGL3_NewFrame();
         ImGui_ImplSDL3_NewFrame();

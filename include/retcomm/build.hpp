@@ -39,6 +39,10 @@ struct BuildOptions {
     std::string hint_latest_tag;
     // Override Paths::apps_dir for this build (multi-root installs).
     fs::path apps_dir;
+    // When true, skip post-build run_cache_gc (Hub defers GC until the job queue
+    // is idle and prefers an out-of-process `retcomm cache gc` so OOM cannot kill
+    // the UI after large generates).
+    bool skip_cache_gc = false;
     BuildProgressFn on_progress;
     // When set, CLI lines are streamed live and failure messages omit the full dump
     // (already delivered via this callback).

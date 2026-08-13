@@ -4211,7 +4211,7 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
     prune_stale_source_tag_dirs(paths.apps_dir / title.install_dir_name / "src", src.root);
 
     CacheGcResult gc;
-    if (post_cfg.auto_gc_caches) {
+    if (post_cfg.auto_gc_caches && !opts.skip_cache_gc) {
         progress(opts.on_progress, "Pruning shared caches…", 0.98f);
         // Post-build RSS can be high (large generated C link). GC must never
         // turn a successful stage into Install failed.
@@ -4224,6 +4224,8 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
             gc.ok = false;
             gc.message = std::string("Cache GC skipped (") + e.what() + ") — build succeeded";
         }
+    } else if (post_cfg.auto_gc_caches && opts.skip_cache_gc) {
+        gc.message = "Cache GC deferred (hub will prune when the job queue is idle)";
     }
 
     try {
@@ -4244,11 +4246,10 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
                      "  sdk: " + sdk.tag + "  toolchain: " + tc.tag + "\n";
     if (auto_clean) result.message += "  cleaned cmake build/ (auto_clean_build_dirs)\n";
     if (!gc.message.empty()) {
-        if (!gc.ok)
-            result.message += "  " + gc.message + "\n";
-        else if (gc.removed_toolchains + gc.removed_sdks + gc.removed_engines +
-                     gc.removed_release_zips + gc.removed_idle_builds >
-                 0)
+        if (!gc.ok || opts.skip_cache_gc ||
+            (gc.removed_toolchains + gc.removed_sdks + gc.removed_engines +
+                 gc.removed_release_zips + gc.removed_idle_builds >
+             0))
             result.message += "  " + gc.message + "\n";
     }
     if (!stash_note.empty()) result.message += "  " + stash_note;

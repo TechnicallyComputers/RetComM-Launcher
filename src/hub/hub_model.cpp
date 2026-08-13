@@ -22,6 +22,13 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 namespace retcomm::hub {
 using namespace retcomm;
 
@@ -33,6 +40,10 @@ std::string trim_log(std::string s, size_t max_chars = 200000) {
 }
 
 void wire_build_activity(HubModel* hub, BuildOptions& bopts) {
+    // Defer post-build GC: hub runs spawn_or_run_cache_gc when the queue is idle
+    // so multi-title updates do not prune (and risk OOM) between builds.
+    bopts.skip_cache_gc = true;
+    if (hub->cfg.auto_gc_caches) hub->pending_deferred_cache_gc.store(true);
     bopts.on_progress = [hub](const std::string& msg, float) { hub->set_status(msg); };
     bopts.on_output = [hub](const std::string& line) {
         if (line.empty()) return;
@@ -884,6 +895,37 @@ bool HubModel::start_next_queued_job() {
     std::lock_guard<std::mutex> lock(mu);
     job_queue.push_front(next);
     return false;
+}
+
+void HubModel::maybe_run_deferred_cache_gc() {
+    if (job_running.load() || launch_running.load()) return;
+    if (queued_job_count() > 0) return;
+    if (!pending_deferred_cache_gc.exchange(false)) return;
+    cfg = load_app_config(paths.config_path);
+    if (!cfg.auto_gc_caches) return;
+
+    set_status("Pruning shared caches (background)…");
+    fs::path hint;
+#if defined(_WIN32)
+    wchar_t mod[MAX_PATH]{};
+    if (GetModuleFileNameW(nullptr, mod, MAX_PATH) > 0) hint = mod;
+#else
+    std::error_code ec;
+    hint = fs::read_symlink("/proc/self/exe", ec);
+#endif
+    CacheGcResult cr;
+    try {
+        cr = spawn_or_run_cache_gc(paths, cfg, hint);
+    } catch (const std::bad_alloc&) {
+        cr.ok = false;
+        cr.message = "Cache GC aborted (out of memory)";
+    } catch (const std::exception& e) {
+        cr.ok = false;
+        cr.message = std::string("Cache GC aborted: ") + e.what();
+    }
+    for (const auto& m : cr.messages) append_log(m);
+    append_log(cr.message);
+    set_status(cr.ok ? "Ready" : cr.message);
 }
 
 bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxart,

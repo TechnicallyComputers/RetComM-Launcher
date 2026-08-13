@@ -33,6 +33,12 @@ struct CacheGcResult {
 // failure as install/build failure.
 CacheGcResult run_cache_gc(const Paths& paths, const AppConfig& cfg);
 
+// Fire-and-forget: spawn `retcomm cache gc` next to hint_exe (hub or CLI).
+// Falls back to in-process run_cache_gc when the CLI binary is missing.
+// Detached child keeps hub RSS out of the GC walk (avoids OOM killing the UI).
+CacheGcResult spawn_or_run_cache_gc(const Paths& paths, const AppConfig& cfg,
+                                    const fs::path& hint_exe = {});
+
 // Ensure data_dir/ccache exists and return env pairs for cmake/ninja children
 // (CCACHE_DIR + CCACHE_MAXSIZE). Empty when ccache_max_gb <= 0.
 std::vector<std::pair<std::string, std::string>> shared_ccache_env(const Paths& paths,
