@@ -307,6 +307,7 @@ struct SettingsDraft {
     bool filter_unsupported_titles = false;
     bool check_updates_on_startup = true;
     bool check_updates_before_launch = true;
+    char github_token[512]{}; // PAT for api.github.com (optional; env still wins)
     bool auto_clean_build_dirs = false;
     bool auto_gc_caches = true;
     int keep_toolchain_versions = 2;

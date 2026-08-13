@@ -4,10 +4,15 @@
 
 #include <cstdlib>
 #include <fstream>
+#include <mutex>
 #include <stdexcept>
+#include <string>
 
 namespace retcomm {
 namespace {
+
+std::mutex g_github_token_mu;
+std::string g_github_token_config;
 
 void ensure_curl_global() {
     static const bool once = [] {
@@ -131,13 +136,35 @@ bool http_download_once(const std::string& url, const fs::path& part, curl_off_t
 
 } // namespace
 
+void set_github_token(std::string token) {
+    // Trim trailing whitespace / newlines from pasted PATs.
+    while (!token.empty() &&
+           (token.back() == '\n' || token.back() == '\r' || token.back() == ' ' ||
+            token.back() == '\t'))
+        token.pop_back();
+    size_t i = 0;
+    while (i < token.size() &&
+           (token[i] == ' ' || token[i] == '\t' || token[i] == '\n' || token[i] == '\r'))
+        ++i;
+    if (i > 0) token.erase(0, i);
+    std::lock_guard<std::mutex> lock(g_github_token_mu);
+    g_github_token_config = std::move(token);
+}
+
 std::vector<std::pair<std::string, std::string>> github_http_headers() {
     std::vector<std::pair<std::string, std::string>> h;
     h.emplace_back("Accept", "application/vnd.github+json");
     h.emplace_back("X-GitHub-Api-Version", "2022-11-28");
     const char* tok = std::getenv("GITHUB_TOKEN");
     if (!tok || !*tok) tok = std::getenv("GH_TOKEN");
-    if (tok && *tok) h.emplace_back("Authorization", std::string("Bearer ") + tok);
+    std::string bearer;
+    if (tok && *tok) {
+        bearer = tok;
+    } else {
+        std::lock_guard<std::mutex> lock(g_github_token_mu);
+        bearer = g_github_token_config;
+    }
+    if (!bearer.empty()) h.emplace_back("Authorization", std::string("Bearer ") + bearer);
     return h;
 }
 
@@ -154,8 +181,15 @@ HttpResponse http_get(const std::string& url,
         res.error = curl_easy_strerror(code);
     } else {
         curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &res.status);
-        if (res.status < 200 || res.status >= 300)
+        if (res.status < 200 || res.status >= 300) {
             res.error = "HTTP " + std::to_string(res.status);
+            if ((res.status == 403 || res.status == 429) &&
+                url.find("api.github.com") != std::string::npos) {
+                res.error +=
+                    " — GitHub API rate limit. Set a PAT in Library Settings → GitHub token "
+                    "(or export GITHUB_TOKEN / GH_TOKEN), then try again.";
+            }
+        }
     }
     if (hdrs) curl_slist_free_all(hdrs);
     curl_easy_cleanup(curl);

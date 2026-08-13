@@ -2890,6 +2890,21 @@ bool ensure_game_options_toml(const fs::path& src_root, BuildOutputFn on_output)
     return true;
 }
 
+// Trim whitespace / optional leading 'v' from a VERSION / stamp file.
+std::string read_game_version_pin(const fs::path& path) {
+    std::ifstream in(path);
+    if (!in) return {};
+    std::string line;
+    std::getline(in, line);
+    while (!line.empty() && (line.back() == '\r' || line.back() == '\n' ||
+                             std::isspace(static_cast<unsigned char>(line.back()))))
+        line.pop_back();
+    size_t i = 0;
+    while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) ++i;
+    if (i < line.size() && (line[i] == 'v' || line[i] == 'V')) ++i;
+    return line.substr(i);
+}
+
 bool stage_build_output(const fs::path& src_root, const fs::path& build_dir,
                         const std::string& launch_name, const fs::path& release_dir,
                         const std::string& game_config_rel, std::string* error) {
@@ -2925,7 +2940,28 @@ bool stage_build_output(const fs::path& src_root, const fs::path& build_dir,
 
     const fs::path exe_dir = binary.parent_path();
     if (!copy_tree_if_exists(exe_dir / "assets", staging / "assets", error)) return false;
-    if (!copy_tree_if_exists(src_root / "VERSION", staging / "VERSION", error)) return false;
+    // Prefer compile-time lobby pin stamp over source VERSION (avoids shipping
+    // a bumped VERSION file next to a binary still built as an older pin).
+    {
+        std::string stamped = read_game_version_pin(exe_dir / "psx_game_version.txt");
+        if (stamped.empty())
+            stamped = read_game_version_pin(build_dir / "psx_game_version.txt");
+        if (stamped.empty())
+            stamped = read_game_version_pin(build_dir / "Release" / "psx_game_version.txt");
+        if (!stamped.empty()) {
+            std::ofstream out(staging / "VERSION", std::ios::binary | std::ios::trunc);
+            if (!out) {
+                if (error) *error = "write staged VERSION from lobby pin stamp";
+                return false;
+            }
+            out << stamped << '\n';
+            std::ofstream stamp_out(staging / "psx_game_version.txt",
+                                    std::ios::binary | std::ios::trunc);
+            if (stamp_out) stamp_out << stamped << '\n';
+        } else if (!copy_tree_if_exists(src_root / "VERSION", staging / "VERSION", error)) {
+            return false;
+        }
+    }
     // Bundled OpenBIOS: runtime resolves bios/openbios.bin beside the Play exe.
     // CMake POST_BUILD stages it next to the build binary — ship that unit into
     // the release dir. Prefer the staged tree (openbios.bin + MIT notice only);
@@ -3824,6 +3860,13 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
     // (e.g. PSX_GAME_VERSION from the tag, not "dev").
     if (!title.build.cmake.config.empty()) {
         conf.push_back("-DCMAKE_BUILD_TYPE=" + title.build.cmake.config);
+    }
+    // Always pass -DPSX_GAME_VERSION from the title VERSION pin so a sticky
+    // CMakeCache cannot keep an older lobby filter after VERSION is bumped.
+    {
+        const std::string pin = read_game_version_pin(src.root / "VERSION");
+        if (!pin.empty())
+            conf.push_back("-DPSX_GAME_VERSION=" + pin);
     }
     // Catalog netplay titles: ensure recomp-net is linked even if the game
     // CMakeLists forgot to opt into PSX_NETPLAY (framework default is OFF).

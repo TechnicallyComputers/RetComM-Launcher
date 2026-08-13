@@ -4,6 +4,7 @@
 
 #include "retcomm/catalog_sync.hpp"
 #include "retcomm/config.hpp"
+#include "retcomm/http.hpp"
 #include "retcomm/paths.hpp"
 #include "retcomm/psx_input_profiles.hpp"
 #include "retcomm/romm_saves.hpp"
@@ -2618,6 +2619,20 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0, 10));
+    ImGui::TextColored(th.text_muted, "GitHub token (optional)");
+    ImGui::SetNextItemWidth(-1);
+    if (ImGui::InputText("##github_token", hub.settings.github_token,
+                         sizeof(hub.settings.github_token), ImGuiInputTextFlags_Password))
+        hub.settings.dirty = true;
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextWrapped(
+        "Personal access token for api.github.com (catalog, launcher, toolchain, and game "
+        "release checks). Avoids unauthenticated rate limits (~60/hour). classic: public_repo "
+        "or fine-grained: Contents read on public repos. GITHUB_TOKEN / GH_TOKEN in the "
+        "environment still overrides this. Save to apply.");
+    ImGui::PopStyleColor();
+
+    ImGui::Dummy(ImVec2(0, 10));
     if (ImGui::Checkbox("Hide Unowned Catalog Items", &hub.settings.filter_unsupported_titles))
         hub.settings.dirty = true;
     ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
@@ -4920,6 +4935,7 @@ int main(int argc, char** argv) {
         if (ec || hub.exe_dir.empty()) hub.exe_dir = fs::path(argv[0]).parent_path();
     }
     hub.cfg = retcomm::load_app_config(hub.paths.config_path);
+    retcomm::set_github_token(hub.cfg.github_token);
     bool catalog_updated = false;
     try {
         retcomm::ensure_dirs(hub.paths);

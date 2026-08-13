@@ -18,3 +18,33 @@ psxrecomp: idle_skip disabled
 psxrecomp: overlay_region_floor = 0x59800 (game text end)
 psxrecomp: loaded game config /mnt/raid0/Retcomm-Games/TwistedMetal4Recomp/releases/build-v0.3.8/game.toml (TwistedMetal4Recomp, SCUS-94560)
 psxrecomp: launcher closed; exiting.
+psxrecomp: launcher closed; exiting.
+psxrecomp: main() entered
+psxrecomp: idle_skip disabled
+psxrecomp: overlay_region_floor = 0xAB800 (game text end)
+psxrecomp: loaded game config /mnt/raid0/Retcomm-Games/MastersOfTerasKasiRecomp/releases/build-v0.3.5/game.toml (MastersOfTerasKasiRecomp, SLUS-00562)
+psxrecomp: settings.toml [video] turbo_loads = true is DEPRECATED and ignored; enable the "Fast Loading (host pacing)" mod instead. The stale key is dropped on the next settings save.
+psx_lobby: WS connected peer 172.86.88.70 (url host netplay.retcomm.net)
+psx_lobby: turn_credentials ok stun=coturn.retcomm.net:3478 turn=coturn.retcomm.net:3478 user=1786671590:1efb2cfc-f4ac-4a53-818f-f7af5d6da23d ttl=86400s
+psx_lobby: LAN beacon publish 0998cd7e-4e19-4254-b572-14d6b7f176a6 → 192.168.66.3:7777
+psx_lobby: LAN beacon publish 0998cd7e-4e19-4254-b572-14d6b7f176a6 → 192.168.66.3:7777
+psx_lobby: advertised host_endpoint=216.154.76.149:7777 (LAN via local beacon)
+psx_lobby: WS connected peer 172.86.88.70 (url host netplay.retcomm.net)
+psx_lobby: turn_credentials ok stun=coturn.retcomm.net:3478 turn=coturn.retcomm.net:3478 user=1786671789:a52a903a-1b20-460f-88c7-c773c6a8da71 ttl=86400s
+psx_lobby: LAN beacon publish aa2f55eb-b1ae-4a74-a0cc-8a36eff2c868 → 192.168.66.3:7777
+psx_lobby: LAN beacon publish aa2f55eb-b1ae-4a74-a0cc-8a36eff2c868 → 192.168.66.3:7777
+psx_lobby: advertised host_endpoint=216.154.76.149:7777 (LAN via local beacon)
+psxrecomp: launcher closed; exiting.
+psxrecomp: main() entered
+psxrecomp: idle_skip disabled
+psxrecomp: overlay_region_floor = 0x59800 (game text end)
+psxrecomp: loaded game config /mnt/raid0/Retcomm-Games/TwistedMetal4Recomp/releases/build-v0.3.8/game.toml (TwistedMetal4Recomp, SCUS-94560)
+curl: (22) The requested URL returned error: 403
+psx_lobby: WS connected peer 172.86.88.70 (url host netplay.retcomm.net)
+psx_lobby: turn_credentials ok stun=coturn.retcomm.net:3478 turn=coturn.retcomm.net:3478 user=1786671815:a9c23c40-459e-4880-b632-1cf323760b75 ttl=86400s
+psx_lobby: LAN beacon publish 5ccda21e-c0f5-4628-a196-a0cc0ea1fbd6 → 192.168.66.3:7777
+psx_lobby: LAN beacon publish 5ccda21e-c0f5-4628-a196-a0cc0ea1fbd6 → 192.168.66.3:7777
+psx_lobby: advertised host_endpoint=216.154.76.149:7777 (LAN via local beacon)
+psxrecomp: launcher closed; exiting.
+Using cached twistedmetal4-0.3.8-linux-x64.zip (v0.3.8)…
+Extracting…

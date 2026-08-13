@@ -75,6 +75,9 @@ struct AppConfig {
     CatalogConfig catalog;
     RommConfig romm;
     NetplayConfig netplay;
+    // Optional GitHub PAT for api.github.com (catalog / releases / self-update).
+    // Env GITHUB_TOKEN / GH_TOKEN still overrides when set.
+    std::string github_token;
 
     // Title override when set, else cfg.netplay.lobby_url, else built-in default.
     std::string resolve_netplay_lobby_url(const std::string& title_lobby_url = {}) const;

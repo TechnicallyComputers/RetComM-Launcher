@@ -44,7 +44,9 @@ HttpResponse http_post_multipart(
     const std::vector<HttpMultipartFile>& files,
     const std::vector<std::pair<std::string, std::string>>& fields = {});
 
-// Optional GitHub auth headers from GITHUB_TOKEN / GH_TOKEN.
+// Optional GitHub auth. Preference: GITHUB_TOKEN / GH_TOKEN env, else token from
+// set_github_token() (hub loads AppConfig::github_token here).
+void set_github_token(std::string token);
 std::vector<std::pair<std::string, std::string>> github_http_headers();
 
 } // namespace retcomm

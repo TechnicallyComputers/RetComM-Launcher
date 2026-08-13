@@ -77,6 +77,8 @@ also replace a built Play binary with the setup-host wizard. Pure prebuilt title
 still force zip. When GitHub `/releases/latest` is rate-limited (HTTP 403), Update
 uses the same durable release-zip cache as prefetch (`data_dir/cache/releases/…`)
 plus the hub tag hint — it does **not** fall back to an incomplete `zipball@main`.
+Set `github_token` in Library Settings / `config.json` (or `GITHUB_TOKEN`) to raise
+the API quota.
 
 **Shared caches & GC:** after a successful local build (and via Hub → Advanced →
 **Prune shared caches now** / `retcomm cache gc`), RetComM drops old

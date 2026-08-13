@@ -5,6 +5,7 @@
 #include "retcomm/catalog.hpp"
 #include "retcomm/catalog_sync.hpp"
 #include "retcomm/config.hpp"
+#include "retcomm/http.hpp"
 #include "retcomm/install.hpp"
 #include "retcomm/launch.hpp"
 #include "retcomm/library_index.hpp"
@@ -194,6 +195,10 @@ int cmd_config(const retcomm::Paths& paths, const retcomm::AppConfig& cfg) {
     std::cout << "\n"
               << "romm: "
               << (cfg.romm.enabled() ? cfg.romm.base_url : "(not configured)") << "\n"
+              << "github_token: "
+              << (cfg.github_token.empty() ? "(empty — unauthenticated API, easy to rate-limit)"
+                                           : "(set)")
+              << "\n"
               << "catalog url: "
               << (cfg.catalog.url.empty() ? retcomm::default_catalog_download_url()
                                           : cfg.catalog.url)
@@ -210,6 +215,7 @@ int cmd_config(const retcomm::Paths& paths, const retcomm::AppConfig& cfg) {
               << "    \"n64\": [\"n64\"]\n"
               << "  },\n"
               << "  \"exclude_dirs\": [\"torrents\", \"emulators\"],\n"
+              << "  \"github_token\": \"ghp_…\",\n"
               << "  \"romm\": {\n"
               << "    \"base_url\": \"https://your-romm.example\",\n"
               << "    \"api_token\": \"…\"\n"
@@ -881,6 +887,7 @@ int main(int argc, char** argv) {
 
     retcomm::Paths paths = retcomm::default_paths();
     retcomm::AppConfig cfg = retcomm::load_app_config(paths.config_path);
+    retcomm::set_github_token(cfg.github_token);
 
     const std::string& cmd = args[0];
     if (cmd == "catalog") {

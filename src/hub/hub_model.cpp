@@ -11,6 +11,7 @@
 #include "retcomm/release_tags.hpp"
 #include "retcomm/self_update.hpp"
 #include "retcomm/catalog_sync.hpp"
+#include "retcomm/http.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -898,6 +899,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
             try {
                 ensure_dirs(paths);
                 cfg = load_app_config(paths.config_path);
+                set_github_token(cfg.github_token);
                 const Title* t = catalog.find(title_id);
                 if (!t) {
                     append_log("unknown title: " + title_id);
@@ -1030,6 +1032,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
         try {
             ensure_dirs(paths);
             cfg = load_app_config(paths.config_path);
+            set_github_token(cfg.github_token);
 
             auto find_title = [&]() -> const Title* {
                 return catalog.find(title_id);
@@ -2533,6 +2536,7 @@ void HubModel::open_settings() {
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
     settings.check_updates_on_startup = cfg.check_updates_on_startup;
     settings.check_updates_before_launch = cfg.check_updates_before_launch;
+    copy_buf(settings.github_token, sizeof(settings.github_token), cfg.github_token);
     settings.auto_clean_build_dirs = cfg.auto_clean_build_dirs;
     settings.auto_gc_caches = cfg.auto_gc_caches;
     settings.keep_toolchain_versions = cfg.keep_toolchain_versions;
@@ -2576,6 +2580,7 @@ void HubModel::open_setup() {
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
     settings.check_updates_on_startup = cfg.check_updates_on_startup;
     settings.check_updates_before_launch = cfg.check_updates_before_launch;
+    copy_buf(settings.github_token, sizeof(settings.github_token), cfg.github_token);
     settings.auto_clean_build_dirs = cfg.auto_clean_build_dirs;
     settings.auto_gc_caches = cfg.auto_gc_caches;
     settings.keep_toolchain_versions = cfg.keep_toolchain_versions;
@@ -3007,6 +3012,7 @@ bool HubModel::save_settings(std::string* error) {
     next.filter_unsupported_titles = settings.filter_unsupported_titles;
     next.check_updates_on_startup = settings.check_updates_on_startup;
     next.check_updates_before_launch = settings.check_updates_before_launch;
+    next.github_token = settings.github_token;
     next.auto_clean_build_dirs = settings.auto_clean_build_dirs;
     next.auto_gc_caches = settings.auto_gc_caches;
     next.keep_toolchain_versions = settings.keep_toolchain_versions;
@@ -3047,10 +3053,12 @@ bool HubModel::save_settings(std::string* error) {
 
     if (!save_app_config(paths.config_path, next, error)) return false;
     cfg = std::move(next);
+    set_github_token(cfg.github_token);
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
     settings.check_updates_on_startup = cfg.check_updates_on_startup;
     settings.check_updates_before_launch = cfg.check_updates_before_launch;
+    copy_buf(settings.github_token, sizeof(settings.github_token), cfg.github_token);
     settings.auto_clean_build_dirs = cfg.auto_clean_build_dirs;
     settings.auto_gc_caches = cfg.auto_gc_caches;
     settings.keep_toolchain_versions = cfg.keep_toolchain_versions;

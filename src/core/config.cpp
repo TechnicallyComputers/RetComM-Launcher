@@ -333,6 +333,9 @@ AppConfig load_app_config(const fs::path& config_path) {
             cfg.netplay.display_name = n.value("display_name", "");
             cfg.netplay.prefer_ice = n.value("prefer_ice", false);
         }
+
+        if (j.contains("github_token") && j.at("github_token").is_string())
+            cfg.github_token = j.at("github_token").get<std::string>();
     } catch (...) {
         // Keep defaults on parse errors.
     }
@@ -390,7 +393,8 @@ bool save_app_config(const fs::path& config_path, const AppConfig& cfg, std::str
               {"netplay",
                {{"lobby_url", cfg.netplay.lobby_url},
                 {"display_name", cfg.netplay.display_name},
-                {"prefer_ice", cfg.netplay.prefer_ice}}}};
+                {"prefer_ice", cfg.netplay.prefer_ice}}},
+              {"github_token", cfg.github_token}};
 
     std::ofstream out(config_path);
     if (!out) {
