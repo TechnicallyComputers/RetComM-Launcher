@@ -1,5 +1,7 @@
 # RetComM Launcher
 
+RetComM Launcher uses the SignPath Foundation for code signing.
+
 **RetComM — Retro Compilation Manager** catalogs and installs recomps that
 **self-compile on the end user’s machine**. For liability reasons we encourage
 releases that do **not** ship machine-generated C derived from proprietary
