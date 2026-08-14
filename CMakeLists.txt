@@ -13,6 +13,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+# macOS: leave room in Mach-O load commands so packaging can rewrite Homebrew
+# install names to @rpath / @loader_path without install_name_tool failing.
+if(APPLE)
+    add_link_options(-Wl,-headerpad_max_install_names)
+endif()
+
 # Embedded in binaries for Update RetComM / about text.
 set(RETCOMM_VERSION "0.1.1" CACHE STRING "RetComM Launcher semantic version")
 set(RETCOMM_GITHUB_SLUG "TechnicallyComputers/RetComM-Launcher" CACHE STRING

@@ -99,6 +99,13 @@ Launchpad, Spotlight, and the Applications folder. Self-update downloads the
 matching arch DMG and refreshes the running `.app` only (dev `.app`-less builds
 cannot self-update).
 
+`build-app.sh` calls `bundle_dylibs.sh` to copy Homebrew dylibs (SDL3, FreeType,
+libpng, …) into `Contents/Frameworks` and rewrite nested install names to
+`@rpath` / `@loader_path`. The packager **fails** if any `/usr/local` or
+`/opt/homebrew` load command remains. Ad-hoc `codesign` is applied so arm64
+accepts the rewritten binaries; downloaded DMGs still need a Developer ID +
+notarization to skip Gatekeeper.
+
 ## Windows
 
 Requires a Release build that includes `retcomm`, `retcomm-hub`, and

@@ -86,37 +86,9 @@ elif [[ -f "${ROOT}/assets/retcomm.png" ]]; then
   rm -rf "${ICONSET}"
 fi
 
-# Bundle non-system dylibs (SDL3 from Homebrew, etc.).
-if command -v dylibbundler >/dev/null 2>&1; then
-  dylibbundler -od -b \
-    -x "${APP}/Contents/MacOS/retcomm-hub" \
-    -x "${APP}/Contents/MacOS/retcomm" \
-    -d "${APP}/Contents/Frameworks" \
-    -p "@executable_path/../Frameworks" || true
-else
-  # Fallback: copy SDL3 from Homebrew cellar when linked dynamically.
-  for bin in retcomm-hub retcomm; do
-    while IFS= read -r lib; do
-      case "${lib}" in
-        /usr/lib/*|/System/*) continue ;;
-      esac
-      [[ -f "${lib}" ]] || continue
-      mkdir -p "${APP}/Contents/Frameworks"
-      base="$(basename "${lib}")"
-      if [[ ! -f "${APP}/Contents/Frameworks/${base}" ]]; then
-        cp -f "${lib}" "${APP}/Contents/Frameworks/${base}"
-        chmod 755 "${APP}/Contents/Frameworks/${base}"
-      fi
-      install_name_tool -change "${lib}" "@executable_path/../Frameworks/${base}" \
-        "${APP}/Contents/MacOS/${bin}" || true
-    done < <(otool -L "${APP}/Contents/MacOS/${bin}" | awk '/\.dylib|\.framework/ {print $1}' | grep -v '^@' || true)
-  done
-  # Fix ids inside bundled dylibs (best-effort).
-  for lib in "${APP}/Contents/Frameworks"/*; do
-    [[ -f "${lib}" ]] || continue
-    install_name_tool -id "@executable_path/../Frameworks/$(basename "${lib}")" "${lib}" || true
-  done
-fi
+# Recursively bundle Homebrew/SDL/FreeType dylibs and rewrite nested install
+# names (freetype → libpng, curl → openssl, …). Fails if any cellar path remains.
+"${ROOT}/packaging/macos/bundle_dylibs.sh" "${APP}"
 
 # Drag-to-Applications DMG (.app + /Applications symlink).
 # Stable filename (no version): version is in Info.plist / release tag only.

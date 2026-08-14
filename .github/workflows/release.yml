@@ -352,7 +352,8 @@ jobs:
         run: |
           brew update
           brew install cmake ninja sdl3 curl librsvg || brew install cmake ninja sdl3 curl
-          chmod +x packaging/make-icons.sh packaging/macos/build-app.sh
+          chmod +x packaging/make-icons.sh packaging/macos/build-app.sh \
+            packaging/macos/bundle_dylibs.sh
 
       - name: Build icons
         run: ./packaging/make-icons.sh
@@ -379,6 +380,21 @@ jobs:
           test -f "dist/RetComM-Launcher-macos-${{ matrix.arch }}.dmg"
           test -d "dist/RetComM Launcher.app/Contents/Resources/fonts"
           test -f "dist/RetComM Launcher.app/Contents/Resources/fonts/LatoLatin-Regular.ttf"
+          # bundle_dylibs.sh already fails on leftover cellar paths; dump for logs.
+          echo "=== Frameworks ==="
+          ls -lah "dist/RetComM Launcher.app/Contents/Frameworks/"
+          echo "=== retcomm-hub ==="
+          otool -L "dist/RetComM Launcher.app/Contents/MacOS/retcomm-hub"
+          for f in "dist/RetComM Launcher.app/Contents/Frameworks/"*; do
+            echo "=== $(basename "$f") ==="
+            otool -L "$f"
+          done
+          if otool -L "dist/RetComM Launcher.app/Contents/MacOS/"* \
+               "dist/RetComM Launcher.app/Contents/Frameworks/"* \
+               | grep -E '/usr/local/|/opt/homebrew/'; then
+            echo "::error::bundled app still references Homebrew dylibs" >&2
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v4
         with:
