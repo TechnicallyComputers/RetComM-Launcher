@@ -1,5 +1,15 @@
 # RetComM Launcher
 
+[![GitHub downloads (all assets, all releases)](https://img.shields.io/github/downloads/TechnicallyComputers/RetComM-Launcher/total)](https://github.com/TechnicallyComputers/RetComM-Launcher/releases)
+[![GitHub downloads (latest release)](https://img.shields.io/github/downloads/TechnicallyComputers/RetComM-Launcher/latest/total)](https://github.com/TechnicallyComputers/RetComM-Launcher/releases/latest)
+[![GitHub release](https://img.shields.io/github/v/release/TechnicallyComputers/RetComM-Launcher)](https://github.com/TechnicallyComputers/RetComM-Launcher/releases/latest)
+
+[![Windows setup](https://img.shields.io/github/downloads/TechnicallyComputers/RetComM-Launcher/latest/RetComM-Launcher-windows-x64-setup.exe)](https://github.com/TechnicallyComputers/RetComM-Launcher/releases/latest)
+[![Windows portable](https://img.shields.io/github/downloads/TechnicallyComputers/RetComM-Launcher/latest/RetComM-Launcher-portable-windows.zip)](https://github.com/TechnicallyComputers/RetComM-Launcher/releases/latest)
+[![Linux AppImage](https://img.shields.io/github/downloads/TechnicallyComputers/RetComM-Launcher/latest/RetComM-Launcher-linux-x86_64.AppImage)](https://github.com/TechnicallyComputers/RetComM-Launcher/releases/latest)
+[![macOS arm64](https://img.shields.io/github/downloads/TechnicallyComputers/RetComM-Launcher/latest/RetComM-Launcher-macos-arm64.dmg)](https://github.com/TechnicallyComputers/RetComM-Launcher/releases/latest)
+[![macOS x64](https://img.shields.io/github/downloads/TechnicallyComputers/RetComM-Launcher/latest/RetComM-Launcher-macos-x86_64.dmg)](https://github.com/TechnicallyComputers/RetComM-Launcher/releases/latest)
+
 **RetComM — Retro Compilation Manager** catalogs and installs recomps that
 **self-compile on the end user’s machine**. For liability reasons we encourage
 releases that do **not** ship machine-generated C derived from proprietary
