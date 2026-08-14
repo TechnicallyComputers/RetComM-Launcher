@@ -10,6 +10,8 @@
 [![macOS arm64](https://img.shields.io/github/downloads/TechnicallyComputers/RetComM-Launcher/latest/RetComM-Launcher-macos-arm64.dmg)](https://github.com/TechnicallyComputers/RetComM-Launcher/releases/latest)
 [![macOS x64](https://img.shields.io/github/downloads/TechnicallyComputers/RetComM-Launcher/latest/RetComM-Launcher-macos-x86_64.dmg)](https://github.com/TechnicallyComputers/RetComM-Launcher/releases/latest)
 
+RetComM Launcher uses the SignPath Foundation for code signing.
+
 **RetComM — Retro Compilation Manager** catalogs and installs recomps that
 **self-compile on the end user’s machine**. For liability reasons we encourage
 releases that do **not** ship machine-generated C derived from proprietary
