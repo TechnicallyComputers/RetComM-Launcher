@@ -1515,6 +1515,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 const std::string plat_filter = scans_platform_filter;
                 const bool prefetch = job_prefetch_catalog;
                 job_prefetch_catalog = false;
+                bool catalog_downloaded = false;
                 if (prefetch) {
                     // Quiet catalog sync so ROM matching has an up-to-date title list.
                     set_status("Updating catalog…");
@@ -1522,6 +1523,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     if (cr.ok) {
                         try {
                             catalog = load_catalog(paths.catalog_dir);
+                            catalog_downloaded = !cr.skipped;
                         } catch (const std::exception& e) {
                             append_log(std::string("catalog reload after prefetch: ") + e.what());
                         }
@@ -1684,6 +1686,9 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 } else {
                     set_status(std::string(rom_label) + " complete");
                 }
+                // After a real catalog zip, fill covers for new/missing titles.
+                // Run after the ROM scan so Libretro matching can use bound filenames.
+                if (catalog_downloaded) fetch_boxart_for_catalog(false);
                 finish_pending_import_toast(*this);
                 break;
             }
@@ -1792,12 +1797,18 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     set_status("Checking catalog…");
                     auto cr = sync_remote_catalog(paths, cfg, /*force=*/false);
                     append_log(cr.message);
+                    bool catalog_downloaded = false;
                     if (cr.ok && !cr.skipped) {
                         try {
                             catalog = load_catalog(paths.catalog_dir);
+                            catalog_downloaded = true;
                         } catch (const std::exception& e) {
                             append_log(std::string("catalog reload: ") + e.what());
                         }
+                    }
+                    if (catalog_downloaded) {
+                        library = load_library_index(paths.library_index_path);
+                        fetch_boxart_for_catalog(false);
                     }
                 }
                 bool launcher_upd = false;
