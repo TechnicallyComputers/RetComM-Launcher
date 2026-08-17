@@ -2673,6 +2673,17 @@ std::string path_to_utf8(const fs::path& p) {
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
 }
 
+// Paths embedded in -DCMAKE_*=… must use forward slashes on Windows. Backslashes
+// are written into CMake*.cmake files and re-parsed — `\U` in `C:\Users\…` is an
+// invalid escape (breaks CMAKE_RC_COMPILER / enable_language(RC)).
+std::string path_to_cmake_arg(const fs::path& p) {
+    std::string s = path_to_utf8(p);
+    for (char& c : s) {
+        if (c == '\\') c = '/';
+    }
+    return s;
+}
+
 std::wstring win_quote_arg(const std::wstring& arg) {
     if (arg.empty()) return L"\"\"";
     bool need = false;
@@ -3126,6 +3137,32 @@ bool cmake_cache_has_latest_tool_paths(const fs::path& cache_file) {
     }
     return false;
 }
+
+#if defined(_WIN32)
+// Prior launcher builds passed C:\Users\… into -DCMAKE_RC_COMPILER; cmake wrote
+// that into CMakeRCCompiler.cmake and died on `\U`. Detect cache + leftover files.
+bool cmake_build_has_broken_rc_compiler_file(const fs::path& build_dir) {
+    std::error_code ec;
+    const fs::path cache_file = build_dir / "CMakeCache.txt";
+    if (fs::is_regular_file(cache_file, ec)) {
+        const std::string rc = read_cmake_cache_entry(cache_file, "CMAKE_RC_COMPILER");
+        if (!rc.empty() && rc.find('\\') != std::string::npos) return true;
+    }
+    const fs::path files = build_dir / "CMakeFiles";
+    if (!fs::is_directory(files, ec)) return false;
+    for (fs::recursive_directory_iterator it(files, ec), end; it != end && !ec; it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        if (it->path().filename() != "CMakeRCCompiler.cmake") continue;
+        std::ifstream in(it->path(), std::ios::binary);
+        if (!in) continue;
+        std::string line;
+        while (std::getline(in, line)) {
+            if (line.find('\\') != std::string::npos) return true;
+        }
+    }
+    return false;
+}
+#endif
 
 // True when CMakeCache was created under a different source or build absolute path
 // (e.g. apps_dir moved from ~/.local/share/retcomm/apps to a custom install root).
@@ -4412,6 +4449,14 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
                      "Replacing cmake cache (toolchain paths used …/latest/…)…", 0.54f);
             fs::remove_all(build_dir, ec);
         }
+#if defined(_WIN32)
+        else if (cmake_build_has_broken_rc_compiler_file(build_dir)) {
+            progress(opts.on_progress,
+                     "Replacing cmake cache (broken CMAKE_RC_COMPILER backslash path)…",
+                     0.54f);
+            fs::remove_all(build_dir, ec);
+        }
+#endif
         const bool have_ninja =
             !path_prefix.empty() &&
             (fs::exists(path_prefix / "ninja", ec) || fs::exists(path_prefix / "ninja.exe", ec));
@@ -4443,7 +4488,7 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
             const fs::path ninja_exe = fs::exists(path_prefix / "ninja.exe", ec)
                                           ? (path_prefix / "ninja.exe")
                                           : (path_prefix / "ninja");
-            conf.push_back("-DCMAKE_MAKE_PROGRAM=" + path_to_utf8(ninja_exe));
+            conf.push_back("-DCMAKE_MAKE_PROGRAM=" + path_to_cmake_arg(ninja_exe));
         } else if (opts.on_output) {
             opts.on_output(
                 "warning: ninja.exe not found under toolchain bin — cmake may pick "
@@ -4455,13 +4500,13 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
             fs::remove_all(build_dir, ec);
         }
         if (!clang_c.empty())
-            conf.push_back("-DCMAKE_C_COMPILER=" + path_to_utf8(clang_c));
+            conf.push_back("-DCMAKE_C_COMPILER=" + path_to_cmake_arg(clang_c));
         if (!clang_cxx.empty())
-            conf.push_back("-DCMAKE_CXX_COMPILER=" + path_to_utf8(clang_cxx));
+            conf.push_back("-DCMAKE_CXX_COMPILER=" + path_to_cmake_arg(clang_cxx));
         // Pin RC so enable_language(RC) / find_program do not pick …/latest/bin/windres
         // from the user login PATH (junction) while C/CXX use the versioned pack.
         if (!windres.empty())
-            conf.push_back("-DCMAKE_RC_COMPILER=" + path_to_utf8(windres));
+            conf.push_back("-DCMAKE_RC_COMPILER=" + path_to_cmake_arg(windres));
 #else
         const bool fresh_build = !fs::exists(cache_file, ec);
         if (fresh_build && have_ninja) {
@@ -4491,7 +4536,7 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
             ccache = path_prefix / "ccache";
         if (!ccache.empty()) {
 #if defined(_WIN32)
-            const std::string ccache_s = path_to_utf8(ccache);
+            const std::string ccache_s = path_to_cmake_arg(ccache);
 #else
             const std::string ccache_s = ccache.string();
 #endif

@@ -129,8 +129,12 @@ ignores a new `-DCMAKE_C_COMPILER` over a locked entry). Before configure it
 **resolves `latest` → the real versioned pack dir** and passes absolute
 `-DCMAKE_C_COMPILER` / `-DCMAKE_CXX_COMPILER` / `-DCMAKE_RC_COMPILER` /
 `-DCMAKE_MAKE_PROGRAM` under that stable path so Ninja does not flip between
-`…/latest/bin/…` and `…/v1.0.x/bin/…` and re-run cmake forever. Caches that
-still record `…/latest/…` tool paths are wiped once. Prefer **downloading**
+`…/latest/bin/…` and `…/v1.0.x/bin/…` and re-run cmake forever. On Windows those
+`-D` paths use **forward slashes** (`C:/Users/…`) so CMake does not re-parse
+`\U` in `C:\Users\…` as an invalid escape inside `CMakeRCCompiler.cmake`.
+Caches that still record `…/latest/…` tool paths (or a Windows
+`CMakeRCCompiler.cmake` with raw backslashes from an older launcher) are wiped
+once. Prefer **downloading**
 `cmake-clang-v1` from
 [TechnicallyComputers/retcomm-toolchains](https://github.com/TechnicallyComputers/retcomm-toolchains)
 into the shared cache (`RETCOMM_TOOLCHAIN_DIR` overrides when the directory
