@@ -3469,6 +3469,61 @@ void psx_settings_row_label(const char* text, const Theme& th, float col_w = 180
     ImGui::SameLine(col_w);
 }
 
+SDL_Gamepad* gamepad_handle_for_id(SDL_JoystickID id);   /* defined below */
+
+// Controller-hotkey capture. Unlike the keyboard path, this commits on RELEASE:
+// a chord is several buttons held at once, so sampling the first button-down
+// would record "select" every time. Accumulate everything held while the player
+// holds it, then commit the union once they let go.
+void poll_psx_pad_hotkey_capture(HubModel& hub) {
+    auto& draft = hub.psx_settings;
+    if (draft.capturing_pad_hotkey < 0) return;
+    if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        draft.capturing_pad_hotkey = -1;
+        draft.pad_hotkey_mask = 0;
+        return;
+    }
+
+    unsigned held = 0;
+    int count = 0;
+    if (SDL_JoystickID* ids = SDL_GetGamepads(&count)) {
+        for (int i = 0; i < count; ++i) {
+            SDL_Gamepad* pad = gamepad_handle_for_id(ids[i]);
+            if (!pad) continue;
+            // Union across pads: which controller the player grabbed is not
+            // something they should have to tell us first.
+            for (int b = 0; b < 21; ++b) {
+                if (SDL_GetGamepadButton(pad, static_cast<SDL_GamepadButton>(b)))
+                    held |= (1u << b);
+            }
+        }
+        SDL_free(ids);
+    }
+
+    if (held) {
+        draft.pad_hotkey_mask |= held;
+        return;                     // still holding — keep accumulating
+    }
+    if (!draft.pad_hotkey_mask) return;   // nothing pressed yet
+
+    const unsigned mask = draft.pad_hotkey_mask;
+    int value;
+    if (mask & (mask - 1)) {              // more than one bit -> a chord
+        value = retcomm::PsxPlatformSettings::kPadBindCombo + static_cast<int>(mask);
+    } else {                              // single button: 1 + code
+        int code = 0;
+        while (((mask >> code) & 1u) == 0) ++code;
+        value = code + 1;
+    }
+    if (draft.capturing_pad_hotkey == 0)
+        draft.settings.hotkey_pad_rewind = value;
+    else
+        draft.settings.hotkey_pad_save_state_menu = value;
+    draft.dirty = true;
+    draft.capturing_pad_hotkey = -1;
+    draft.pad_hotkey_mask = 0;
+}
+
 void poll_psx_hotkey_capture(HubModel& hub) {
     auto& draft = hub.psx_settings;
     if (draft.capturing_hotkey < 0 ||
@@ -4787,6 +4842,7 @@ void draw_psx_gamepads_panel(HubModel& hub, const Theme& th, float panel_h, Boxa
 
 void draw_psx_settings_panel(HubModel& hub, const Theme& th, BoxartCache& boxart) {
     poll_psx_hotkey_capture(hub);
+    poll_psx_pad_hotkey_capture(hub);
     auto& s = hub.psx_settings.settings;
     auto mark = [&] { hub.psx_settings.dirty = true; };
     const bool gamepads = hub.psx_settings.gamepads_tab;
@@ -5063,6 +5119,35 @@ void draw_psx_settings_panel(HubModel& hub, const Theme& th, BoxartCache& boxart
             ImGui::SetTooltip(
                 "Allow DualShock sticks on multitap tap seats (not faithful). Not applied "
                 "to titles with digital pad locked in game.toml.");
+        }
+
+        ImGui::Dummy(ImVec2(0, 10));
+        ImGui::Separator();
+        ImGui::TextColored(th.text_muted, "CONTROLLER SHORTCUTS");
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Click a binding, then hold the buttons together and release "
+            "(Esc cancels). Lets a player reach these from the couch.");
+        ImGui::PopStyleColor();
+        {
+            static const char* kPadHkLabel[2] = {"Rewind", "Save-state menu"};
+            for (int i = 0; i < 2; ++i) {
+                psx_settings_row_label(kPadHkLabel[i], th, kCol);
+                ImGui::PushID(1000 + i);
+                const bool cap = hub.psx_settings.capturing_pad_hotkey == i;
+                const int cur = (i == 0) ? s.hotkey_pad_rewind
+                                         : s.hotkey_pad_save_state_menu;
+                const std::string lbl =
+                    cap ? "[ hold buttons... ]"
+                        : retcomm::PsxPlatformSettings::pad_bind_label(cur);
+                if (cap) ImGui::PushStyleColor(ImGuiCol_Button, th.accent);
+                if (ImGui::Button(lbl.c_str(), ImVec2(200.f, 0))) {
+                    hub.psx_settings.capturing_pad_hotkey = i;
+                    hub.psx_settings.pad_hotkey_mask = 0;
+                }
+                if (cap) ImGui::PopStyleColor();
+                ImGui::PopID();
+            }
         }
 
         ImGui::Dummy(ImVec2(0, 10));

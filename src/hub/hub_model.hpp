@@ -334,6 +334,11 @@ struct PsxSettingsDraft {
     bool dirty = false;
     // Hotkey rebind: index into PsxPlatformSettings::hotkeys, or -1.
     int capturing_hotkey = -1;
+    // Controller-hotkey rebind: 0 = rewind, 1 = save-state menu, -1 = idle.
+    // A chord is committed on RELEASE, so holding select+r3 records both
+    // buttons rather than the first one that happened to land.
+    int capturing_pad_hotkey = -1;
+    unsigned pad_hotkey_mask = 0;   // buttons seen held during this capture
     // false = Display/Audio/Input system page; true = Gamepads slots page.
     bool gamepads_tab = false;
     // Configure modal: 0..kMaxPlayers-1, or -1 when closed.

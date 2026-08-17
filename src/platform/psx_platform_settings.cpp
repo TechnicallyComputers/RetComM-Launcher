@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <sstream>
@@ -331,6 +333,22 @@ void parse_toml_settings(const std::string& body, PsxPlatformSettings& s) {
                 } catch (...) {
                 }
             }
+        } else if (table == "hotkeys") {
+            // Pad chords. Out-of-range values are ignored rather than clamped:
+            // a clamp would invent a binding the player never chose.
+            if (key == "rewind_pad" || key == "save_state_menu_pad") {
+                errno = 0;
+                char* end = nullptr;
+                const long v = std::strtol(val.c_str(), &end, 10);
+                const bool ok = end && end != val.c_str() && errno == 0 &&
+                                v >= 0 && v < 1000 + (1 << 21);
+                if (ok) {
+                    if (key == "rewind_pad")
+                        s.hotkey_pad_rewind = static_cast<int>(v);
+                    else
+                        s.hotkey_pad_save_state_menu = static_cast<int>(v);
+                }
+            }
         } else if (table == "audio") {
             if (key == "spu_hq") parse_bool(val, &s.spu_hq);
             else if (key == "frequency") {
@@ -488,6 +506,10 @@ void write_toml_body(std::string& body, const PsxPlatformSettings& s,
 
     upsert_toml_key(body, "audio", "spu_hq", bool_lit(s.spu_hq));
     upsert_toml_key(body, "audio", "frequency", std::to_string(s.audio_freq));
+    upsert_toml_key(body, "hotkeys", "rewind_pad",
+                    std::to_string(s.hotkey_pad_rewind));
+    upsert_toml_key(body, "hotkeys", "save_state_menu_pad",
+                    std::to_string(s.hotkey_pad_save_state_menu));
     upsert_toml_key(body, "controller", "multitap", bool_lit(s.multitap_enabled));
     // Digital + lock_mode titles reject DualShock; never push the multitap analog hack.
     if (apply_multitap_analog)
@@ -566,6 +588,37 @@ void write_ini_body(std::string& body, const PsxPlatformSettings& s) {
 }
 
 } // namespace
+
+// Same vocabulary recomp-ui prints (settings_pad_button_label): SDL's names,
+// with the four the PlayStation calls something else renamed.
+std::string PsxPlatformSettings::pad_bind_label(int value) {
+    // SDL_GamepadButton order, with the five the PlayStation calls something
+    // else already renamed. Spelled out rather than calling SDL so this
+    // persistence unit keeps no windowing dependency. Cross-check: the shipped
+    // defaults decode to exactly their comments -- 1272-1000 = 272 = bits 4|8 =
+    // select + r3, and 2040-1000 = 1040 = bits 4|10 = select + r1.
+    static const char* const kButtons[] = {
+        "cross", "circle", "square", "triangle", "select", "guide", "start",
+        "l3", "r3", "l1", "r1", "dpad up", "dpad down", "dpad left",
+        "dpad right", "misc1", "paddle1", "paddle2", "paddle3", "paddle4",
+        "touchpad",
+    };
+    constexpr int kButtonCount = (int)(sizeof(kButtons) / sizeof(kButtons[0]));
+    auto button_name = [](int code) -> std::string {
+        return (code >= 0 && code < kButtonCount) ? kButtons[code] : "button";
+    };
+    if (value <= 0) return "(unbound)";
+    if (value < 100) return button_name(value - 1);
+    if (value < kPadBindCombo) return "axis";
+    std::string out;
+    const unsigned mask = static_cast<unsigned>(value - kPadBindCombo);
+    for (int code = 0; code < 32; ++code) {
+        if ((mask & (1u << code)) == 0) continue;
+        if (!out.empty()) out += " + ";
+        out += button_name(code);
+    }
+    return out.empty() ? "(unbound)" : out;
+}
 
 const char* PsxPlatformSettings::hotkey_ini_key(int i) {
     static const char* k[] = {"Fullscreen",  "Reset",        "Pause",       "Turbo",

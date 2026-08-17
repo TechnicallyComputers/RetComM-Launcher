@@ -69,6 +69,18 @@ struct PsxPlatformSettings {
     std::array<int, kMaxPlayers> player_mode{};
     std::array<int, kMaxPlayers> player_deadzone{};
 
+    // --- Controller hotkeys (settings.toml [hotkeys]) ---
+    // Chords held on the pad, so a player on a couch can reach rewind and the
+    // save-state menu without a keyboard. Encoding mirrors recomp-ui's
+    // RECOMP_LAUNCHER_PAD_* and psxrecomp's config_loader.h: 0 = unbound,
+    // 1..99 = a single button (1 + SDL button code), 1000 + bitmask = a chord.
+    // Defaults match psxrecomp: select+r3 and select+r1.
+    static constexpr int kPadBindCombo = 1000;
+    int hotkey_pad_rewind = 1272;           // select + r3
+    int hotkey_pad_save_state_menu = 2040;  // select + r1
+    // Human-readable chord ("select + r3"), for the settings row.
+    static std::string pad_bind_label(int value);
+
     // --- Hotkeys (config.ini [KeyMap]) ---
     // Keys match recomp-ui / psxrecomp: Fullscreen, Reset, Pause, Turbo,
     // VolumeUp, VolumeDown, DisplayPerf, ToggleRenderer, Rewind.
