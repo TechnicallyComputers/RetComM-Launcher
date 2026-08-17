@@ -604,7 +604,9 @@ std::string PsxPlatformSettings::pad_bind_label(int value) {
         "touchpad",
     };
     constexpr int kButtonCount = (int)(sizeof(kButtons) / sizeof(kButtons[0]));
-    auto button_name = [](int code) -> std::string {
+    // Capture kButtonCount: MSVC rejects default-less lambdas that ODR-use locals
+    // (clang/gcc accept constexpr locals without capture).
+    auto button_name = [kButtonCount](int code) -> std::string {
         return (code >= 0 && code < kButtonCount) ? kButtons[code] : "button";
     };
     if (value <= 0) return "(unbound)";
