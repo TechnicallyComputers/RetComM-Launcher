@@ -125,7 +125,12 @@ if needed) and passes `-DCMAKE_C_COMPILER` / `-DCMAKE_CXX_COMPILER` to the
 pack’s `clang` / `clang++`. It also wipes `build/` when the cache still locks
 those compilers to a missing path or a different pack tree (e.g. a broken
 `toolchains/cmake-clang-v1/latest` junction after a toolchain bump — cmake
-ignores a new `-DCMAKE_C_COMPILER` over a locked entry). Prefer **downloading**
+ignores a new `-DCMAKE_C_COMPILER` over a locked entry). Before configure it
+**resolves `latest` → the real versioned pack dir** and passes absolute
+`-DCMAKE_C_COMPILER` / `-DCMAKE_CXX_COMPILER` / `-DCMAKE_RC_COMPILER` /
+`-DCMAKE_MAKE_PROGRAM` under that stable path so Ninja does not flip between
+`…/latest/bin/…` and `…/v1.0.x/bin/…` and re-run cmake forever. Caches that
+still record `…/latest/…` tool paths are wiped once. Prefer **downloading**
 `cmake-clang-v1` from
 [TechnicallyComputers/retcomm-toolchains](https://github.com/TechnicallyComputers/retcomm-toolchains)
 into the shared cache (`RETCOMM_TOOLCHAIN_DIR` overrides when the directory

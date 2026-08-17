@@ -2148,6 +2148,86 @@ fs::path toolchain_bin_dir(const fs::path& toolchain_root) {
     return {};
 }
 
+// Resolve junctions/symlinks (…/cmake-clang-v1/latest → …/v1.0.13) so CMakeCache
+// and -DCMAKE_*_COMPILER paths are stable. Mixing "latest" strings with versioned
+// paths made Ninja re-run cmake forever on Windows (build.ninja kept rewriting).
+fs::path stabilize_toolchain_root(fs::path root) {
+    if (root.empty()) return root;
+    std::error_code ec;
+    root = unwrap_single_subdir(root);
+
+    auto try_canonical = [&](const fs::path& p) -> fs::path {
+        ec.clear();
+        const fs::path c = fs::weakly_canonical(p, ec);
+        if (!ec && !c.empty()) return c;
+        return p.lexically_normal();
+    };
+
+    root = try_canonical(root);
+
+    // Prefer reading latest.path when the leaf is still named "latest" (broken
+    // junction, or weakly_canonical kept the junction name on some hosts).
+    if (root.filename() == "latest") {
+        const fs::path pointer = root.parent_path() / "latest.path";
+        if (fs::is_regular_file(pointer, ec)) {
+            std::ifstream in(pointer);
+            std::string line;
+            if (std::getline(in, line)) {
+                while (!line.empty() &&
+                       (line.back() == '\r' || line.back() == '\n' ||
+                        std::isspace(static_cast<unsigned char>(line.back()))))
+                    line.pop_back();
+                if (!line.empty()) {
+                    const fs::path from_file(line);
+                    if (fs::is_directory(from_file, ec)) return try_canonical(from_file);
+                }
+            }
+        }
+        // Walk the junction one more time via absolute().
+        ec.clear();
+        const fs::path abs = fs::absolute(root, ec);
+        if (!ec && abs.filename() != "latest") return try_canonical(abs);
+    }
+
+    // Rewrite any …/latest/… segment that still survived (e.g. bin under junction).
+    {
+        fs::path out;
+        bool saw_latest = false;
+        for (const auto& part : root) {
+            if (part == "latest") {
+                saw_latest = true;
+                break;
+            }
+            out /= part;
+        }
+        if (saw_latest && !out.empty()) {
+            const fs::path pointer = out / "latest.path";
+            const fs::path junction = out / "latest";
+            if (fs::is_regular_file(pointer, ec)) {
+                std::ifstream in(pointer);
+                std::string line;
+                if (std::getline(in, line)) {
+                    while (!line.empty() &&
+                           (line.back() == '\r' || line.back() == '\n' ||
+                            std::isspace(static_cast<unsigned char>(line.back()))))
+                        line.pop_back();
+                    if (!line.empty() && fs::is_directory(line, ec))
+                        return try_canonical(fs::path(line));
+                }
+            }
+            if (fs::exists(junction, ec)) return try_canonical(junction);
+        }
+    }
+    return root;
+}
+
+bool path_has_toolchain_latest_segment(const fs::path& p) {
+    for (const auto& part : p) {
+        if (part == "latest") return true;
+    }
+    return false;
+}
+
 bool toolchain_looks_usable(const fs::path& root) {
     std::error_code ec;
     const fs::path bin = toolchain_bin_dir(root);
@@ -2332,6 +2412,7 @@ int run_with_path(const std::vector<std::string>& args, const fs::path& cwd,
                   const std::vector<std::pair<std::string, std::string>>& env_extra = {});
 bool verify_python_stdlib(const fs::path& python_exe, std::string* err);
 std::vector<std::pair<std::string, std::string>> python_clean_env();
+std::string path_with_prefix(const fs::path& path_prefix);
 
 // Locate CPython under a PBS / toolchain python/ root.
 fs::path python_exe_in_root(const fs::path& py_root) {
@@ -2661,17 +2742,9 @@ std::wstring build_env_block(const fs::path& path_prefix,
     };
 
     if (!path_prefix.empty()) {
-        std::wstring path = path_prefix.wstring();
-        auto it = vars.find(L"path");
-        if (it != vars.end()) {
-            const std::wstring& full = it->second;
-            const size_t eq = full.find(L'=');
-            if (eq != std::wstring::npos && eq + 1 < full.size()) {
-                path.push_back(L';');
-                path += full.substr(eq + 1);
-            }
-        }
-        put(L"PATH", path);
+        // Prefer UTF-8 filter (strips …/latest/bin) then widen for the env block.
+        const std::string filtered = path_with_prefix(path_prefix);
+        put(L"PATH", narrow_to_wide(filtered));
     }
     for (const auto& [k, v] : env_extra) {
         if (k.empty()) continue;
@@ -2798,9 +2871,26 @@ std::string path_with_prefix(const fs::path& path_prefix) {
 #else
     std::string out = path_prefix.string();
 #endif
+    // Drop ambient …/<pack>/latest/bin so cmake find_program cannot latch the
+    // junction while we pin compilers to the versioned pack.
     if (cur && *cur) {
-        out += sep;
-        out += cur;
+        std::string part;
+        auto flush = [&]() {
+            if (part.empty()) return;
+            if (!path_has_toolchain_latest_segment(fs::path(part))) {
+                out.push_back(sep);
+                out += part;
+            }
+            part.clear();
+        };
+        for (const char* p = cur;; ++p) {
+            if (*p == sep || *p == '\0') {
+                flush();
+                if (*p == '\0') break;
+            } else {
+                part.push_back(*p);
+            }
+        }
     }
     return out;
 }
@@ -2992,9 +3082,49 @@ bool cmake_cache_compilers_stale(const fs::path& cache_file, const fs::path& wan
         if (cached.empty()) return false;
         const fs::path cached_p(cached);
         if (!fs::exists(cached_p, ec)) return true;
+        // String form still says …/latest/… even when equivalent to the versioned
+        // pack — wipe so the next configure records stable paths.
+        if (path_has_toolchain_latest_segment(cached_p) &&
+            !path_has_toolchain_latest_segment(want))
+            return true;
         return !same_compiler_path(cached_p, want);
     };
     return check("CMAKE_C_COMPILER", want_c) || check("CMAKE_CXX_COMPILER", want_cxx);
+}
+
+// True when CMakeCache still records tool paths under …/latest/… (junction).
+// Those strings flip between "latest" and "vX.Y.Z" across regenerates and loop Ninja.
+bool cmake_cache_has_latest_tool_paths(const fs::path& cache_file) {
+    std::error_code ec;
+    if (!fs::is_regular_file(cache_file, ec)) return false;
+    static constexpr const char* kKeys[] = {
+        "CMAKE_C_COMPILER",
+        "CMAKE_CXX_COMPILER",
+        "CMAKE_RC_COMPILER",
+        "CMAKE_MAKE_PROGRAM",
+        "CMAKE_COMMAND",
+        "CMAKE_AR",
+        "CMAKE_RANLIB",
+        "CMAKE_ADDR2LINE",
+        "CMAKE_NM",
+        "CMAKE_OBJCOPY",
+        "CMAKE_OBJDUMP",
+        "CMAKE_READELF",
+        "CMAKE_STRIP",
+        "CMAKE_DLLTOOL",
+        "CMAKE_LINKER",
+        "CMAKE_C_COMPILER_AR",
+        "CMAKE_C_COMPILER_RANLIB",
+        "CMAKE_CXX_COMPILER_AR",
+        "CMAKE_CXX_COMPILER_RANLIB",
+        "CMAKE_C_COMPILER_LAUNCHER",
+        "CMAKE_CXX_COMPILER_LAUNCHER",
+    };
+    for (const char* key : kKeys) {
+        const std::string v = read_cmake_cache_entry(cache_file, key);
+        if (!v.empty() && path_has_toolchain_latest_segment(fs::path(v))) return true;
+    }
+    return false;
 }
 
 // True when CMakeCache was created under a different source or build absolute path
@@ -3967,6 +4097,8 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
         return result;
     }
 
+    // Never feed CMake a …/latest/… path (user PATH / RETCOMM_TOOLCHAIN_DIR junction).
+    tc.root = stabilize_toolchain_root(tc.root);
     const fs::path bin_dir = toolchain_bin_dir(tc.root);
     // Allow override packs that are just "use system tools" with empty bin/.
     const fs::path path_prefix = bin_dir;
@@ -4275,6 +4407,11 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
                      "Replacing cmake cache (source/build path moved)…", 0.54f);
             fs::remove_all(build_dir, ec);
         }
+        if (cmake_cache_has_latest_tool_paths(cache_file)) {
+            progress(opts.on_progress,
+                     "Replacing cmake cache (toolchain paths used …/latest/…)…", 0.54f);
+            fs::remove_all(build_dir, ec);
+        }
         const bool have_ninja =
             !path_prefix.empty() &&
             (fs::exists(path_prefix / "ninja", ec) || fs::exists(path_prefix / "ninja.exe", ec));
@@ -4287,6 +4424,13 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
             fs::exists(path_prefix / "clang++.exe", ec) ? (path_prefix / "clang++.exe")
             : fs::exists(path_prefix / "clang++", ec)     ? (path_prefix / "clang++")
                                                          : fs::path{};
+        const fs::path windres =
+            fs::exists(path_prefix / "windres.exe", ec) ? (path_prefix / "windres.exe")
+            : fs::exists(path_prefix / "llvm-windres.exe", ec)
+                ? (path_prefix / "llvm-windres.exe")
+            : fs::exists(path_prefix / "llvm-rc.exe", ec) ? (path_prefix / "llvm-rc.exe")
+            : fs::exists(path_prefix / "windres", ec)       ? (path_prefix / "windres")
+                                                           : fs::path{};
         if (have_ninja) {
             const std::string cached_gen = read_cmake_cache_generator(cache_file);
             if (!cached_gen.empty() && cached_gen != "Ninja") {
@@ -4314,6 +4458,10 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
             conf.push_back("-DCMAKE_C_COMPILER=" + path_to_utf8(clang_c));
         if (!clang_cxx.empty())
             conf.push_back("-DCMAKE_CXX_COMPILER=" + path_to_utf8(clang_cxx));
+        // Pin RC so enable_language(RC) / find_program do not pick …/latest/bin/windres
+        // from the user login PATH (junction) while C/CXX use the versioned pack.
+        if (!windres.empty())
+            conf.push_back("-DCMAKE_RC_COMPILER=" + path_to_utf8(windres));
 #else
         const bool fresh_build = !fs::exists(cache_file, ec);
         if (fresh_build && have_ninja) {
