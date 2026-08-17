@@ -271,6 +271,11 @@ void parse_toml_settings(const std::string& body, PsxPlatformSettings& s) {
                 s.texture_filter_bilinear = ieq(val, "bilinear");
             } else if (key == "antialiasing") {
                 parse_bool(val, &s.antialiasing);
+            } else if (key == "fmv_filter") {
+                if (ieq(val, "nearest")) s.fmv_filter = 0;
+                else if (ieq(val, "bilinear")) s.fmv_filter = 1;
+                else if (ieq(val, "sharp")) s.fmv_filter = 2;
+                else s.fmv_filter = 3;
             } else if (key == "crt_filter") {
                 if (ieq(val, "crt")) s.screen_kind = 1;
                 else if (ieq(val, "composite")) s.screen_kind = 2;
@@ -328,6 +333,11 @@ void parse_toml_settings(const std::string& body, PsxPlatformSettings& s) {
             }
         } else if (table == "audio") {
             if (key == "spu_hq") parse_bool(val, &s.spu_hq);
+            else if (key == "frequency") {
+                const int hz = std::atoi(val.c_str());
+                if (hz == 32040 || hz == 32000 || hz == 44100 || hz == 48000)
+                    s.audio_freq = hz;
+            }
         } else if (table == "controller") {
             if (key == "multitap") parse_bool(val, &s.multitap_enabled);
             else if (key == "multitap_analog") parse_bool(val, &s.multitap_analog);
@@ -405,6 +415,21 @@ std::string renderer_lit(int r) {
     return "\"opengl\"";
 }
 
+// settings.toml [video] fmv_filter spelling; must match psxrecomp's
+// video_fmv_filter_parse (config_loader.h).
+std::string fmv_filter_lit(int v) {
+    switch (v) {
+    case 0:
+        return "\"nearest\"";
+    case 1:
+        return "\"bilinear\"";
+    case 2:
+        return "\"sharp\"";
+    default:
+        return "\"bicubic\"";
+    }
+}
+
 std::string screen_lit(int k) {
     switch (k) {
     case 1:
@@ -443,6 +468,7 @@ void write_toml_body(std::string& body, const PsxPlatformSettings& s,
     upsert_toml_key(body, "video", "texture_filtering",
                     s.texture_filter_bilinear ? "\"bilinear\"" : "\"nearest\"");
     upsert_toml_key(body, "video", "antialiasing", bool_lit(s.antialiasing));
+    upsert_toml_key(body, "video", "fmv_filter", fmv_filter_lit(s.fmv_filter));
     upsert_toml_key(body, "video", "crt_filter", screen_lit(s.screen_kind));
     upsert_toml_key(body, "video", "frame_interpolation", bool_lit(s.frame_interpolation));
     upsert_toml_key(body, "video", "frame_interpolation_fps",
@@ -461,6 +487,7 @@ void write_toml_body(std::string& body, const PsxPlatformSettings& s,
     }
 
     upsert_toml_key(body, "audio", "spu_hq", bool_lit(s.spu_hq));
+    upsert_toml_key(body, "audio", "frequency", std::to_string(s.audio_freq));
     upsert_toml_key(body, "controller", "multitap", bool_lit(s.multitap_enabled));
     // Digital + lock_mode titles reject DualShock; never push the multitap analog hack.
     if (apply_multitap_analog)

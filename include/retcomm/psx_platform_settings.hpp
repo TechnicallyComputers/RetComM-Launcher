@@ -28,6 +28,12 @@ struct PsxPlatformSettings {
     int view_mode = 0;
     bool texture_filter_bilinear = false;
     bool antialiasing = false;
+    // How a decoded low-res FMV is scaled up to the window. Distinct from
+    // texture_filtering (that samples 3D textures; this reconstructs a video
+    // frame, and the good answer differs). Only consulted while antialiasing is
+    // on. settings.toml [video] fmv_filter.
+    // 0 nearest, 1 bilinear, 2 sharp-bilinear, 3 bicubic (default).
+    int fmv_filter = 3;
     int screen_kind = 0; // 0 raw, 1 crt, 2 composite, 3 trinitron
     bool frame_interpolation = false;
     int frame_interpolation_fps = 0; // 0 = display rate, else e.g. 120
@@ -45,6 +51,9 @@ struct PsxPlatformSettings {
 
     // --- Audio ([audio]) ---
     bool spu_hq = true;
+    // Output sample rate ([audio] frequency). recomp-ui offers the same four
+    // (32040 = the SPU's native rate); psxrecomp defaults to 44100.
+    int audio_freq = 44100;
 
     // --- Input ([controller]) ---
     bool multitap_enabled = true;

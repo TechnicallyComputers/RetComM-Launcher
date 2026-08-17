@@ -4912,6 +4912,21 @@ void draw_psx_settings_panel(HubModel& hub, const Theme& th, BoxartCache& boxart
             mark();
         }
 
+        // How a decoded FMV is scaled up. Separate from Texture filtering
+        // above; with antialiasing off the runtime presents video with hard
+        // pixels regardless, so the row has nothing to offer then.
+        psx_settings_row_label("FMV filtering", th, kCol);
+        {
+            static const char* kFmv[] = {"Nearest", "Bilinear", "Sharp", "Bicubic"};
+            const int cur = std::clamp(s.fmv_filter, 0, 3);
+            if (!s.antialiasing) ImGui::BeginDisabled();
+            if (cycle_btn("fmv", s.antialiasing ? kFmv[cur] : "Nearest", 120.f)) {
+                s.fmv_filter = (cur + 1) % 4;
+                mark();
+            }
+            if (!s.antialiasing) ImGui::EndDisabled();
+        }
+
         psx_settings_row_label("Perspective textures", th, kCol);
         if (ImGui::Checkbox("##persp", &s.perspective_texturing)) mark();
 
@@ -5015,6 +5030,20 @@ void draw_psx_settings_panel(HubModel& hub, const Theme& th, BoxartCache& boxart
         ImGui::TextColored(th.text_muted, "AUDIO");
         psx_settings_row_label("High-quality SPU", th, kCol);
         if (ImGui::Checkbox("##spuhq", &s.spu_hq)) mark();
+
+        // Output sample rate ([audio] frequency). Same four recomp-ui offers;
+        // 32040 Hz is the SPU's own rate, so it resamples least.
+        psx_settings_row_label("Sample rate", th, kCol);
+        {
+            static const int kFreq[] = {32040, 32000, 44100, 48000};
+            int idx = 2;
+            for (int i = 0; i < 4; ++i)
+                if (kFreq[i] == s.audio_freq) { idx = i; break; }
+            if (cycle_btn("freq", (std::to_string(kFreq[idx]) + " Hz").c_str(), 120.f)) {
+                s.audio_freq = kFreq[(idx + 1) % 4];
+                mark();
+            }
+        }
     }
     ImGui::EndChild();
 
