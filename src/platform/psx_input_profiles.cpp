@@ -112,22 +112,42 @@ int key_index(const char* key) {
     return -1;
 }
 
+bool guid_eq_ci(const char* a, const char* b) {
+    if (!a || !b) return false;
+    while (*a && *b) {
+        const unsigned char ca = static_cast<unsigned char>(*a++);
+        const unsigned char cb = static_cast<unsigned char>(*b++);
+        if (std::tolower(ca) != std::tolower(cb)) return false;
+    }
+    return *a == *b;
+}
+
+void normalize_guid(char* guid, size_t cap) {
+    if (!guid || !cap) return;
+    tolower_inplace(guid);
+    (void)cap;
+}
+
 GuidMap* find_map(const char* guid) {
     if (!guid || !guid[0]) return nullptr;
     for (int i = 0; i < kPsxPadMaxKnown; ++i)
-        if (g_maps[i].used && std::strcmp(g_maps[i].guid, guid) == 0) return &g_maps[i];
+        if (g_maps[i].used && guid_eq_ci(g_maps[i].guid, guid)) return &g_maps[i];
     return nullptr;
 }
 
 GuidMap* alloc_map(const char* guid) {
     GuidMap* m = find_map(guid);
     if (m) return m;
+    char norm[kGuidCap]{};
+    copy_str(norm, sizeof(norm), guid);
+    normalize_guid(norm, sizeof(norm));
+    if (!norm[0]) return nullptr;
     for (int i = 0; i < kPsxPadMaxKnown; ++i) {
         if (g_maps[i].used) continue;
         std::memset(&g_maps[i], 0, sizeof(g_maps[i]));
         g_maps[i].used = 1;
         g_maps[i].deadzone_pct = kPsxPadDefaultDeadzonePct;
-        copy_str(g_maps[i].guid, sizeof(g_maps[i].guid), guid);
+        copy_str(g_maps[i].guid, sizeof(g_maps[i].guid), norm);
         seed_defaults(g_maps[i].src);
         for (int b = 0; b < kPsxPadButtonCount; ++b)
             if (g_global[b][0]) copy_str(g_maps[i].src[b], kSrcCap, g_global[b]);
@@ -296,19 +316,22 @@ void ensure_pad(const char* path) {
     g_pad_init = 1;
 }
 
+void alias_face_button(const char*& n) {
+    // Prefer Xbox-legacy aliases the runtime/input.ini historically used.
+    if (!n) return;
+    if (std::strcmp(n, "south") == 0) n = "a";
+    else if (std::strcmp(n, "east") == 0) n = "b";
+    else if (std::strcmp(n, "west") == 0) n = "x";
+    else if (std::strcmp(n, "north") == 0) n = "y";
+}
+
 void source_from_bind(int kind, int code, int axis_dir, char* out, size_t cap) {
     out[0] = 0;
     if (kind == 1) {
         const char* n = nullptr;
         if (code >= 0 && code < static_cast<int>(sizeof(kGamepadButtonStr) / sizeof(kGamepadButtonStr[0])))
             n = kGamepadButtonStr[code];
-        // Prefer Xbox-legacy aliases the runtime/input.ini historically used.
-        if (n) {
-            if (std::strcmp(n, "south") == 0) n = "a";
-            else if (std::strcmp(n, "east") == 0) n = "b";
-            else if (std::strcmp(n, "west") == 0) n = "x";
-            else if (std::strcmp(n, "north") == 0) n = "y";
-        }
+        alias_face_button(n);
         copy_str(out, cap, (n && n[0]) ? n : "");
     } else if (kind == 2) {
         const char* n = "axis";
@@ -318,6 +341,15 @@ void source_from_bind(int kind, int code, int axis_dir, char* out, size_t cap) {
         std::snprintf(buf, sizeof(buf), "%s%c", n, axis_dir < 0 ? '-' : '+');
         copy_str(out, cap, buf);
     }
+}
+
+void canonicalize_source_name(char* s, size_t cap) {
+    if (!s || !cap || !s[0]) return;
+    tolower_inplace(s);
+    if (std::strcmp(s, "south") == 0) copy_str(s, cap, "a");
+    else if (std::strcmp(s, "east") == 0) copy_str(s, cap, "b");
+    else if (std::strcmp(s, "west") == 0) copy_str(s, cap, "x");
+    else if (std::strcmp(s, "north") == 0) copy_str(s, cap, "y");
 }
 
 struct ScName {
@@ -573,6 +605,21 @@ void psx_pad_binds_set(const Paths& paths, const std::string& guid, int b, int k
     write_pad_ini(g_pad_path);
 }
 
+void psx_pad_binds_set_source(const Paths& paths, const std::string& guid, int b,
+                              const char* source) {
+    ensure_pad(psx_platform_input_ini_path(paths).string().c_str());
+    if (guid.empty() || b < 0 || b >= kPsxPadButtonCount) return;
+    GuidMap* m = alloc_map(guid.c_str());
+    if (!m) return;
+    char buf[kSrcCap]{};
+    copy_str(buf, sizeof(buf), source ? source : "");
+    if (char* comma = std::strchr(buf, ',')) *comma = '\0';
+    canonicalize_source_name(buf, sizeof(buf));
+    if (std::strcmp(buf, "none") == 0 || std::strcmp(buf, "disabled") == 0) buf[0] = '\0';
+    copy_str(m->src[b], kSrcCap, buf);
+    write_pad_ini(g_pad_path);
+}
+
 int psx_pad_binds_known_count(const Paths& paths) {
     ensure_pad(psx_platform_input_ini_path(paths).string().c_str());
     int n = 0;
@@ -647,6 +694,12 @@ void psx_keybinds_label(const Paths& paths, int player, int b, char* out, int ca
         return;
     }
     copy_str(out, static_cast<size_t>(cap), sc_to_name(g_kb[player][b]));
+}
+
+int psx_keybinds_get_scancode(const Paths& paths, int player, int b) {
+    ensure_kb(psx_platform_keybinds_ini_path(paths).string().c_str());
+    if (player < 0 || player >= kMaxKbPlayers || b < 0 || b >= kPsxPadButtonCount) return 0;
+    return g_kb[player][b];
 }
 
 void psx_keybinds_set_scancode(const Paths& paths, int player, int b, int scancode) {

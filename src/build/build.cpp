@@ -2325,6 +2325,14 @@ bool python_binary_usable(const fs::path& p) {
     return true;
 }
 
+// Forward: defined after Windows/Unix spawn helpers. Empty env values mean "unset".
+int run_with_path(const std::vector<std::string>& args, const fs::path& cwd,
+                  const fs::path& path_prefix, std::string* err_out,
+                  const std::function<void(const std::string&)>& on_line = {},
+                  const std::vector<std::pair<std::string, std::string>>& env_extra = {});
+bool verify_python_stdlib(const fs::path& python_exe, std::string* err);
+std::vector<std::pair<std::string, std::string>> python_clean_env();
+
 // Locate CPython under a PBS / toolchain python/ root.
 fs::path python_exe_in_root(const fs::path& py_root) {
     std::error_code ec;
@@ -2409,10 +2417,18 @@ fs::path find_bundled_python(const Paths& paths, const fs::path& toolchain_root)
 }
 
 fs::path resolve_python(const Paths& paths, const fs::path& toolchain_root) {
+    auto accept = [](const fs::path& p) -> fs::path {
+        if (!python_binary_usable(p)) return {};
+        std::string smoke_err;
+        if (!verify_python_stdlib(p, &smoke_err)) return {};
+        return p;
+    };
+
     if (const char* env = std::getenv("RETCOMM_PYTHON")) {
         const fs::path p = env;
-        if (python_binary_usable(p)) return p;
+        if (auto ok = accept(p); !ok.empty()) return ok;
         // Allow RETCOMM_PYTHON=python3 style names when they are not Store stubs.
+        // PATH lookup cannot be smoke-tested here; generate spawn still clears PYTHONHOME.
         if (!p.empty() && !p.has_parent_path()) {
 #if defined(_WIN32)
             if (path_looks_like_windows_store_python(p)) {
@@ -2425,8 +2441,14 @@ fs::path resolve_python(const Paths& paths, const fs::path& toolchain_root) {
 #endif
         }
     }
-    if (auto bundled = find_bundled_python(paths, toolchain_root); !bundled.empty())
-        return bundled;
+    if (auto bundled = find_bundled_python(paths, toolchain_root); !bundled.empty()) {
+        if (auto ok = accept(bundled); !ok.empty()) return ok;
+    }
+    // Pack python may be present but broken (poisoned PYTHONHOME / missing _socket);
+    // prefer a smoke-passing shared python-standalone install.
+    if (auto standalone = find_bundled_python(paths, {}); !standalone.empty()) {
+        if (auto ok = accept(standalone); !ok.empty()) return ok;
+    }
 #if defined(_WIN32)
     // Do not fall back to bare "python" — often the Windows Store alias stub.
     return {};
@@ -2441,12 +2463,30 @@ PackEnsureResult ensure_bundled_python(const Paths& paths, const fs::path& toolc
                                        BuildProgressFn on_progress) {
     PackEnsureResult r;
     if (auto existing = find_bundled_python(paths, toolchain_root); !existing.empty()) {
-        r.ok = true;
-        r.root = existing.parent_path();
-        if (r.root.filename() == "bin") r.root = r.root.parent_path();
-        r.tag = kPythonPbsTag;
-        r.message = "using bundled Python " + existing.string();
-        return r;
+        std::string smoke_err;
+        if (verify_python_stdlib(existing, &smoke_err)) {
+            r.ok = true;
+            r.root = existing.parent_path();
+            if (r.root.filename() == "bin") r.root = r.root.parent_path();
+            r.tag = kPythonPbsTag;
+            r.message = "using bundled Python " + existing.string();
+            return r;
+        }
+        // Pack / cache interpreter exists but cannot import stdlib sockets (common when
+        // ambient PYTHONHOME points at another install). Fall through to a fresh PBS.
+        progress(on_progress,
+                 "bundled Python unusable (" + smoke_err + "); fetching embeddable Python…",
+                 0.02f);
+    } else if (auto standalone = find_bundled_python(paths, {}); !standalone.empty()) {
+        std::string smoke_err;
+        if (verify_python_stdlib(standalone, &smoke_err)) {
+            r.ok = true;
+            r.root = standalone.parent_path();
+            if (r.root.filename() == "bin") r.root = r.root.parent_path();
+            r.tag = kPythonPbsTag;
+            r.message = "using bundled Python " + standalone.string();
+            return r;
+        }
     }
 
     const std::string triple = pbs_target_triple();
@@ -2508,6 +2548,13 @@ PackEnsureResult ensure_bundled_python(const Paths& paths, const fs::path& toolc
     if (exe.empty()) {
         r.message = "Python installed but interpreter not found under " + dest.string();
         return r;
+    }
+    {
+        std::string smoke_err;
+        if (!verify_python_stdlib(exe, &smoke_err)) {
+            r.message = "Python installed but stdlib smoke failed: " + smoke_err;
+            return r;
+        }
     }
 
     const fs::path latest = paths.toolchains_dir / kPythonStandalonePackId / "latest";
@@ -2628,6 +2675,12 @@ std::wstring build_env_block(const fs::path& path_prefix,
     }
     for (const auto& [k, v] : env_extra) {
         if (k.empty()) continue;
+        // Empty value = remove from child env (do not set KEY=). Used to clear
+        // PYTHONHOME/PYTHONPATH so pack CPython does not inherit a host install.
+        if (v.empty()) {
+            vars.erase(win_lower(narrow_to_wide(k)));
+            continue;
+        }
         put(narrow_to_wide(k), narrow_to_wide(v));
     }
 
@@ -2843,11 +2896,32 @@ std::vector<std::pair<std::string, std::string>> toolchain_cmake_env(
 #endif
     }
 
+#if !defined(_WIN32)
+    // 1.0.12+: jammy build sysroot for SteamOS / hosts without /usr/include.
+    const fs::path sysroot = pack / "sysroot";
+    const bool have_sysroot = fs::is_directory(sysroot / "usr" / "include", ec);
+    if (have_sysroot) {
+        out.emplace_back("CMAKE_SYSROOT", sysroot.string());
+    }
+#endif
+
     // Strip ambient pack-root prefixes from env.bat / user Path activation so
     // cmake children never inherit the libc++ poison path.
     const char* cur = std::getenv("CMAKE_PREFIX_PATH");
-    const std::string filtered =
+    std::string filtered =
         filter_pack_from_prefix_path(cur ? cur : "", pack_s, sep);
+#if !defined(_WIN32)
+    // Also put sysroot/usr on CMAKE_PREFIX_PATH so find_package(OpenGL) can
+    // locate GL/gl.h under the pack sysroot (CMAKE_SYSROOT alone is not enough
+    // for FindOpenGL's include search on some hosts).
+    if (have_sysroot) {
+        const std::string sysroot_usr = (sysroot / "usr").string();
+        if (filtered.empty())
+            filtered = sysroot_usr;
+        else
+            filtered.append(1, sep).append(sysroot_usr);
+    }
+#endif
     out.emplace_back("CMAKE_PREFIX_PATH", filtered);
     return out;
 }
@@ -3066,26 +3140,74 @@ int run_capture_lines(const std::string& cmd, const fs::path& cwd,
 
 int run_with_path(const std::vector<std::string>& args, const fs::path& cwd,
                   const fs::path& path_prefix, std::string* err_out,
-                  const std::function<void(const std::string&)>& on_line = {},
-                  const std::vector<std::pair<std::string, std::string>>& env_extra = {}) {
+                  const std::function<void(const std::string&)>& on_line,
+                  const std::vector<std::pair<std::string, std::string>>& env_extra) {
     AppImageEnvGuard env_guard;
 #if defined(_WIN32)
     return run_capture_argv(args, cwd, path_prefix, env_extra, on_line, err_out);
 #else
     std::ostringstream cmd;
+    std::vector<std::string> unsets;
+    std::ostringstream assigns;
     if (!path_prefix.empty()) {
-        cmd << "PATH=" << shell_quote(path_with_prefix(path_prefix)) << " ";
+        assigns << "PATH=" << shell_quote(path_with_prefix(path_prefix)) << " ";
     }
     for (const auto& [k, v] : env_extra) {
         if (k.empty()) continue;
-        cmd << k << "=" << shell_quote(v) << " ";
+        if (v.empty())
+            unsets.push_back(k);
+        else
+            assigns << k << "=" << shell_quote(v) << " ";
     }
+    if (!unsets.empty()) {
+        cmd << "env";
+        for (const auto& u : unsets) cmd << " -u " << shell_quote(u);
+        cmd << " ";
+    }
+    cmd << assigns.str();
     for (size_t i = 0; i < args.size(); ++i) {
         if (i) cmd << ' ';
         cmd << shell_quote(args[i]);
     }
     return run_capture_lines(cmd.str(), cwd, on_line, err_out);
 #endif
+}
+
+// Isolate pack / PBS Python from ambient PYTHONHOME/PYTHONPATH (and user site).
+std::vector<std::pair<std::string, std::string>> python_clean_env() {
+    return {
+        {"PYTHONHOME", ""},
+        {"PYTHONPATH", ""},
+        {"PYTHONNOUSERSITE", "1"},
+    };
+}
+
+bool verify_python_stdlib(const fs::path& python_exe, std::string* err) {
+    if (python_exe.empty()) {
+        if (err) *err = "empty python path";
+        return false;
+    }
+    // Bare names (python3) cannot be smoke-tested without PATH; treat as ok.
+    if (!python_exe.has_parent_path()) return true;
+
+    std::string log;
+    // Do not prepend toolchain bin/ — mingw libpython*.dll on PATH can confuse PBS.
+    const int rc = run_with_path(
+        {python_exe.string(), "-c", "import socket, urllib.request"}, {}, {}, &log, {},
+        python_clean_env());
+    if (rc != 0) {
+        if (err) {
+            *err = "cannot import socket/urllib (exit " + std::to_string(rc) + ")";
+            if (!log.empty()) {
+                // Keep message short for UI; tail is enough for logs.
+                std::string tail = log;
+                if (tail.size() > 240) tail = "…" + tail.substr(tail.size() - 240);
+                *err += ": " + tail;
+            }
+        }
+        return false;
+    }
+    return true;
 }
 
 // Prefer a short summary when the caller already streamed CLI via on_output.
@@ -4044,6 +4166,10 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
             gen_preview << shell_quote(gen_args[i]);
         }
         std::vector<std::pair<std::string, std::string>> gen_env;
+        {
+            const auto py_env = python_clean_env();
+            gen_env.insert(gen_env.end(), py_env.begin(), py_env.end());
+        }
 #if defined(_WIN32)
         if (!psxrecomp_game.empty())
             gen_env.emplace_back("PSXRECOMP_GAME", path_to_utf8(psxrecomp_game));
@@ -4193,6 +4319,15 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
         if (fresh_build && have_ninja) {
             conf.push_back("-G");
             conf.push_back("Ninja");
+        }
+        // 1.0.12+: jammy sysroot so find_package(OpenGL) / headers work on SteamOS.
+        {
+            const fs::path pack = path_prefix.parent_path();
+            const fs::path sysroot = pack / "sysroot";
+            std::error_code sec;
+            if (!pack.empty() && fs::is_directory(sysroot / "usr" / "include", sec)) {
+                conf.push_back("-DCMAKE_SYSROOT=" + sysroot.string());
+            }
         }
 #endif
     }

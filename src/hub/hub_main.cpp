@@ -3581,17 +3581,275 @@ void hub_sync_open_gamepads() {
     }
 }
 
+// Snapshot of pad state when bind capture starts — poll path commits the first
+// button/axis that rises above this baseline (covers missed GAMEPAD_* events).
+struct CapturePadBaseline {
+    bool valid = false;
+    SDL_JoystickID id = 0;
+    bool buttons[static_cast<int>(SDL_GAMEPAD_BUTTON_COUNT)]{};
+    Sint16 axes[static_cast<int>(SDL_GAMEPAD_AXIS_COUNT)]{};
+    // Ignore commits until this SDL tick (avoids click/press bleed into capture).
+    Uint64 arm_until_ms = 0;
+    // Poll debounce: require the same candidate for N frames before committing.
+    int debounce_kind = 0; // 1 button, 2 axis
+    int debounce_code = -1;
+    int debounce_dir = 0;
+    int debounce_frames = 0;
+};
+CapturePadBaseline g_capture_baseline{};
+constexpr int kCaptureArmMs = 180;
+constexpr int kCapturePollDebounceFrames = 3;
+constexpr int kCaptureAxisCommit = 20000;
+
+SDL_Gamepad* gamepad_handle_for_id(SDL_JoystickID id) {
+    if (!id) return nullptr;
+    SDL_Gamepad* pad = SDL_GetGamepadFromID(id);
+    if (pad) return pad;
+    for (int i = 0; i < kMaxOpenHubPads; ++i) {
+        if (g_open_pads[i].id == id && g_open_pads[i].handle) return g_open_pads[i].handle;
+    }
+    return nullptr;
+}
+
+void snapshot_capture_baseline(SDL_JoystickID id) {
+    const Uint64 arm = g_capture_baseline.arm_until_ms;
+    g_capture_baseline = {};
+    g_capture_baseline.id = id;
+    g_capture_baseline.arm_until_ms = arm;
+    SDL_Gamepad* pad = gamepad_handle_for_id(id);
+    if (!pad) return;
+    for (int b = 0; b < static_cast<int>(SDL_GAMEPAD_BUTTON_COUNT); ++b)
+        g_capture_baseline.buttons[b] =
+            SDL_GetGamepadButton(pad, static_cast<SDL_GamepadButton>(b)) != 0;
+    for (int a = 0; a < static_cast<int>(SDL_GAMEPAD_AXIS_COUNT); ++a)
+        g_capture_baseline.axes[a] = SDL_GetGamepadAxis(pad, static_cast<SDL_GamepadAxis>(a));
+    g_capture_baseline.valid = true;
+}
+
+void clear_capture_baseline() { g_capture_baseline = {}; }
+
+bool capture_armed() {
+    return SDL_GetTicks() >= g_capture_baseline.arm_until_ms;
+}
+
+void reset_capture_debounce() {
+    g_capture_baseline.debounce_kind = 0;
+    g_capture_baseline.debounce_code = -1;
+    g_capture_baseline.debounce_dir = 0;
+    g_capture_baseline.debounce_frames = 0;
+}
+
+// PSX slot layout: 0-3 d-pad, 9/11 L2/R2, 16-23 stick directions.
+bool slot_is_dpad(int slot) { return slot >= 0 && slot <= 3; }
+bool slot_is_stick_dir(int slot) { return slot >= 16 && slot < 24; }
+bool slot_is_l2(int slot) { return slot == 9; }
+bool slot_is_r2(int slot) { return slot == 11; }
+
+bool is_dpad_button(int button) {
+    return button == static_cast<int>(SDL_GAMEPAD_BUTTON_DPAD_UP) ||
+           button == static_cast<int>(SDL_GAMEPAD_BUTTON_DPAD_DOWN) ||
+           button == static_cast<int>(SDL_GAMEPAD_BUTTON_DPAD_LEFT) ||
+           button == static_cast<int>(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+}
+
+bool is_stick_axis(int axis) {
+    return axis == static_cast<int>(SDL_GAMEPAD_AXIS_LEFTX) ||
+           axis == static_cast<int>(SDL_GAMEPAD_AXIS_LEFTY) ||
+           axis == static_cast<int>(SDL_GAMEPAD_AXIS_RIGHTX) ||
+           axis == static_cast<int>(SDL_GAMEPAD_AXIS_RIGHTY);
+}
+
+bool is_trigger_axis(int axis) {
+    return axis == static_cast<int>(SDL_GAMEPAD_AXIS_LEFT_TRIGGER) ||
+           axis == static_cast<int>(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+}
+
+// Slot-aware accept filters — stops triggers/face noise from stealing D-pad binds.
+bool capture_accepts_button(int slot, int button) {
+    if (button < 0 || button >= static_cast<int>(SDL_GAMEPAD_BUTTON_COUNT)) return false;
+    if (slot_is_dpad(slot)) return is_dpad_button(button);
+    if (slot_is_stick_dir(slot)) return is_dpad_button(button); // digital fold remaps
+    if (slot_is_l2(slot) || slot_is_r2(slot)) return false; // triggers: axes only
+    return !is_dpad_button(button); // face/shoulders — reject stray D-pad edges
+}
+
+bool capture_accepts_axis(int slot, int axis) {
+    if (axis < 0 || axis >= static_cast<int>(SDL_GAMEPAD_AXIS_COUNT)) return false;
+    if (slot_is_dpad(slot)) return false;
+    if (slot_is_stick_dir(slot)) return is_stick_axis(axis);
+    if (slot_is_l2(slot)) return axis == static_cast<int>(SDL_GAMEPAD_AXIS_LEFT_TRIGGER);
+    if (slot_is_r2(slot)) return axis == static_cast<int>(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
+    // Other digital slots: never bind stick or trigger axes by accident.
+    if (is_stick_axis(axis) || is_trigger_axis(axis)) return false;
+    return true;
+}
+
+// When several D-pad buttons edge at once (diagonal), wait for a single cardinal.
+int sole_new_dpad_button(SDL_Gamepad* pad) {
+    int hit = -1;
+    int n = 0;
+    static const SDL_GamepadButton kDpad[] = {
+        SDL_GAMEPAD_BUTTON_DPAD_UP, SDL_GAMEPAD_BUTTON_DPAD_DOWN,
+        SDL_GAMEPAD_BUTTON_DPAD_LEFT, SDL_GAMEPAD_BUTTON_DPAD_RIGHT,
+    };
+    for (SDL_GamepadButton b : kDpad) {
+        const int bi = static_cast<int>(b);
+        const bool now = SDL_GetGamepadButton(pad, b) != 0;
+        if (now && !g_capture_baseline.buttons[bi]) {
+            ++n;
+            hit = bi;
+        }
+    }
+    return n == 1 ? hit : -1;
+}
+
+SDL_JoystickID find_live_pad_id(const char* guid); // defined below
+
+// Resolve SDL button/axis name the same way the runtime input.ini parser expects.
+void fill_bind_source_string(int kind, int code, int axis_dir, char* out, size_t cap) {
+    if (!out || !cap) return;
+    out[0] = 0;
+    if (kind == 1) {
+        const char* n = SDL_GetGamepadStringForButton(static_cast<SDL_GamepadButton>(code));
+        if (!n || !n[0]) return;
+        if (std::strcmp(n, "south") == 0) n = "a";
+        else if (std::strcmp(n, "east") == 0) n = "b";
+        else if (std::strcmp(n, "west") == 0) n = "x";
+        else if (std::strcmp(n, "north") == 0) n = "y";
+        std::snprintf(out, cap, "%s", n);
+    } else if (kind == 2) {
+        const char* n = SDL_GetGamepadStringForAxis(static_cast<SDL_GamepadAxis>(code));
+        if (!n || !n[0]) n = "axis";
+        std::snprintf(out, cap, "%s%c", n, axis_dir < 0 ? '-' : '+');
+    }
+}
+
+void append_live_sdl_dpad_hint(SDL_Gamepad* pad, char* out, size_t cap) {
+    if (!pad || !out || cap < 8) return;
+    char bits[64]{};
+    auto add = [&](SDL_GamepadButton b, const char* name) {
+        if (!SDL_GetGamepadButton(pad, b)) return;
+        if (bits[0]) std::strncat(bits, "+", sizeof(bits) - std::strlen(bits) - 1);
+        std::strncat(bits, name, sizeof(bits) - std::strlen(bits) - 1);
+    };
+    add(SDL_GAMEPAD_BUTTON_DPAD_UP, "up");
+    add(SDL_GAMEPAD_BUTTON_DPAD_DOWN, "down");
+    add(SDL_GAMEPAD_BUTTON_DPAD_LEFT, "left");
+    add(SDL_GAMEPAD_BUTTON_DPAD_RIGHT, "right");
+    if (!bits[0]) return;
+    const size_t used = std::strlen(out);
+    if (used + 16 >= cap) return;
+    std::snprintf(out + used, cap - used, "\nSDL D-pad: %s", bits);
+}
+
+// True when the bound input.ini source string is currently pressed on `pad`.
+bool gamepad_bound_source_pressed(SDL_Gamepad* pad, const char* raw, int deadzone_raw) {
+    if (!pad || !raw || !raw[0]) return false;
+    char s[48]{};
+    std::snprintf(s, sizeof(s), "%s", raw);
+    for (char* p = s; *p; ++p) *p = static_cast<char>(std::tolower(static_cast<unsigned char>(*p)));
+    if (char* comma = std::strchr(s, ',')) *comma = '\0';
+
+    int dir = 0;
+    const size_t n = std::strlen(s);
+    if (n >= 2) {
+        const char last = s[n - 1];
+        const char prev = s[n - 2];
+        if ((last == '+' || last == '-') &&
+            (std::isalnum(static_cast<unsigned char>(prev)) || prev == '_')) {
+            dir = (last == '+') ? +1 : -1;
+            s[n - 1] = '\0';
+        }
+    }
+
+    auto as_btn = [&](SDL_GamepadButton b) {
+        return SDL_GetGamepadButton(pad, b) != 0;
+    };
+    auto as_axis = [&](SDL_GamepadAxis a, int want_dir) {
+        const int v = static_cast<int>(SDL_GetGamepadAxis(pad, a));
+        const int dz = deadzone_raw > 0 ? deadzone_raw : 8000;
+        if (want_dir < 0) return v < -dz;
+        return v > dz;
+    };
+
+    // Face / legacy aliases first (match runtime parse_controller_source).
+    if (std::strcmp(s, "a") == 0 || std::strcmp(s, "south") == 0)
+        return as_btn(SDL_GAMEPAD_BUTTON_SOUTH);
+    if (std::strcmp(s, "b") == 0 || std::strcmp(s, "east") == 0)
+        return as_btn(SDL_GAMEPAD_BUTTON_EAST);
+    if (std::strcmp(s, "x") == 0 || std::strcmp(s, "west") == 0)
+        return as_btn(SDL_GAMEPAD_BUTTON_WEST);
+    if (std::strcmp(s, "y") == 0 || std::strcmp(s, "north") == 0)
+        return as_btn(SDL_GAMEPAD_BUTTON_NORTH);
+    if (std::strcmp(s, "back") == 0 || std::strcmp(s, "view") == 0 || std::strcmp(s, "select") == 0)
+        return as_btn(SDL_GAMEPAD_BUTTON_BACK);
+    if (std::strcmp(s, "start") == 0 || std::strcmp(s, "menu") == 0)
+        return as_btn(SDL_GAMEPAD_BUTTON_START);
+    if (std::strcmp(s, "guide") == 0) return as_btn(SDL_GAMEPAD_BUTTON_GUIDE);
+    if (std::strcmp(s, "leftstick") == 0) return as_btn(SDL_GAMEPAD_BUTTON_LEFT_STICK);
+    if (std::strcmp(s, "rightstick") == 0) return as_btn(SDL_GAMEPAD_BUTTON_RIGHT_STICK);
+    if (std::strcmp(s, "leftshoulder") == 0 || std::strcmp(s, "lb") == 0 || std::strcmp(s, "l1") == 0)
+        return as_btn(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER);
+    if (std::strcmp(s, "rightshoulder") == 0 || std::strcmp(s, "rb") == 0 ||
+        std::strcmp(s, "r1") == 0)
+        return as_btn(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER);
+    if (std::strcmp(s, "dpup") == 0 || std::strcmp(s, "dpadup") == 0)
+        return as_btn(SDL_GAMEPAD_BUTTON_DPAD_UP);
+    if (std::strcmp(s, "dpdown") == 0 || std::strcmp(s, "dpaddown") == 0)
+        return as_btn(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+    if (std::strcmp(s, "dpleft") == 0 || std::strcmp(s, "dpadleft") == 0)
+        return as_btn(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+    if (std::strcmp(s, "dpright") == 0 || std::strcmp(s, "dpadright") == 0)
+        return as_btn(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+    if (std::strcmp(s, "lefttrigger") == 0 || std::strcmp(s, "lt") == 0 || std::strcmp(s, "l2") == 0)
+        return as_axis(SDL_GAMEPAD_AXIS_LEFT_TRIGGER, dir == 0 ? +1 : dir);
+    if (std::strcmp(s, "righttrigger") == 0 || std::strcmp(s, "rt") == 0 ||
+        std::strcmp(s, "r2") == 0)
+        return as_axis(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, dir == 0 ? +1 : dir);
+    if (std::strcmp(s, "leftx") == 0 && dir != 0) return as_axis(SDL_GAMEPAD_AXIS_LEFTX, dir);
+    if (std::strcmp(s, "lefty") == 0 && dir != 0) return as_axis(SDL_GAMEPAD_AXIS_LEFTY, dir);
+    if (std::strcmp(s, "rightx") == 0 && dir != 0) return as_axis(SDL_GAMEPAD_AXIS_RIGHTX, dir);
+    if (std::strcmp(s, "righty") == 0 && dir != 0) return as_axis(SDL_GAMEPAD_AXIS_RIGHTY, dir);
+
+    const SDL_GamepadButton btn = SDL_GetGamepadButtonFromString(s);
+    if (btn != SDL_GAMEPAD_BUTTON_INVALID) return as_btn(btn);
+    const SDL_GamepadAxis axis = SDL_GetGamepadAxisFromString(s);
+    if (axis != SDL_GAMEPAD_AXIS_INVALID) return as_axis(axis, dir == 0 ? +1 : dir);
+    return false;
+}
+
 void cancel_psx_bind_capture(HubModel& hub) {
     hub.psx_settings.capturing_bind = -1;
     hub.psx_settings.map_all_active = false;
     hub.psx_settings.map_all_wait_release = false;
     hub.psx_settings.map_all_step = 0;
+    clear_capture_baseline();
 }
 
 void begin_psx_bind_capture(HubModel& hub, int button, bool is_pad) {
     hub.psx_settings.capturing_bind = button;
     hub.psx_settings.capture_is_pad = is_pad;
     if (!hub.psx_settings.map_all_active) hub.psx_settings.map_all_wait_release = false;
+    clear_capture_baseline();
+    if (!is_pad) return;
+    g_capture_baseline.arm_until_ms = SDL_GetTicks() + static_cast<Uint64>(kCaptureArmMs);
+    reset_capture_debounce();
+    const int p = hub.psx_settings.configuring_player;
+    if (p < 0) return;
+    const std::string& guid =
+        hub.psx_settings.settings.player_guid[static_cast<size_t>(p)];
+    SDL_JoystickID id = find_live_pad_id(guid.c_str());
+    if (!id) {
+        int live_n = 0;
+        SDL_JoystickID only = 0;
+        for (int i = 0; i < kMaxOpenHubPads; ++i) {
+            if (!g_open_pads[i].handle) continue;
+            ++live_n;
+            only = g_open_pads[i].id;
+        }
+        if (live_n == 1) id = only;
+    }
+    if (id) snapshot_capture_baseline(id);
 }
 
 void begin_psx_map_all(HubModel& hub, bool is_pad) {
@@ -3638,16 +3896,7 @@ SDL_JoystickID find_live_pad_id(const char* guid) {
 }
 
 bool gamepad_at_rest(SDL_JoystickID id) {
-    if (!id) return true;
-    SDL_Gamepad* pad = SDL_GetGamepadFromID(id);
-    if (!pad) {
-        for (int i = 0; i < kMaxOpenHubPads; ++i) {
-            if (g_open_pads[i].id == id && g_open_pads[i].handle) {
-                pad = g_open_pads[i].handle;
-                break;
-            }
-        }
-    }
+    SDL_Gamepad* pad = gamepad_handle_for_id(id);
     if (!pad) return true;
     for (int b = 0; b < static_cast<int>(SDL_GAMEPAD_BUTTON_COUNT); ++b) {
         if (SDL_GetGamepadButton(pad, static_cast<SDL_GamepadButton>(b))) return false;
@@ -3666,7 +3915,7 @@ void collect_hub_gamepads(HubModel& hub, std::vector<HubGamepadOpt>& out) {
     auto already = [&](const char* guid) {
         if (!guid || !guid[0]) return true;
         for (const auto& o : out)
-            if (std::strcmp(o.guid, guid) == 0) return true;
+            if (guid_eq_ci(o.guid, guid)) return true;
         return false;
     };
     auto push = [&](const char* guid, const char* name, bool live, SDL_JoystickID id) {
@@ -3699,7 +3948,7 @@ void collect_hub_gamepads(HubModel& hub, std::vector<HubGamepadOpt>& out) {
             // Refresh live entry / prefer custom registry name.
             bool found = false;
             for (auto& o : out) {
-                if (std::strcmp(o.guid, guid_str) != 0) continue;
+                if (!guid_eq_ci(o.guid, guid_str)) continue;
                 o.live = true;
                 o.id = id;
                 if (!retcomm::psx_pad_binds_name_is_custom(hub.paths, guid_str) && name && name[0] &&
@@ -3904,13 +4153,23 @@ bool poll_psx_bind_capture(HubModel& hub, const SDL_Event& e) {
     auto try_clear_release = [&](SDL_JoystickID which) {
         if (!d.map_all_wait_release) return;
         if (!from_selected(which)) return;
-        if (gamepad_at_rest(which)) d.map_all_wait_release = false;
+        if (gamepad_at_rest(which)) {
+            d.map_all_wait_release = false;
+            snapshot_capture_baseline(which);
+            reset_capture_debounce();
+        }
     };
 
     auto commit = [&](int kind, int code, int axis_dir) {
-        retcomm::psx_pad_binds_set(hub.paths, guid, d.capturing_bind, kind, code, axis_dir);
+        char src[48]{};
+        fill_bind_source_string(kind, code, axis_dir, src, sizeof(src));
+        if (src[0])
+            retcomm::psx_pad_binds_set_source(hub.paths, guid, d.capturing_bind, src);
+        else
+            retcomm::psx_pad_binds_set(hub.paths, guid, d.capturing_bind, kind, code, axis_dir);
         retcomm::psx_pad_binds_remember(hub.paths, guid, "", -1);
         d.dirty = true;
+        reset_capture_debounce();
         if (d.map_all_active) advance_psx_map_all(hub);
         else cancel_psx_bind_capture(hub);
     };
@@ -3920,8 +4179,11 @@ bool poll_psx_bind_capture(HubModel& hub, const SDL_Event& e) {
             try_clear_release(e.gbutton.which);
             return true;
         }
-        if (d.capturing_bind >= 0 && from_selected(e.gbutton.which))
-            commit(1, static_cast<int>(e.gbutton.button), 0);
+        if (!capture_armed()) return true;
+        if (d.capturing_bind >= 0 && from_selected(e.gbutton.which)) {
+            const int btn = static_cast<int>(e.gbutton.button);
+            if (capture_accepts_button(d.capturing_bind, btn)) commit(1, btn, 0);
+        }
         return true;
     }
     if (e.type == SDL_EVENT_GAMEPAD_BUTTON_UP) {
@@ -3934,19 +4196,122 @@ bool poll_psx_bind_capture(HubModel& hub, const SDL_Event& e) {
             try_clear_release(e.gaxis.which);
             return true;
         }
+        if (!capture_armed()) return true;
         if (d.capturing_bind < 0) return true;
         const int val = static_cast<int>(e.gaxis.value);
-        if (val < 20000 && val > -20000) return true;
+        if (val < kCaptureAxisCommit && val > -kCaptureAxisCommit) return true;
         const int axis = static_cast<int>(e.gaxis.axis);
-        const int slot = d.capturing_bind;
-        const bool stick_dir_slot = (slot >= 16 && slot < 24);
-        const bool stick_axis = axis == SDL_GAMEPAD_AXIS_LEFTX || axis == SDL_GAMEPAD_AXIS_LEFTY ||
-                                axis == SDL_GAMEPAD_AXIS_RIGHTX || axis == SDL_GAMEPAD_AXIS_RIGHTY;
-        if (stick_axis && !stick_dir_slot) return true;
+        if (!capture_accepts_axis(d.capturing_bind, axis)) return true;
         commit(2, axis, val > 0 ? 1 : -1);
         return true;
     }
     return true; // swallow while capturing
+}
+
+// Poll-based capture fallback: commit after debounce when a filtered candidate
+// rises above the baseline (covers missed GAMEPAD_* events).
+void tick_psx_bind_capture_poll(HubModel& hub) {
+    auto& d = hub.psx_settings;
+    if (d.configuring_player < 0) return;
+    if (!d.capture_is_pad) return;
+    if (d.capturing_bind < 0 && !d.map_all_active) return;
+
+    const int p = d.configuring_player;
+    const std::string& guid = d.settings.player_guid[static_cast<size_t>(p)];
+    SDL_JoystickID want = find_live_pad_id(guid.c_str());
+    if (!want) {
+        int live_n = 0;
+        SDL_JoystickID only = 0;
+        for (int i = 0; i < kMaxOpenHubPads; ++i) {
+            if (!g_open_pads[i].handle) continue;
+            ++live_n;
+            only = g_open_pads[i].id;
+        }
+        if (live_n == 1) want = only;
+    }
+    if (!want) return;
+
+    if (d.map_all_wait_release) {
+        if (gamepad_at_rest(want)) {
+            d.map_all_wait_release = false;
+            snapshot_capture_baseline(want);
+            reset_capture_debounce();
+        }
+        return;
+    }
+    if (d.capturing_bind < 0) return;
+    if (!capture_armed()) return;
+
+    SDL_Gamepad* pad = gamepad_handle_for_id(want);
+    if (!pad) return;
+    if (!g_capture_baseline.valid || g_capture_baseline.id != want)
+        snapshot_capture_baseline(want);
+
+    const int slot = d.capturing_bind;
+
+    auto commit = [&](int kind, int code, int axis_dir) {
+        char src[48]{};
+        fill_bind_source_string(kind, code, axis_dir, src, sizeof(src));
+        if (src[0])
+            retcomm::psx_pad_binds_set_source(hub.paths, guid, d.capturing_bind, src);
+        else
+            retcomm::psx_pad_binds_set(hub.paths, guid, d.capturing_bind, kind, code, axis_dir);
+        retcomm::psx_pad_binds_remember(hub.paths, guid, "", -1);
+        d.dirty = true;
+        reset_capture_debounce();
+        if (d.map_all_active) advance_psx_map_all(hub);
+        else cancel_psx_bind_capture(hub);
+    };
+
+    auto note_candidate = [&](int kind, int code, int axis_dir) {
+        if (g_capture_baseline.debounce_kind == kind && g_capture_baseline.debounce_code == code &&
+            g_capture_baseline.debounce_dir == axis_dir) {
+            g_capture_baseline.debounce_frames++;
+        } else {
+            g_capture_baseline.debounce_kind = kind;
+            g_capture_baseline.debounce_code = code;
+            g_capture_baseline.debounce_dir = axis_dir;
+            g_capture_baseline.debounce_frames = 1;
+        }
+        if (g_capture_baseline.debounce_frames >= kCapturePollDebounceFrames)
+            commit(kind, code, axis_dir);
+    };
+
+    // D-pad slots: only a single new cardinal (reject diagonals / face noise).
+    if (slot_is_dpad(slot)) {
+        const int sole = sole_new_dpad_button(pad);
+        if (sole >= 0) note_candidate(1, sole, 0);
+        else reset_capture_debounce();
+        return;
+    }
+
+    int cand_kind = 0, cand_code = -1, cand_dir = 0;
+    int cand_n = 0;
+
+    for (int b = 0; b < static_cast<int>(SDL_GAMEPAD_BUTTON_COUNT); ++b) {
+        if (!capture_accepts_button(slot, b)) continue;
+        const bool now = SDL_GetGamepadButton(pad, static_cast<SDL_GamepadButton>(b)) != 0;
+        if (now && !g_capture_baseline.buttons[b]) {
+            ++cand_n;
+            cand_kind = 1;
+            cand_code = b;
+            cand_dir = 0;
+        }
+    }
+    for (int a = 0; a < static_cast<int>(SDL_GAMEPAD_AXIS_COUNT); ++a) {
+        if (!capture_accepts_axis(slot, a)) continue;
+        const int val = static_cast<int>(SDL_GetGamepadAxis(pad, static_cast<SDL_GamepadAxis>(a)));
+        if (val < kCaptureAxisCommit && val > -kCaptureAxisCommit) continue;
+        const int base = static_cast<int>(g_capture_baseline.axes[a]);
+        if (std::abs(base) >= kCaptureAxisCommit) continue;
+        ++cand_n;
+        cand_kind = 2;
+        cand_code = a;
+        cand_dir = val > 0 ? 1 : -1;
+    }
+
+    if (cand_n == 1) note_candidate(cand_kind, cand_code, cand_dir);
+    else reset_capture_debounce();
 }
 
 void draw_psx_mapping_panel(HubModel& hub, const Theme& th, int p, bool is_pad,
@@ -3962,6 +4327,14 @@ void draw_psx_mapping_panel(HubModel& hub, const Theme& th, int p, bool is_pad,
 
     ImGui::BeginChild("psx_map_panel", ImVec2(0, 0), ImGuiChildFlags_Borders);
     ImGui::TextColored(th.text_muted, is_pad ? "GAMEPAD BINDINGS" : "KEYBOARD BINDINGS");
+    if (is_pad && !digital) {
+        ImGui::TextColored(th.text_muted,
+                           "Analog mode: D-pad folds onto the left stick. Chips light when the "
+                           "bound control is pressed.");
+    } else if (is_pad) {
+        ImGui::TextColored(th.text_muted,
+                           "Chips light when the bound control is pressed — verify each bind.");
+    }
     ImGui::Separator();
 
     // Footer inside the panel: status only — action buttons live on the modal bar.
@@ -4018,6 +4391,18 @@ void draw_psx_mapping_panel(HubModel& hub, const Theme& th, int p, bool is_pad,
     const float ui_scale = std::clamp(img_w / 570.f, 0.95f, 2.1f);
     const float chip_w = 44.f * ui_scale;
     const float chip_h = 16.f * ui_scale;
+
+    SDL_Gamepad* live_pad = nullptr;
+    int live_dz = 8000;
+    if (is_pad && !guid.empty()) {
+        const SDL_JoystickID id = find_live_pad_id(guid.c_str());
+        live_pad = gamepad_handle_for_id(id);
+        live_dz = (retcomm::psx_pad_binds_deadzone(hub.paths, guid) * 32767 + 50) / 100;
+        if (live_dz < 1) live_dz = 8000;
+    }
+    int kb_nkeys = 0;
+    const bool* kb_keys = is_pad ? nullptr : SDL_GetKeyboardState(&kb_nkeys);
+
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(2.f * ui_scale, 0.f));
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.f * ui_scale);
     ImGui::SetWindowFontScale(0.78f * ui_scale);
@@ -4029,6 +4414,14 @@ void draw_psx_mapping_panel(HubModel& hub, const Theme& th, int p, bool is_pad,
             retcomm::psx_pad_binds_label(hub.paths, guid, b, bound, sizeof(bound));
         else
             retcomm::psx_keybinds_label(hub.paths, p, b, bound, sizeof(bound));
+
+        bool live_pressed = false;
+        if (is_pad && live_pad && bound[0] && std::strcmp(bound, "(unbound)") != 0) {
+            live_pressed = gamepad_bound_source_pressed(live_pad, bound, live_dz);
+        } else if (!is_pad && kb_keys) {
+            const int sc = retcomm::psx_keybinds_get_scancode(hub.paths, p, b);
+            if (sc > 0 && sc < kb_nkeys) live_pressed = kb_keys[sc] != 0;
+        }
 
         const float cx = img_x + ((hits[i].nx - kCropU0) / crop_w) * img_w;
         const float cy = img_y + ((hits[i].ny - kCropV0) / crop_h) * img_h;
@@ -4043,7 +4436,10 @@ void draw_psx_mapping_panel(HubModel& hub, const Theme& th, int p, bool is_pad,
         else
             std::snprintf(btn, sizeof(btn), "%s", psx_pad_chip_label(b));
 
-        if (capturing) ImGui::PushStyleColor(ImGuiCol_Button, th.accent);
+        if (capturing)
+            ImGui::PushStyleColor(ImGuiCol_Button, th.accent);
+        else if (live_pressed)
+            ImGui::PushStyleColor(ImGuiCol_Button, th.good_button);
         else
             ImGui::PushStyleColor(ImGuiCol_Button,
                                  ImVec4(th.control.x, th.control.y, th.control.z, 0.88f));
@@ -4054,8 +4450,11 @@ void draw_psx_mapping_panel(HubModel& hub, const Theme& th, int p, bool is_pad,
         }
         ImGui::PopStyleColor();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
-            ImGui::SetTooltip("%s\nBound: %s", retcomm::psx_pad_button_label(b),
-                              bound[0] ? bound : "(unbound)");
+            char tip[160]{};
+            std::snprintf(tip, sizeof(tip), "%s\nBound: %s%s", retcomm::psx_pad_button_label(b),
+                          bound[0] ? bound : "(unbound)", live_pressed ? "\n(pressed)" : "");
+            if (live_pad) append_live_sdl_dpad_hint(live_pad, tip, sizeof(tip));
+            ImGui::SetTooltip("%s", tip);
         }
         ImGui::PopID();
     }
@@ -5004,6 +5403,7 @@ int main(int argc, char** argv) {
                 e.window.windowID == SDL_GetWindowID(window))
                 running = false;
         }
+        tick_psx_bind_capture_poll(hub);
         if (hub.request_exit.load()) running = false;
 
         hub.apply_pending_folder_pick();

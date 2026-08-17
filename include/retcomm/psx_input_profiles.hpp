@@ -41,6 +41,10 @@ void psx_pad_binds_label(const Paths& paths, const std::string& guid, int b, cha
 // kind: 0 none, 1 button, 2 axis (axis_dir: -1/+1).
 void psx_pad_binds_set(const Paths& paths, const std::string& guid, int b, int kind, int code,
                        int axis_dir);
+// Direct source string (SDL gamepad button/axis name, optional +/-). Prefer this when
+// the hub already resolved a name via SDL_GetGamepadStringFor*.
+void psx_pad_binds_set_source(const Paths& paths, const std::string& guid, int b,
+                              const char* source);
 
 int psx_pad_binds_known_count(const Paths& paths);
 bool psx_pad_binds_known_at(const Paths& paths, int index, char* guid, int guid_cap, char* name,
@@ -52,6 +56,7 @@ void psx_pad_binds_set_deadzone(const Paths& paths, const std::string& guid, int
 
 void psx_keybinds_init(const Paths& paths);
 void psx_keybinds_label(const Paths& paths, int player /*0-based*/, int b, char* out, int cap);
+int psx_keybinds_get_scancode(const Paths& paths, int player, int b);
 void psx_keybinds_set_scancode(const Paths& paths, int player, int b, int scancode);
 void psx_keybinds_reset_player(const Paths& paths, int player);
 
