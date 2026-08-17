@@ -789,6 +789,31 @@ bool save_psx_platform_settings(const Paths& paths, const PsxPlatformSettings& s
     return write_text_file(psx_platform_settings_ini_path(paths), ini, error);
 }
 
+bool apply_texture_pack_settings(const fs::path& settings_path, bool enabled,
+                                 const std::string& pack_dir, std::string* error) {
+    std::string body = read_text_file(settings_path);
+
+    const bool on = enabled && !pack_dir.empty();
+    upsert_toml_key(body, "video", "hd_textures", on ? "true" : "false");
+
+    // Always write the path, even when disabled, so toggling HD textures back on
+    // from inside the game restores the pack the launcher selected instead of
+    // silently falling back to whatever sits next to the disc image.
+    // Forward slashes: TOML basic strings treat backslash as an escape, and
+    // psxrecomp opens the path through std::filesystem either way.
+    std::string p = pack_dir;
+    for (char& c : p)
+        if (c == '\\') c = '/';
+    std::string esc;
+    for (const char c : p) {
+        if (c == '"' || c == '\\') esc.push_back('\\');
+        esc.push_back(c);
+    }
+    upsert_toml_key(body, "video", "hd_texture_pack", "\"" + esc + "\"");
+
+    return write_text_file(settings_path, body, error);
+}
+
 ApplyPsxPlatformResult apply_psx_platform_defaults(const Paths& paths, const AppState& state,
                                                    const Title& title, const fs::path& game_cwd) {
     ApplyPsxPlatformResult r;

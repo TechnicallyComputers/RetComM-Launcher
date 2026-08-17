@@ -1645,6 +1645,135 @@ void draw_detail_save_controls(HubModel& hub, const TitleRow& row, const Theme& 
     ImGui::EndPopup();
 }
 
+// Per-title HD texture packs: install several, run one. Coverage comes from the
+// coverage.json psxrecomp writes at exit, so it reflects what the last session
+// actually drew — a pack can be fully installed and still show a low number
+// simply because you have not reached those screens yet.
+void draw_detail_texture_packs_popup(HubModel& hub, const TitleRow& row, const Theme& th,
+                                     bool busy, SDL_Window* window) {
+    if (!ImGui::IsPopupOpen("Texture Packs###detail_texture_packs")) return;
+    constexpr float kW = 620.f;
+    center_modal_next();
+    ImGui::SetNextWindowSizeConstraints(ImVec2(kW, 0.f), ImVec2(kW, FLT_MAX));
+    ImGui::SetNextWindowSize(ImVec2(kW, 0.f), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Texture Packs###detail_texture_packs", nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+
+    ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + kW - 40.f);
+    ImGui::TextWrapped("%s", row.name.c_str());
+    ImGui::TextColored(th.text_muted,
+                       "Beetle PSX HW format packs. One pack is active at a time.");
+    ImGui::Separator();
+    ImGui::BeginDisabled(busy);
+
+    const auto& packs = hub.texpack_list;
+    if (packs.empty()) {
+        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::TextColored(th.text_muted, "No texture packs installed for this title.");
+        ImGui::Dummy(ImVec2(0, 6));
+    } else if (ImGui::BeginTable("texpack_table", 5,
+                                 ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
+                                     ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Use", ImGuiTableColumnFlags_WidthFixed, 38.f);
+        ImGui::TableSetupColumn("Pack", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("Textures", ImGuiTableColumnFlags_WidthFixed, 74.f);
+        ImGui::TableSetupColumn("Coverage", ImGuiTableColumnFlags_WidthFixed, 116.f);
+        ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 74.f);
+        ImGui::TableHeadersRow();
+
+        for (const auto& p : packs) {
+            ImGui::PushID(p.id.c_str());
+            ImGui::TableNextRow();
+
+            ImGui::TableSetColumnIndex(0);
+            const bool active = (row.active_texture_pack == p.id);
+            if (ImGui::RadioButton("##use", active))
+                hub.set_texture_pack(row.id, active ? std::string{} : p.id);
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                ImGui::SetTooltip(active ? "Click again to use native textures"
+                                         : "Use this pack when the game launches");
+
+            ImGui::TableSetColumnIndex(1);
+            ImGui::TextUnformatted(p.name.c_str());
+            if (!p.author.empty() || !p.version.empty()) {
+                std::string sub = p.author;
+                if (!p.version.empty()) sub += (sub.empty() ? "" : " · ") + p.version;
+                ImGui::TextColored(th.text_muted, "%s", sub.c_str());
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal) && !p.description.empty())
+                ImGui::SetTooltip("%s", p.description.c_str());
+
+            ImGui::TableSetColumnIndex(2);
+            ImGui::Text("%d", p.texture_count);
+
+            ImGui::TableSetColumnIndex(3);
+            if (p.has_coverage && p.coverage_entries > 0) {
+                const int pct = (int)((100.0 * p.coverage_matched) / p.coverage_entries + 0.5);
+                ImGui::Text("%d / %d (%d%%)", p.coverage_matched, p.coverage_entries, pct);
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                    ImGui::SetTooltip(
+                        "Textures this pack replaced during the last session (%llds of play).\n"
+                        "Play further to raise it — unseen screens cannot count.",
+                        (long long)p.coverage_seconds);
+            } else {
+                ImGui::TextColored(th.text_muted, "—");
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+                    ImGui::SetTooltip("Play the game with this pack to measure coverage.");
+            }
+
+            ImGui::TableSetColumnIndex(4);
+            if (danger_button("Remove", th, ImVec2(-1, 0)))
+                ImGui::OpenPopup("Remove texture pack?");
+            if (ImGui::BeginPopupModal("Remove texture pack?", nullptr,
+                                       ImGuiWindowFlags_AlwaysAutoResize)) {
+                ImGui::Text("Delete '%s' from disk?", p.name.c_str());
+                ImGui::TextColored(th.text_muted, "The game's own textures are untouched.");
+                ImGui::Separator();
+                if (danger_button("Remove", th, ImVec2(140, 0))) {
+                    hub.remove_texture_pack_now(row.id, p.id);
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Cancel", ImVec2(140, 0))) ImGui::CloseCurrentPopup();
+                ImGui::EndPopup();
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::Separator();
+    if (accent_button("Install Pack…", th, ImVec2(180, 0))) {
+        begin_file_pick(hub, window, retcomm::hub::FilePickKind::ImportTexturePack,
+                        row.platform, "Texture pack (.zip)", {"zip"}, false, row.id);
+    }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal))
+        ImGui::SetTooltip("A .zip of <hash>-<hash>.png files, as dumped by\n"
+                          "Beetle PSX HW or this game's own texture dumper.\n"
+                          "A wrapping folder inside the zip is handled for you.");
+    ImGui::SameLine();
+    if (ImGui::Button("Open Folder", ImVec2(150, 0))) {
+        const fs::path dir = retcomm::texture_packs_dir(hub.paths, row.id);
+        std::error_code ec;
+        fs::create_directories(dir, ec);
+        std::string err;
+        if (!retcomm::open_path_in_file_manager(dir, &err))
+            hub.append_log("Open Folder failed: " + err);
+    }
+
+    if (!hub.texpack_status.empty()) {
+        ImGui::Dummy(ImVec2(0, 4));
+        ImGui::TextWrapped("%s", hub.texpack_status.c_str());
+    }
+
+    ImGui::EndDisabled();
+    ImGui::Separator();
+    if (ImGui::Button("Close", ImVec2(-1, 0))) ImGui::CloseCurrentPopup();
+    ImGui::PopTextWrapPos();
+    ImGui::EndPopup();
+}
+
 void draw_detail_manage_game_popup(HubModel& hub, const TitleRow& row, const Theme& th, bool busy) {
     if (!ImGui::IsPopupOpen("Manage Game Data###detail_manage_game")) return;
     constexpr float kW = 420.f;
@@ -2330,6 +2459,23 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
     ImGui::EndDisabled();
 
     draw_detail_manage_game_popup(hub, row, th, block_title_mutate);
+
+    // HD texture packs: per-title, so it lives here beside Manage Game Data
+    // rather than in the global PlayStation settings page.
+    if (row.installed && retcomm::is_psx_platform(row.platform)) {
+        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::BeginDisabled(install_op);
+        if (ImGui::Button("Texture Packs", ImVec2(-1, 0))) {
+            hub.refresh_texture_packs(row.id);
+            hub.texpack_status.clear();
+            ImGui::OpenPopup("Texture Packs###detail_texture_packs");
+        }
+        ImGui::EndDisabled();
+        if (!row.active_texture_pack.empty()) {
+            ImGui::TextColored(th.text_muted, "Active: %s", row.active_texture_pack.c_str());
+        }
+        draw_detail_texture_packs_popup(hub, row, th, block_title_mutate, window);
+    }
 
     // Seldom-touched: BIOS just above author.
     if (row.needs_bios || row.supports_openbios) {

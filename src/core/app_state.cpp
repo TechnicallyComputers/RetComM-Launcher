@@ -31,6 +31,7 @@ AppState load_app_state(const fs::path& path) {
         load_string_map(j, "preferred_save", st.preferred_save);
         load_string_map(j, "preferred_save_card2", st.preferred_save_card2);
         load_string_map(j, "preferred_bios", st.preferred_bios);
+        load_string_map(j, "active_texture_pack", st.active_texture_pack);
         if (j.contains("exclude_platform_config") && j.at("exclude_platform_config").is_object()) {
             for (auto it = j.at("exclude_platform_config").begin();
                  it != j.at("exclude_platform_config").end(); ++it) {
@@ -56,6 +57,12 @@ AppState load_app_state(const fs::path& path) {
                 if (tj.contains("preferred_bios") && tj.at("preferred_bios").is_string()) {
                     if (!st.preferred_bios.count(it.key()))
                         st.preferred_bios[it.key()] = tj.at("preferred_bios").get<std::string>();
+                }
+                if (tj.contains("active_texture_pack") &&
+                    tj.at("active_texture_pack").is_string()) {
+                    if (!st.active_texture_pack.count(it.key()))
+                        st.active_texture_pack[it.key()] =
+                            tj.at("active_texture_pack").get<std::string>();
                 }
                 if (tj.contains("exclude_platform_config") &&
                     tj.at("exclude_platform_config").is_boolean() &&
@@ -91,6 +98,10 @@ bool save_app_state(const fs::path& path, const AppState& state, std::string* er
     j["exclude_platform_config"] = json::object();
     for (const auto& id : state.exclude_platform_config) {
         if (!id.empty()) j["exclude_platform_config"][id] = true;
+    }
+    j["active_texture_pack"] = json::object();
+    for (const auto& [id, pack] : state.active_texture_pack) {
+        if (!id.empty() && !pack.empty()) j["active_texture_pack"][id] = pack;
     }
 
     const fs::path tmp = path.string() + ".tmp";
@@ -152,6 +163,21 @@ void set_preferred_bios(AppState& state, const std::string& title_id,
         state.preferred_bios.erase(title_id);
     else
         state.preferred_bios[title_id] = bios_choice;
+}
+
+std::string active_texture_pack_for(const AppState& state, const std::string& title_id) {
+    const auto it = state.active_texture_pack.find(title_id);
+    if (it == state.active_texture_pack.end()) return {};
+    return it->second;
+}
+
+void set_active_texture_pack(AppState& state, const std::string& title_id,
+                             const std::string& pack_id) {
+    if (title_id.empty()) return;
+    if (pack_id.empty())
+        state.active_texture_pack.erase(title_id);
+    else
+        state.active_texture_pack[title_id] = pack_id;
 }
 
 bool title_excludes_platform_config(const AppState& state, const std::string& title_id) {

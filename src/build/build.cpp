@@ -3283,7 +3283,10 @@ int run_capture_lines(const std::string& cmd, const fs::path& cwd,
         *combined_err = "internal error: Windows builds must use run_with_path/argv spawn";
     return 127;
 #else
-    std::string full = "cd " + shell_quote(cwd.string()) + " && " + cmd + " 2>&1";
+    // Empty cwd → stay in the process CWD. `cd ''` is "null directory" on bash
+    // and made Python stdlib smoke always fail (Hub update / ensure_bundled_python).
+    std::string full = cmd + " 2>&1";
+    if (!cwd.empty()) full = "cd " + shell_quote(cwd.string()) + " && " + full;
     FILE* pipe = popen(full.c_str(), "r");
     if (!pipe) {
         if (combined_err) *combined_err = "failed to spawn: " + cmd;

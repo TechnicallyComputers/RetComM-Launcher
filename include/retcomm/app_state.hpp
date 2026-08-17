@@ -26,6 +26,10 @@ struct AppState {
     std::unordered_map<std::string, std::string> preferred_bios;
     // Titles that skip global platform Configure merge on install/update/launch.
     std::unordered_set<std::string> exclude_platform_config;
+    // title_id → active HD texture pack id (a directory name under
+    // texturepacks_dir_for(title_id)). Absent/empty = no pack, which is the
+    // default. Exactly one pack is active per title.
+    std::unordered_map<std::string, std::string> active_texture_pack;
 };
 
 AppState load_app_state(const fs::path& path);
@@ -43,6 +47,13 @@ void set_preferred_bios(AppState& state, const std::string& title_id,
                         const std::string& bios_choice);
 
 bool title_excludes_platform_config(const AppState& state, const std::string& title_id);
+
+// Active HD texture pack id for a title, or "" when none is selected.
+std::string active_texture_pack_for(const AppState& state, const std::string& title_id);
+// Passing an empty pack_id clears the selection (the game falls back to its
+// native textures), which is also how removing the active pack is handled.
+void set_active_texture_pack(AppState& state, const std::string& title_id,
+                             const std::string& pack_id);
 void set_title_excludes_platform_config(AppState& state, const std::string& title_id,
                                         bool exclude);
 

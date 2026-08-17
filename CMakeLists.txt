@@ -39,6 +39,7 @@ set(RETCOMM_CORE_SOURCES
     src/core/hash.cpp
     src/core/config.cpp
     src/core/app_state.cpp
+    src/core/texture_packs.cpp
     src/catalog/catalog.cpp
     src/catalog/catalog_sync.cpp
     src/romscan/romscan.cpp

@@ -5,6 +5,7 @@
 #include "retcomm/library_index.hpp"
 #include "retcomm/process_env.hpp"
 #include "retcomm/psx_platform_settings.hpp"
+#include "retcomm/texture_packs.hpp"
 #include "retcomm/romm_saves.hpp"
 
 #include <algorithm>
@@ -876,6 +877,30 @@ LaunchResult launch_title(const Paths& paths, const Title& title, const LaunchOp
             }
             result.plan.message += "  warning: " + err + "\n";
         }
+    }
+
+    // Active HD texture pack → install settings.toml. Runs for every PSX title,
+    // including ones excluded from the global platform merge below: the pack is a
+    // per-title choice, not a global display preference.
+    if (is_psx_platform(title.platform) && !result.plan.staged_settings.empty()) {
+        const AppState st = load_app_state(paths.state_path);
+        const std::string pack_id = active_texture_pack_for(st, title.id);
+        std::string pack_dir;
+        if (!pack_id.empty()) {
+            const fs::path dir = texture_packs_dir(paths, title.id) / pack_id;
+            std::error_code ec;
+            if (fs::is_directory(dir, ec))
+                pack_dir = path_for_guest(dir, result.plan.use_wine);
+            else
+                result.plan.message +=
+                    "  warning: texture pack '" + pack_id + "' is missing — using native textures\n";
+        }
+        std::string err;
+        if (!apply_texture_pack_settings(result.plan.staged_settings, !pack_dir.empty(),
+                                         pack_dir, &err))
+            result.plan.message += "  warning: " + err + "\n";
+        else if (!pack_dir.empty())
+            result.plan.message += "  textures: " + pack_id + "\n";
     }
 
     // Global PlayStation Configure prefs → install settings.toml / config.ini.

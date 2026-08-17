@@ -10,6 +10,7 @@
 #include "retcomm/paths.hpp"
 #include "retcomm/psx_platform_settings.hpp"
 #include "retcomm/romm_fetch.hpp"
+#include "retcomm/texture_packs.hpp"
 
 #include <atomic>
 #include <cstddef>
@@ -184,6 +185,11 @@ struct TitleRow {
     std::vector<std::string> bios_choice_labels;
     int preferred_bios_index = -1;
     std::string bios_choice; // selected id (path or kOpenBiosChoice)
+    // Active HD texture pack id, or "" for native textures. Just the selection —
+    // the pack list itself is scanned on demand (HubModel::texpack_*) because
+    // counting a few hundred PNGs per pack has no business running on every
+    // library refresh.
+    std::string active_texture_pack;
     std::string install_root;
     std::string binary_path;
     std::string runtime; // "native" | "wine"
@@ -376,6 +382,7 @@ enum class FilePickKind : int {
     ImportRom,
     ImportSave,
     ImportBios,
+    ImportTexturePack,
     ExportActivityLog,
 };
 
@@ -500,6 +507,17 @@ struct HubModel {
     std::string folder_pick_path;
     bool folder_pick_busy = false;
     int folder_pick_install_index = -1; // InstallRoot row being browsed
+
+    // ---- per-title HD texture packs (Texture Packs modal) ------------------
+    // Scanned on demand rather than in refresh_rows: the scan walks every pack
+    // directory, and the list is only ever visible while the modal is open.
+    std::string texpack_title_id;                     // which title the list is for
+    std::vector<retcomm::TexturePack> texpack_list;
+    std::string texpack_status;                       // last import/remove result
+    void refresh_texture_packs(const std::string& title_id);
+    // Select a pack (empty = native textures) and persist it to state.json.
+    void set_texture_pack(const std::string& title_id, const std::string& pack_id);
+    void remove_texture_pack_now(const std::string& title_id, const std::string& pack_id);
 
     // Library modal → Import platform (empty = none selected; no "All").
     std::string library_import_platform;

@@ -118,6 +118,17 @@ struct ApplyPsxPlatformResult {
     std::string message;
 };
 
+// Write the active HD texture pack into an install's settings.toml, as
+// [video] hd_textures / hd_texture_pack. Key-level upsert, so recomp-ui's own
+// [video] keys survive; psxrecomp reads both from UserSettings, so its in-game
+// toggle round-trips them rather than dropping them.
+//
+// `pack_dir` empty (or enabled=false) turns replacement off. Deliberately NOT
+// folded into apply_psx_platform_defaults: a texture pack is a per-title choice,
+// so it must still apply to titles that opt out of the global platform merge.
+bool apply_texture_pack_settings(const fs::path& settings_path, bool enabled,
+                                 const std::string& pack_dir, std::string* error = nullptr);
+
 ApplyPsxPlatformResult apply_psx_platform_defaults(const Paths& paths, const AppState& state,
                                                    const Title& title, const fs::path& game_cwd);
 

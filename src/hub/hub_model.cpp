@@ -483,6 +483,7 @@ void HubModel::refresh_rows(bool check_updates, bool force_github_tags) {
                 row.bios_choice_labels.push_back("OpenBIOS (MIT, bundled)");
             }
 
+            row.active_texture_pack = active_texture_pack_for(app_state, t.id);
             row.bios_choice = preferred_bios_for(app_state, t.id);
             if (row.bios_choice.empty()) {
                 if (!row.bios_path.empty())
@@ -2779,6 +2780,31 @@ void HubModel::apply_pending_file_pick() {
         return;
     }
 
+    if (kind == FilePickKind::ImportTexturePack) {
+        if (title_id.empty()) return;
+        int ok = 0;
+        for (const std::string& src : picked) {
+            std::string pack_id, err;
+            if (retcomm::install_texture_pack(paths, title_id, fs::path(src), &pack_id, &err)) {
+                ok++;
+                append_log("Installed texture pack " + pack_id + " for " + title_id,
+                           LogLevel::Good);
+                // First pack installed for a title becomes the active one —
+                // importing a pack and then having nothing happen is a trap.
+                if (active_texture_pack_for(load_app_state(paths.state_path), title_id).empty())
+                    set_texture_pack(title_id, pack_id);
+                else
+                    texpack_status = "Installed " + pack_id + ".";
+            } else {
+                texpack_status = "Import failed: " + err;
+                append_log("Texture pack import failed: " + err, LogLevel::Error);
+            }
+        }
+        refresh_texture_packs(title_id);
+        if (ok) set_status("Installed texture pack");
+        return;
+    }
+
     if (platform.empty() && title_id.empty()) return;
 
     cfg = load_app_config(paths.config_path);
@@ -3219,6 +3245,52 @@ bool HubModel::set_title_exclude_platform_config(const std::string& title_id, bo
     append_log(std::string(exclude ? "Excluded " : "Included ") + title_id +
                " from platform config");
     return true;
+}
+
+void HubModel::refresh_texture_packs(const std::string& title_id) {
+    texpack_title_id = title_id;
+    texpack_list.clear();
+    if (title_id.empty()) return;
+    texpack_list = retcomm::scan_texture_packs(paths, title_id);
+}
+
+void HubModel::set_texture_pack(const std::string& title_id, const std::string& pack_id) {
+    if (title_id.empty()) return;
+    app_state = load_app_state(paths.state_path);
+    set_active_texture_pack(app_state, title_id, pack_id);
+    std::string err;
+    if (!save_app_state(paths.state_path, app_state, &err)) {
+        texpack_status = "Could not save selection: " + err;
+        append_log("Texture pack selection failed: " + err, LogLevel::Error);
+        return;
+    }
+    for (auto& row : rows)
+        if (row.id == title_id) row.active_texture_pack = pack_id;
+    if (pack_id.empty()) {
+        texpack_status = "Using native textures.";
+        append_log("Texture pack cleared for " + title_id);
+    } else {
+        texpack_status = "Active pack: " + pack_id;
+        append_log("Texture pack " + pack_id + " selected for " + title_id);
+    }
+}
+
+void HubModel::remove_texture_pack_now(const std::string& title_id,
+                                       const std::string& pack_id) {
+    if (title_id.empty() || pack_id.empty()) return;
+    std::string err;
+    if (!retcomm::remove_texture_pack(paths, title_id, pack_id, &err)) {
+        texpack_status = "Remove failed: " + err;
+        append_log("Texture pack remove failed: " + err, LogLevel::Error);
+        return;
+    }
+    // Removing the pack that was in use must clear the selection, or the launch
+    // path would keep pointing settings.toml at a directory that is gone.
+    if (active_texture_pack_for(load_app_state(paths.state_path), title_id) == pack_id)
+        set_texture_pack(title_id, {});
+    refresh_texture_packs(title_id);
+    texpack_status = "Removed " + pack_id + ".";
+    append_log("Removed texture pack " + pack_id + " from " + title_id, LogLevel::Good);
 }
 
 bool HubModel::save_romm_settings(std::string* error, bool refresh_boxart) {
