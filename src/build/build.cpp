@@ -4517,12 +4517,56 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
             conf.push_back("Ninja");
         }
         // 1.0.12+: jammy sysroot so find_package(OpenGL) / headers work on SteamOS.
+        // Older game trees' runtime.cmake still find_path(vulkan) on the host
+        // (/usr/include) then compile with --sysroot → vulkan.h not found.
+        // Force the software stub unless Vulkan headers live in the sysroot or
+        // VULKAN_SDK (explicit -I outside sysroot is OK for the SDK case).
         {
             const fs::path pack = path_prefix.parent_path();
             const fs::path sysroot = pack / "sysroot";
             std::error_code sec;
             if (!pack.empty() && fs::is_directory(sysroot / "usr" / "include", sec)) {
                 conf.push_back("-DCMAKE_SYSROOT=" + sysroot.string());
+                const bool vk_in_sysroot =
+                    fs::is_regular_file(sysroot / "usr" / "include" / "vulkan" /
+                                            "vulkan.h",
+                                        sec) ||
+                    fs::is_regular_file(sysroot / "include" / "vulkan" / "vulkan.h",
+                                        sec);
+                bool vk_sdk_ok = false;
+                if (const char* sdk = std::getenv("VULKAN_SDK"); sdk && *sdk) {
+                    const fs::path sp(sdk);
+                    vk_sdk_ok =
+                        fs::is_regular_file(sp / "include" / "vulkan" / "vulkan.h",
+                                            sec) ||
+                        fs::is_regular_file(sp / "Include" / "vulkan" / "vulkan.h",
+                                            sec);
+                }
+                if (!vk_in_sysroot && !vk_sdk_ok) {
+                    conf.push_back("-DPSX_ENABLE_VULKAN=OFF");
+                    // Stale caches from a host-Vulkan configure keep
+                    // PSX_HAVE_VULKAN=1 / _vk_inc=/usr/include until wiped.
+                    const std::string cached_vk =
+                        read_cmake_cache_entry(cache_file, "PSX_ENABLE_VULKAN");
+                    const std::string cached_inc =
+                        read_cmake_cache_entry(cache_file, "_vk_inc");
+                    const bool stale_vk =
+                        cached_vk == "ON" ||
+                        (!cached_inc.empty() &&
+                         cached_inc.find(sysroot.string()) == std::string::npos &&
+                         cached_inc.find("VULKAN") == std::string::npos);
+                    // Also catch bare /usr/include (common find_path result).
+                    const bool host_vk_inc =
+                        cached_inc == "/usr/include" ||
+                        cached_inc.rfind("/usr/include", 0) == 0;
+                    if (stale_vk || host_vk_inc) {
+                        progress(opts.on_progress,
+                                 "Replacing cmake cache (host Vulkan vs pack "
+                                 "sysroot)…",
+                                 0.54f);
+                        fs::remove_all(build_dir, ec);
+                    }
+                }
             }
         }
 #endif

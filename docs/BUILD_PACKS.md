@@ -134,7 +134,10 @@ ignores a new `-DCMAKE_C_COMPILER` over a locked entry). Before configure it
 `\U` in `C:\Users\…` as an invalid escape inside `CMakeRCCompiler.cmake`.
 Caches that still record `…/latest/…` tool paths (or a Windows
 `CMakeRCCompiler.cmake` with raw backslashes from an older launcher) are wiped
-once. Prefer **downloading**
+once. On Linux packs with a jammy **sysroot**, Hub passes
+`-DPSX_ENABLE_VULKAN=OFF` unless `vulkan/vulkan.h` exists under that sysroot or
+`$VULKAN_SDK` (avoids host `/usr/include` + `--sysroot` compile failures on
+older game trees). Prefer **downloading**
 `cmake-clang-v1` from
 [TechnicallyComputers/retcomm-toolchains](https://github.com/TechnicallyComputers/retcomm-toolchains)
 into the shared cache (`RETCOMM_TOOLCHAIN_DIR` overrides when the directory

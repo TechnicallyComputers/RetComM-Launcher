@@ -142,9 +142,13 @@ std::vector<TexturePack> scan_texture_packs(const Paths& paths,
     for (const auto& e : fs::directory_iterator(root, ec)) {
         if (ec) break;
         if (!e.is_directory(ec)) continue;
+        // Skip dot-directories: .import-tmp is staged in here, and a crash
+        // mid-import must not leave a phantom pack in the list.
+        const std::string dir_name = e.path().filename().string();
+        if (dir_name.empty() || dir_name.front() == '.') continue;
 
         TexturePack p;
-        p.id   = e.path().filename().string();
+        p.id   = dir_name;
         p.name = p.id;
         p.dir  = e.path();
         p.texture_count = count_textures(p.dir, &p.bytes);
