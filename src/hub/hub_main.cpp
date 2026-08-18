@@ -5219,12 +5219,22 @@ void draw_psx_settings_panel(HubModel& hub, const Theme& th, BoxartCache& boxart
         if (ImGui::Checkbox("##lli", &s.low_latency_input)) mark();
 
         psx_settings_row_label("VSync", th, kCol);
-        const char* vlab = s.vsync == 0 ? "Immediate" : (s.vsync < 0 ? "Adaptive" : "On");
+        const char* vlab = s.vsync == 0 ? "Off" : (s.vsync < 0 ? "Adaptive" : "On");
         if (cycle_btn("vs", vlab, 120.f)) {
             if (s.vsync == 1) s.vsync = 0;
             else if (s.vsync == 0) s.vsync = -1;
             else s.vsync = 1;
             mark();
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+            ImGui::SetTooltip(
+                "On: the swap waits for the panel \xe2\x80\x94 no tearing.\n"
+                "Off: swap immediately \xe2\x80\x94 lowest display "
+                "latency, may tear.\n"
+                "Adaptive: vsync while the game keeps up, immediate when it "
+                "drops below the refresh rate.\n\n"
+                "The runtime still paces frames to the console's own rate "
+                "either way, so Off does not run the game fast.");
         }
 
         ImGui::Dummy(ImVec2(0, 8));
