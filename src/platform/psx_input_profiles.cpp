@@ -174,6 +174,25 @@ void parse_mapping_line(char dest[][kSrcCap], const char* key, const char* val) 
     copy_str(dest[b], kSrcCap, s);
 }
 
+/* Undo mis-captures where Left (etc.) was stored as another cardinal's SDL
+ * name (SFA3 #3: left = dpup while up already owns dpup). */
+bool heal_dpad_cardinal_collisions(char dest[][kSrcCap]) {
+    bool changed = false;
+    for (int i = 0; i < 4; ++i) {
+        if (!dest[i][0] || std::strcmp(dest[i], kPadDefaults[i]) == 0) continue;
+        for (int j = 0; j < 4; ++j) {
+            if (i == j) continue;
+            if (std::strcmp(dest[i], kPadDefaults[j]) == 0 &&
+                std::strcmp(dest[j], kPadDefaults[j]) == 0) {
+                copy_str(dest[i], kSrcCap, kPadDefaults[i]);
+                changed = true;
+                break;
+            }
+        }
+    }
+    return changed;
+}
+
 void load_pad_ini(const char* path) {
     seed_defaults(g_global);
     std::memset(g_maps, 0, sizeof(g_maps));
@@ -311,8 +330,12 @@ void ensure_pad(const char* path) {
     if (g_pad_init && g_pad_path[0] && path && std::strcmp(g_pad_path, path) == 0) return;
     copy_str(g_pad_path, sizeof(g_pad_path), path ? path : "input.ini");
     load_pad_ini(g_pad_path);
+    bool healed = heal_dpad_cardinal_collisions(g_global);
+    for (int i = 0; i < kPsxPadMaxKnown; ++i) {
+        if (g_maps[i].used) healed = heal_dpad_cardinal_collisions(g_maps[i].src) || healed;
+    }
     std::ifstream test(g_pad_path);
-    if (!test) write_pad_ini(g_pad_path);
+    if (!test || healed) write_pad_ini(g_pad_path);
     g_pad_init = 1;
 }
 

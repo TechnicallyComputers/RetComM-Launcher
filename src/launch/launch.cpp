@@ -77,8 +77,10 @@ std::string path_for_guest(const fs::path& host, bool use_wine) {
 #endif
 }
 
-// Disc titles must launch from a .cue only — never stage .bin/.img/.iso/.chd.
-// If the library preferred a raw dump, resolve a companion .cue when present.
+// Disc titles launch from a .cue, or a self-contained official image (.car,
+// e.g. Steam Tomba! Special Edition's t_data_u.car) — never a naked track
+// .bin/.img or a cooked .iso/.chd. If the library preferred a raw dump,
+// resolve a companion .cue when present.
 fs::path prefer_media_path(const Title& title, fs::path media) {
     if (media.empty()) return media;
     std::error_code ec;
@@ -87,11 +89,12 @@ fs::path prefer_media_path(const Title& title, fs::path media) {
     if (is_disc_platform(title.platform)) {
         const std::string ext = lower_ext(media);
         if (ext == ".cue") return media;
+        if (ext == ".car") return media; // complete single-file image, no cue exists
         if (ext == ".bin" || ext == ".img") {
             const fs::path cue = companion_cue_for_disc_dump(media);
             if (!cue.empty() && fs::is_regular_file(cue, ec)) return cue;
         }
-        // Refuse dumps / cooked images — Play must pass a .cue sheet.
+        // Refuse dumps / cooked images — Play must pass a .cue sheet (or .car).
         return {};
     }
     return media;
@@ -657,16 +660,17 @@ LaunchPlan plan_launch(const Paths& paths, const Title& title, const LaunchOptio
         if (!opts.rom_path.empty() && lp.media_path.empty()) {
             lp.ready = false;
             std::ostringstream oss;
-            oss << "cannot launch: disc titles require a .cue (not a .bin/.img)\n"
+            oss << "cannot launch: disc titles require a .cue or .car (not a .bin/.img)\n"
                 << "  bound:  " << opts.rom_path.string() << "\n"
                 << "  tip: keep the Redump .cue next to the track images, then "
                    "Refresh Library / ROM scan\n";
             lp.message = oss.str();
             return lp;
         }
-        if (!lp.media_path.empty() && lower_ext(lp.media_path) != ".cue") {
+        if (!lp.media_path.empty() && lower_ext(lp.media_path) != ".cue" &&
+            lower_ext(lp.media_path) != ".car") {
             lp.ready = false;
-            lp.message = "cannot launch: internal error — refusing non-.cue disc path: " +
+            lp.message = "cannot launch: internal error — refusing non-.cue/.car disc path: " +
                          lp.media_path.string() + "\n";
             return lp;
         }

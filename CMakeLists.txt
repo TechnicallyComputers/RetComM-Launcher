@@ -113,9 +113,31 @@ set(RETCOMM_IMGUI_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../recomp-ui/src/third_party/
     CACHE PATH "Path to Dear ImGui sources")
 
 find_package(SDL3 QUIET)
-find_package(OpenGL QUIET)
-if(NOT TARGET OpenGL::GL)
-    find_package(OpenGL REQUIRED)
+
+# GL for the ImGui SDL3+GL3 backend. Re-running find_package cannot conjure
+# OpenGL::GL: FindOpenGL only defines it when a legacy libGL was found, or when
+# BOTH OpenGL::OpenGL and OpenGL::GLX exist (GLX needs glx.h). A GLVND host with
+# libOpenGL.so but no legacy libGL.so / glx.h — Steam Deck, SteamOS — reports
+# OpenGL as *found* with no OpenGL::GL, so REQUIRED passes and the link fails at
+# generate time instead. Resolve to whatever the host actually has.
+# Canonical version of this logic: recomp-ui/cmake/recomp_gl.cmake (duplicated
+# because the launcher must configure without a recomp-ui checkout).
+find_package(OpenGL REQUIRED)
+if(TARGET OpenGL::GL)
+    set(RETCOMM_GL_TARGET OpenGL::GL)
+elseif(TARGET OpenGL::OpenGL)
+    message(STATUS "retcomm-hub: OpenGL::GL unavailable (GLVND host) — linking OpenGL::OpenGL")
+    set(RETCOMM_GL_TARGET OpenGL::OpenGL)
+elseif(OPENGL_gl_LIBRARY)
+    set(RETCOMM_GL_TARGET "${OPENGL_gl_LIBRARY}")
+elseif(OPENGL_opengl_LIBRARY)
+    set(RETCOMM_GL_TARGET "${OPENGL_opengl_LIBRARY}")
+else()
+    message(FATAL_ERROR
+        "retcomm-hub: OpenGL found but no usable GL library resolved "
+        "(OPENGL_gl_LIBRARY='${OPENGL_gl_LIBRARY}', "
+        "OPENGL_opengl_LIBRARY='${OPENGL_opengl_LIBRARY}'). "
+        "Install the GL development files (libgl-dev / libglvnd-dev / libglvnd).")
 endif()
 
 if(NOT SDL3_FOUND AND NOT TARGET SDL3::SDL3)
@@ -200,7 +222,7 @@ if(RETCOMM_HAVE_SDL3 AND RETCOMM_IMGUI_READY)
         ${RETCOMM_IMGUI_DIR}
         ${RETCOMM_IMGUI_DIR}/backends
     )
-    target_link_libraries(retcomm_imgui PUBLIC ${RETCOMM_HUB_SDL_TARGET} OpenGL::GL)
+    target_link_libraries(retcomm_imgui PUBLIC ${RETCOMM_HUB_SDL_TARGET} ${RETCOMM_GL_TARGET})
     if(RETCOMM_IMGUI_FREETYPE)
         # Prefer our vendored misc/ over a trimmed imgui tree that lacks it.
         # third_party → "misc/freetype/…"; misc/freetype → "imgui_freetype.h" in .cpp.

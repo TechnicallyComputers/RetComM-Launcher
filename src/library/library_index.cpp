@@ -78,6 +78,14 @@ bool is_disc_dump_ext(const std::string& ext) {
     return ext == ".bin" || ext == ".img";
 }
 
+bool is_selfcontained_image_ext(const std::string& ext) {
+    // Official re-release payloads (e.g. Steam Tomba! Special Edition's
+    // t_data_u.car): a complete raw disc image that never ships with a cue
+    // sheet. Only valid for single-track discs — a raw file cannot carry a
+    // multi-track TOC.
+    return ext == ".car";
+}
+
 std::string ascii_lower(std::string s) {
     for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     return s;
@@ -344,6 +352,17 @@ bool rom_identity_toc_ok(const RomIdentity& id, const fs::path& matched_path) {
     // Never accept cooked ISO / CHD for disc identity (no reliable multi-track).
     if (ext == ".iso" || ext == ".chd") return false;
 
+    if (is_selfcontained_image_ext(ext)) {
+        // A self-contained raw image (.car) is the whole disc in one file, so
+        // require_cue is satisfied by construction — but only for single-track
+        // titles, since a raw file cannot express a multi-track TOC.
+        if (id.track_counts.empty()) return true;
+        for (int want : id.track_counts) {
+            if (want == 1) return true;
+        }
+        return false;
+    }
+
     if (id.track_counts.empty() && !id.require_cue) return true;
 
     fs::path cue = matched_path;
@@ -369,6 +388,7 @@ bool rom_identity_toc_ok(const RomIdentity& id, const fs::path& matched_path) {
 
 int rom_path_rank(const std::string& ext) {
     if (ext == ".cue") return 0;
+    if (ext == ".car") return 1; // self-contained official image; below .cue only
     if (ext == ".sfc" || ext == ".z64" || ext == ".gba" || ext == ".md") return 1;
     if (ext == ".bin" || ext == ".gen" || ext == ".smd") return 2;
     if (ext == ".smc" || ext == ".n64" || ext == ".v64") return 3;

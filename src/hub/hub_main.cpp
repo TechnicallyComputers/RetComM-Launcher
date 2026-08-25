@@ -361,15 +361,26 @@ std::string join_ext_pattern(const std::set<std::string>& exts) {
 
 std::set<std::string> rom_exts_for_platform(const retcomm::Catalog& catalog,
                                             const std::string& platform) {
-    // PSX: library expects cue sheets + bin tracks only.
-    if (platform == "psx" || platform == "ps1" || platform == "ps") return {"cue", "bin"};
+    const bool is_psx = platform == "psx" || platform == "ps1" || platform == "ps";
     std::set<std::string> exts;
     for (const auto& t : catalog.titles) {
-        if (t.platform != platform) continue;
+        const bool t_is_psx =
+            t.platform == "psx" || t.platform == "ps1" || t.platform == "ps";
+        if (is_psx ? !t_is_psx : t.platform != platform) continue;
         for (const auto& e : t.rom_extensions) {
             const std::string s = strip_dot_ext(e);
-            if (!s.empty()) exts.insert(s);
+            if (s.empty()) continue;
+            // PSX: no cooked ISO / CHD ever (no reliable multi-track TOC).
+            if (is_psx && (s == "iso" || s == "chd")) continue;
+            exts.insert(s);
         }
+    }
+    if (is_psx) {
+        // Library baseline: cue sheets + bin tracks; catalog titles may add
+        // self-contained official images (e.g. Tomba!'s Steam .car payload).
+        exts.insert("cue");
+        exts.insert("bin");
+        return exts;
     }
     if (!exts.empty()) return exts;
     // Fallbacks aligned with retcomm-catalog platform-defaults.json
@@ -3865,10 +3876,22 @@ bool is_trigger_axis(int axis) {
            axis == static_cast<int>(SDL_GAMEPAD_AXIS_RIGHT_TRIGGER);
 }
 
+// Slot 0-3 = Up/Down/Left/Right — require that exact SDL D-pad button so a
+// Windows Xbox mis-report of Left as Up cannot store dpup on the Left chip.
+int expected_dpad_button(int slot) {
+    switch (slot) {
+    case 0: return static_cast<int>(SDL_GAMEPAD_BUTTON_DPAD_UP);
+    case 1: return static_cast<int>(SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+    case 2: return static_cast<int>(SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+    case 3: return static_cast<int>(SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+    default: return -1;
+    }
+}
+
 // Slot-aware accept filters — stops triggers/face noise from stealing D-pad binds.
 bool capture_accepts_button(int slot, int button) {
     if (button < 0 || button >= static_cast<int>(SDL_GAMEPAD_BUTTON_COUNT)) return false;
-    if (slot_is_dpad(slot)) return is_dpad_button(button);
+    if (slot_is_dpad(slot)) return button == expected_dpad_button(slot);
     if (slot_is_stick_dir(slot)) return is_dpad_button(button); // digital fold remaps
     if (slot_is_l2(slot) || slot_is_r2(slot)) return false; // triggers: axes only
     return !is_dpad_button(button); // face/shoulders — reject stray D-pad edges
@@ -4478,10 +4501,11 @@ void tick_psx_bind_capture_poll(HubModel& hub) {
             commit(kind, code, axis_dir);
     };
 
-    // D-pad slots: only a single new cardinal (reject diagonals / face noise).
+    // D-pad slots: only the expected cardinal (reject diagonals / Up-as-Left).
     if (slot_is_dpad(slot)) {
+        const int expect = expected_dpad_button(slot);
         const int sole = sole_new_dpad_button(pad);
-        if (sole >= 0) note_candidate(1, sole, 0);
+        if (sole >= 0 && sole == expect) note_candidate(1, sole, 0);
         else reset_capture_debounce();
         return;
     }
