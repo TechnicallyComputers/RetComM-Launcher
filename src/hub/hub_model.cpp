@@ -1037,6 +1037,10 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                             } else if (!card2_id.empty()) {
                                 opts.save_path_card2 =
                                     resolve_managed_save(paths, cfg, *t, card2_id);
+                                // Unresolvable here: hand the raw id to bind so it
+                                // reports the fallback rather than staying silent.
+                                if (opts.save_path_card2.empty())
+                                    opts.save_path_card2 = card2_id;
                             }
                         }
                     }

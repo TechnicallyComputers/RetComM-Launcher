@@ -512,7 +512,7 @@ RommSaveSyncResult sync_assets_with_romm(const Paths& paths, const AppConfig& cf
     if (!cfg.romm.enabled()) return fail("RomM not configured (set base_url)");
     if (cfg.romm.api_token.empty()) return fail("RomM api_token is empty");
 
-    const auto plan = inspect_install(paths, title);
+    const auto plan = inspect_install_any(paths, cfg, title);
     if (!plan.installed)
         return fail(std::string("title is not installed — install before syncing ") + label);
 
@@ -788,8 +788,11 @@ bool is_disc_platform(const std::string& platform) {
     return platform == "psx" || platform == "ps2" || platform == "saturn";
 }
 
-fs::path resolve_game_root(const Paths& paths, const Title& title) {
-    const auto plan = inspect_install(paths, title);
+// Installs may live in any configured install root (config.json install_roots),
+// not just paths.apps_dir — resolve across all of them or a title on a secondary
+// root reads back as "not installed" and its save binding is silently skipped.
+fs::path resolve_game_root(const Paths& paths, const AppConfig& cfg, const Title& title) {
+    const auto plan = inspect_install_any(paths, cfg, title);
     if (!plan.installed) return {};
     std::error_code ec;
     fs::path game_root = plan.current_link;
@@ -1214,7 +1217,7 @@ fs::path title_saves_dir(const Paths& paths, const AppConfig& cfg, const Title& 
         }
         return dir;
     }
-    const fs::path game_root = resolve_game_root(paths, title);
+    const fs::path game_root = resolve_game_root(paths, cfg, title);
     if (game_root.empty()) return {};
     const fs::path dir = game_root / "saves";
     if (create) {
@@ -1233,10 +1236,10 @@ int promote_install_saves_to_library(const Paths& paths, const AppConfig& cfg, c
     const std::string stem = save_stem_for_title(title, rom_hint);
     int n = 0;
     n += migrate_legacy_flat_library_saves(paths, cfg, title, rom_hint, library);
-    const fs::path game_root = resolve_game_root(paths, title);
+    const fs::path game_root = resolve_game_root(paths, cfg, title);
     if (!game_root.empty())
         n += promote_files_into_library(game_root / "saves", library, title, stem, true);
-    const auto plan = inspect_install(paths, title);
+    const auto plan = inspect_install_any(paths, cfg, title);
     if (!plan.install_root.empty())
         n += promote_files_into_library(plan.install_root / "preserved", library, title, stem,
                                         false);
@@ -1401,7 +1404,7 @@ fs::path resolve_managed_save(const Paths& paths, const AppConfig& cfg, const Ti
         const fs::path legacy = cfg.saves_dir_for_platform(title.platform, false);
         hit = resolve_preferred_under_saves(legacy, save_id);
         if (!hit.empty()) return hit;
-        const fs::path game_root = resolve_game_root(paths, title);
+        const fs::path game_root = resolve_game_root(paths, cfg, title);
         if (!game_root.empty())
             return resolve_preferred_under_saves(game_root / "saves", save_id);
     }
@@ -1424,7 +1427,7 @@ RecompSaveBindResult bind_recomp_save_paths(const Paths& paths, const AppConfig&
                                             const fs::path& preferred_save_card2,
                                             bool card2_blank) {
     RecompSaveBindResult r;
-    const fs::path game_root = resolve_game_root(paths, title);
+    const fs::path game_root = resolve_game_root(paths, cfg, title);
     if (game_root.empty()) {
         r.message = "save bind: title not installed";
         return r;
@@ -1465,6 +1468,15 @@ RecompSaveBindResult bind_recomp_save_paths(const Paths& paths, const AppConfig&
     });
 
     std::ostringstream notes;
+
+    // A chosen card that no longer resolves silently falls back below — say so,
+    // otherwise "my selection was ignored" looks identical to "never chosen".
+    if (preferred.empty() && !preferred_save.empty())
+        notes << "warning: chosen card 1 '" << preferred_save.filename().string()
+              << "' not found — falling back; ";
+    if (preferred_card2.empty() && !preferred_save_card2.empty() && !card2_blank)
+        notes << "warning: chosen card 2 '" << preferred_save_card2.filename().string()
+              << "' not found — falling back; ";
 
     // Cart: honour preferred save (activate default slot + expose for --save-path).
     if (!is_disc_platform(title.platform)) {
@@ -1606,7 +1618,7 @@ RommSaveSyncResult sync_saves_with_romm(const Paths& paths, const AppConfig& cfg
                                         const Title& title, RommProgressFn on_progress) {
     auto result = sync_assets_with_romm(paths, cfg, title, SyncKind::Saves, on_progress);
     if (result.ok) {
-        const auto plan = inspect_install(paths, title);
+        const auto plan = inspect_install_any(paths, cfg, title);
         const bool wine = plan.record && plan.record->runtime == "wine";
         fs::path preferred;
         fs::path preferred_card2;

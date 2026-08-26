@@ -761,6 +761,9 @@ int cmd_launch(const retcomm::Paths& paths, const retcomm::Catalog& cat,
                 opts.save_path_card2_blank = true;
             } else if (!card2_id.empty()) {
                 opts.save_path_card2 = retcomm::resolve_managed_save(paths, cfg, *t, card2_id);
+                // Unresolvable here: hand the raw id to bind so it reports the
+                // fallback instead of looking like "no card 2 was ever chosen".
+                if (opts.save_path_card2.empty()) opts.save_path_card2 = card2_id;
             }
         }
     } else {
