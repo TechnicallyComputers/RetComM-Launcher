@@ -169,7 +169,7 @@ int cmd_status(const retcomm::Paths& paths, const retcomm::AppConfig& cfg,
     std::cout << "\n";
 
     for (const auto& t : cat.titles) {
-        auto plan = retcomm::inspect_install(paths, t);
+        auto plan = retcomm::inspect_install_any(paths, cfg, t);
         const auto rom = idx.preferred_rom(t.id);
         std::cout << "  " << t.id << " — " << plan.message;
         if (!rom.empty()) std::cout << "\n      rom: " << rom.string();
@@ -229,8 +229,8 @@ int cmd_config(const retcomm::Paths& paths, const retcomm::AppConfig& cfg) {
     return 0;
 }
 
-int cmd_library(const retcomm::Paths& paths, const retcomm::Catalog& cat,
-                bool check_updates) {
+int cmd_library(const retcomm::Paths& paths, const retcomm::AppConfig& cfg,
+                const retcomm::Catalog& cat, bool check_updates) {
     auto idx = retcomm::load_library_index(paths.library_index_path);
     auto bios_idx = retcomm::load_bios_index(paths.bios_index_path);
     retcomm::ReleaseTagCache tag_cache(retcomm::release_tags_cache_path(paths));
@@ -254,7 +254,7 @@ int cmd_library(const retcomm::Paths& paths, const retcomm::Catalog& cat,
                 std::cout << "      also:      " << b.paths[i] << "\n";
         }
         if (t) {
-            auto plan = retcomm::inspect_install(paths, *t);
+            auto plan = retcomm::inspect_install_any(paths, cfg, *t);
             if (plan.installed) {
                 std::cout << "      app:       installed";
                 if (!plan.installed_tag.empty())
@@ -660,8 +660,9 @@ int cmd_build(const retcomm::Paths& paths, const retcomm::Catalog& cat, const st
     return result.ok ? 0 : 1;
 }
 
-int cmd_update(const retcomm::Paths& paths, const retcomm::Catalog& cat,
-               const std::string& id_or_all, bool force, bool force_generate) {
+int cmd_update(const retcomm::Paths& paths, const retcomm::AppConfig& cfg,
+               const retcomm::Catalog& cat, const std::string& id_or_all, bool force,
+               bool force_generate) {
     retcomm::InstallOptions opts;
     opts.force = force;
     opts.check_latest = true;
@@ -669,7 +670,7 @@ int cmd_update(const retcomm::Paths& paths, const retcomm::Catalog& cat,
     std::vector<const retcomm::Title*> targets;
     if (id_or_all == "--all") {
         for (const auto& t : cat.titles) {
-            auto plan = retcomm::inspect_install(paths, t);
+            auto plan = retcomm::inspect_install_any(paths, cfg, t);
             if (plan.installed) targets.push_back(&t);
         }
         if (targets.empty()) {
@@ -947,7 +948,7 @@ int main(int argc, char** argv) {
                     return 2;
                 }
             }
-            return cmd_library(paths, catalog, check_updates);
+            return cmd_library(paths, cfg, catalog, check_updates);
         }
         if (cmd == "romm") return cmd_romm(paths, cfg);
         if (cmd == "bios") {
@@ -1072,7 +1073,7 @@ int main(int argc, char** argv) {
                     return 2;
                 }
             }
-            return cmd_update(paths, catalog, args[1], force, force_generate);
+            return cmd_update(paths, cfg, catalog, args[1], force, force_generate);
         }
         if (cmd == "uninstall" || cmd == "remove") {
             if (args.size() < 2) {
