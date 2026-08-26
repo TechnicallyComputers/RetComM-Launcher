@@ -1110,14 +1110,96 @@ std::string tool_fingerprint(const fs::path& game_bin, const fs::path& bios_bin)
     return file_content_sig(game_bin) + "|" + file_content_sig(bios_bin);
 }
 
+/* BIOS C under psxrecomp/generated/ is emitted by psxrecomp-bios and then
+ * COMPILED AGAINST the engine runtime, but it is cached independently of the
+ * emitter that produced it (shared engine cache dir, codegen-cache, game zips),
+ * so a BIOS emitted by one psxrecomp revision can end up linked against
+ * another. That surfaces only at link time as an undefined symbol the BIOS C
+ * calls and the runtime no longer defines (seen: psx_ram_canon_code_addr).
+ * Stamp the emitted set with the emitter that produced it; refuse to reuse a
+ * set whose provenance is unknown or different. */
+constexpr const char* kPsxBiosStampName = ".retcomm-bios.json";
+
+fs::path psx_bios_gen_dir(const fs::path& src_root) {
+    return src_root / "psxrecomp" / "generated";
+}
+
+std::string psx_bios_emitter_sig(const fs::path& bios_bin) {
+    if (bios_bin.empty()) return {};
+    return file_content_sig(bios_bin);
+}
+
+std::string read_psx_bios_stamp(const fs::path& gen_dir) {
+    std::error_code ec;
+    const fs::path p = gen_dir / kPsxBiosStampName;
+    if (!fs::is_regular_file(p, ec)) return {};
+    try {
+        std::ifstream in(p);
+        const json j = json::parse(in);
+        return j.value("bios_tool", "");
+    } catch (...) {
+        return {};
+    }
+}
+
+/* Unknown provenance (no stamp) is treated as a mismatch: a stale set links a
+ * broken binary, and re-emitting the BIOS is cheap next to shipping one. */
+bool psx_bios_stamp_matches(const fs::path& gen_dir, const std::string& emitter_sig) {
+    if (emitter_sig.empty()) return true;  // no emitter identity to check against
+    return read_psx_bios_stamp(gen_dir) == emitter_sig;
+}
+
+bool psx_bios_reusable(const std::string& engine, const fs::path& root,
+                       const json& want) {
+    if (engine != "psxrecomp") return true;
+    return psx_bios_stamp_matches(psx_bios_gen_dir(root), want.value("bios_tool", ""));
+}
+
+void write_psx_bios_stamp(const fs::path& gen_dir, const std::string& emitter_sig) {
+    if (emitter_sig.empty()) return;
+    std::error_code ec;
+    if (!fs::is_directory(gen_dir, ec)) return;
+    try {
+        std::ofstream out(gen_dir / kPsxBiosStampName);
+        out << json{{"bios_tool", emitter_sig}}.dump(2) << "\n";
+    } catch (...) {
+    }
+}
+
+/* Drop BIOS C a different emitter produced so nothing stale can reach the link.
+ * Leaves the profiles, ROM and seeds alone — only emitter output goes. */
+bool purge_psx_bios_generated(const fs::path& gen_dir) {
+    std::error_code ec;
+    if (!fs::is_directory(gen_dir, ec)) return false;
+    std::vector<fs::path> doomed;
+    for (auto it = fs::directory_iterator(gen_dir, ec); !ec && it != fs::directory_iterator();
+         it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        const std::string name = it->path().filename().string();
+        const bool emitted = name.find("_full.c") != std::string::npos ||
+                             name.find("_dispatch.c") != std::string::npos ||
+                             name.find("_functions.json") != std::string::npos ||
+                             name.find(".emitter.sha") != std::string::npos ||
+                             name == kPsxBiosStampName;
+        if (emitted) doomed.push_back(it->path());
+    }
+    bool removed = false;
+    for (const fs::path& p : doomed) {
+        std::error_code rec;
+        if (fs::remove(p, rec)) removed = true;
+    }
+    return removed;
+}
+
 json make_codegen_meta(const std::string& engine, const std::string& rom_fp,
                        const std::string& bios_fp, const std::string& sdk_tag,
-                       const std::string& tool_fp) {
+                       const std::string& tool_fp, const std::string& bios_tool_fp = {}) {
     return json{{"engine", engine},
                 {"rom", rom_fp},
                 {"bios", bios_fp},
                 {"sdk_tag", sdk_tag},
-                {"tools", tool_fp}};
+                {"tools", tool_fp},
+                {"bios_tool", bios_tool_fp}};
 }
 
 bool codegen_inputs_match(const json& meta, const json& want) {
@@ -1201,6 +1283,7 @@ bool try_restore_codegen_cache(const Paths& paths, const Title& title, const std
         return false;
     }
     if (!generated_ready(title, engine, cache)) return false;
+    if (!psx_bios_reusable(engine, cache, want)) return false;
     std::string err;
     if (!install_generated_from(title, engine, cache, src_root, &err)) return false;
     if (note) *note = "restored codegen-cache";
@@ -1237,6 +1320,7 @@ bool try_adopt_previous_src_generated(const Paths& paths, const Title& title,
         } catch (...) {
             continue;
         }
+        if (!psx_bios_reusable(engine, *it, want)) continue;
         std::string err;
         if (!install_generated_from(title, engine, *it, src_root, &err)) continue;
         if (note) *note = "carried forward from " + it->filename().string();
@@ -4188,9 +4272,32 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
         }
     }
 
+    const std::string bios_emitter_sig =
+        engine == "psxrecomp" ? psx_bios_emitter_sig(psxrecomp_bios) : std::string();
     const json codegen_want = make_codegen_meta(
         engine, rom_fingerprint(paths, opts.rom_path), bios_fingerprint(opts), sdk.tag,
-        engine == "psxrecomp" ? tool_fingerprint(psxrecomp_game, psxrecomp_bios) : sdk.tag);
+        engine == "psxrecomp" ? tool_fingerprint(psxrecomp_game, psxrecomp_bios) : sdk.tag,
+        bios_emitter_sig);
+
+    /* BIOS C already on disk (shared engine cache dir, game zip, earlier
+     * install) may come from a different psxrecomp-bios than the one this SDK
+     * ships. Linking it against this engine's runtime fails on symbols the BIOS
+     * calls and the runtime dropped, so drop it here and re-emit rather than
+     * carry it into the build. */
+    bool force_bios = opts.force_bios;
+    if (engine == "psxrecomp" && !bios_emitter_sig.empty()) {
+        const fs::path bios_gen = psx_bios_gen_dir(src.root);
+        if (bios_generated_present(src.root / "psxrecomp") &&
+            !psx_bios_stamp_matches(bios_gen, bios_emitter_sig)) {
+            progress(opts.on_progress,
+                     "BIOS C on disk was not emitted by this SDK's psxrecomp-bios "
+                     "— re-emitting before build…",
+                     0.04f);
+            purge_psx_bios_generated(bios_gen);
+            purge_psx_bios_generated(psx_bios_gen_dir(codegen_cache_dir(paths, title)));
+            force_bios = true;
+        }
+    }
 
     bool skip_generate = false;
     std::string reuse_note;
@@ -4279,7 +4386,7 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
                 gen_args.push_back("--bios");
                 gen_args.push_back(opts.bios_path.string());
             }
-            if (opts.force_bios) gen_args.push_back("--force-bios");
+            if (force_bios) gen_args.push_back("--force-bios");
         } else if (engine == "gbarecomp") {
             const std::string cfg =
                 title.build.generate.config.empty()
@@ -4397,6 +4504,7 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
                              src.root.string();
             return result;
         }
+        write_psx_bios_stamp(psx_bios_gen_dir(src.root), bios_emitter_sig);
         std::string cache_note;
         save_codegen_cache(paths, title, engine, src.root, codegen_want, &cache_note);
         if (!cache_note.empty())

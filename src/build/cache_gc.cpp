@@ -1,5 +1,7 @@
 #include "retcomm/cache_gc.hpp"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <chrono>
 #include <cctype>
@@ -25,6 +27,7 @@ namespace retcomm {
 namespace {
 
 using clock = std::chrono::system_clock;
+using nlohmann::json;
 
 int version_cmp_tag(std::string a, std::string b) {
     auto strip_v = [](std::string& s) {
@@ -171,8 +174,39 @@ std::set<std::string> referenced_engine_keys(const Paths& paths, const AppConfig
     return out;
 }
 
+// Pack versions an installed title still needs. Titles pin an SDK tag (a title
+// on v0.1.3 is not served by v0.3.27), so "keep the newest N" alone prunes packs
+// that are in use and forces a re-harvest — or an unbuildable title when the
+// release zip it was harvested from is gone too.
+std::set<std::string> referenced_sdk_tags(const Paths& paths, const AppConfig& cfg) {
+    std::set<std::string> out;
+    std::error_code ec;
+    for (const auto& root : scan_install_roots(cfg, paths)) {
+        if (root.path.empty() || !fs::is_directory(root.path, ec)) continue;
+        for (auto it = fs::directory_iterator(root.path, ec); !ec && it != fs::directory_iterator();
+             it.increment(ec)) {
+            if (!it->is_directory(ec)) continue;
+            const fs::path stamps[] = {it->path() / "src" / "current" / ".retcomm-codegen.json",
+                                       it->path() / "codegen-cache" / ".retcomm-codegen.json"};
+            for (const fs::path& stamp : stamps) {
+                std::error_code sec;
+                if (!fs::is_regular_file(stamp, sec)) continue;
+                try {
+                    std::ifstream in(stamp);
+                    const json j = json::parse(in);
+                    const std::string tag = j.value("sdk_tag", "");
+                    if (!tag.empty()) out.insert(tag);
+                } catch (...) {
+                }
+            }
+        }
+    }
+    return out;
+}
+
 void gc_versioned_pack_dir(const fs::path& pack_base, int keep_n, const char* kind,
-                           CacheGcResult& r, std::size_t* counter) {
+                           CacheGcResult& r, std::size_t* counter,
+                           const std::set<std::string>* pinned = nullptr) {
     std::error_code ec;
     if (keep_n < 1) keep_n = 1;
     if (!fs::is_directory(pack_base, ec)) return;
@@ -198,7 +232,9 @@ void gc_versioned_pack_dir(const fs::path& pack_base, int keep_n, const char* ki
     });
 
     std::set<fs::path> keep;
-    for (int i = 0; i < keep_n && !versions.empty(); ++i) {
+    /* keep_n may exceed what is cached — index from the end only while there is
+     * an element left, or size() - 1 - i wraps and reads past the vector. */
+    for (int i = 0; i < keep_n && static_cast<size_t>(i) < versions.size(); ++i) {
         keep.insert(versions[versions.size() - 1 - static_cast<size_t>(i)]);
     }
     if (!latest_target.empty()) {
@@ -213,13 +249,16 @@ void gc_versioned_pack_dir(const fs::path& pack_base, int keep_n, const char* ki
 
     for (const auto& v : versions) {
         if (keep.count(v)) continue;
+        if (pinned && pinned->count(v.filename().string())) continue;
         if (remove_path_accounting(v, r, kind)) ++(*counter);
     }
 }
 
 void gc_toolchains_and_sdks(const Paths& paths, const AppConfig& cfg, CacheGcResult& r) {
     std::error_code ec;
-    auto walk = [&](const fs::path& base, int keep_n, const char* kind, std::size_t* counter) {
+    const std::set<std::string> sdk_pinned = referenced_sdk_tags(paths, cfg);
+    auto walk = [&](const fs::path& base, int keep_n, const char* kind, std::size_t* counter,
+                    const std::set<std::string>* pinned) {
         if (!fs::is_directory(base, ec)) return;
         for (auto it = fs::directory_iterator(base, ec); !ec && it != fs::directory_iterator();
              it.increment(ec)) {
@@ -227,11 +266,12 @@ void gc_toolchains_and_sdks(const Paths& paths, const AppConfig& cfg, CacheGcRes
             const auto name = it->path().filename().string();
             if (name.empty() || name[0] == '.') continue;
             // python-standalone is small; still GC old tags the same way.
-            gc_versioned_pack_dir(it->path(), keep_n, kind, r, counter);
+            gc_versioned_pack_dir(it->path(), keep_n, kind, r, counter, pinned);
         }
     };
-    walk(paths.toolchains_dir, cfg.keep_toolchain_versions, "toolchain", &r.removed_toolchains);
-    walk(paths.sdks_dir, cfg.keep_sdk_versions, "sdk", &r.removed_sdks);
+    walk(paths.toolchains_dir, cfg.keep_toolchain_versions, "toolchain", &r.removed_toolchains,
+         nullptr);
+    walk(paths.sdks_dir, cfg.keep_sdk_versions, "sdk", &r.removed_sdks, &sdk_pinned);
 }
 
 void gc_engines(const Paths& paths, const AppConfig& cfg, CacheGcResult& r) {
