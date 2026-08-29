@@ -1012,7 +1012,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     LaunchOptions opts;
                     opts.mode = LaunchMode::Default;
                     opts.detach = true;
-                    opts.rom_path = library.preferred_rom(title_id);
+                    opts.rom_path = boot_disc_rom(library, *t);
                     {
                         auto ensured =
                             ensure_canonical_save(paths, cfg, *t, opts.rom_path, true);
@@ -1256,7 +1256,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     }
                 }
                 BuildOptions bopts;
-                bopts.rom_path = library.preferred_rom(title_id);
+                bopts.rom_path = boot_disc_rom(library, *t);
                 bopts.apps_dir = opts.apps_dir;
                 // Reinstall (partial / NEEDS SETUP): clear apps/<title> first. Mid-setup
                 // crashes leave leftovers that a plain Install can refuse to overwrite.
@@ -1337,7 +1337,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     }
                 }
                 BuildOptions bopts;
-                bopts.rom_path = library.preferred_rom(title_id);
+                bopts.rom_path = boot_disc_rom(library, *t);
                 bopts.apps_dir = iopts.apps_dir;
                 app_state = load_app_state(paths.state_path);
                 apply_bios_choice_to_build(*t, bios, app_state, bopts);
@@ -1388,7 +1388,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 bopts.force = true;
                 bopts.force_generate = true;
                 bopts.force_bios = true; // regenerate SCPH1001 + OpenBIOS backends
-                bopts.rom_path = library.preferred_rom(title_id);
+                bopts.rom_path = boot_disc_rom(library, *t);
                 if (bopts.rom_path.empty()) {
                     append_log("Reinstall w BIOS needs a matched .cue in the library");
                     set_status("Reinstall w BIOS failed: no disc");

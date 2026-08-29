@@ -10,6 +10,21 @@ namespace retcomm {
 
 namespace fs = std::filesystem;
 
+// One disc of a multi-disc set. Each disc of a PS1 set is a separate dump with
+// its own serial and Track 01 digests, so identity cannot be a single bag.
+struct DiscIdentity {
+    int index = 0; // 1-based; index 1 is the boot disc `generate` must receive
+    std::string serial;
+    std::string cue_name;
+    std::string bin_name;
+    std::vector<std::string> crc32;
+    std::vector<std::string> md5;
+    std::vector<std::string> sha1;
+    std::vector<std::string> sha256;
+    std::vector<std::uint64_t> sizes;
+    std::vector<int> track_counts;
+};
+
 struct RomIdentity {
     // All digest fields are optional lists — authors may publish any subset
     // (recomp gates commonly use crc32, md5, and/or sha1). Empty arrays are
@@ -30,6 +45,20 @@ struct RomIdentity {
     std::vector<int> track_counts;
     // Prefer/require a .cue bind (set for multi-track titles).
     bool require_cue = false;
+    // Multi-disc sets (2+ entries, ordered by index). Every disc listed is
+    // required to own the title. The flat lists above stay a disc-1-first union
+    // so older code paths keep working; anything that must distinguish discs
+    // reads this instead. Empty for single-disc titles.
+    std::vector<DiscIdentity> discs;
+
+    bool is_multi_disc() const { return discs.size() >= 2; }
+    // Disc that boots the game (index 1), or nullptr when not multi-disc.
+    const DiscIdentity* boot_disc() const {
+        for (const auto& d : discs) {
+            if (d.index == 1) return &d;
+        }
+        return discs.empty() ? nullptr : &discs.front();
+    }
 };
 
 // Host firmware / BIOS required by some titles (e.g. psxrecomp SCPH1001).

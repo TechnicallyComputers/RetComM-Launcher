@@ -830,6 +830,34 @@ void rebuild_title_binds(LibraryIndex& index) {
 
 } // namespace
 
+fs::path boot_disc_rom(const LibraryIndex& index, const Title& title) {
+    const fs::path fallback = index.preferred_rom(title.id);
+    const DiscIdentity* boot = title.rom_identity.boot_disc();
+    if (!title.rom_identity.is_multi_disc() || !boot) return fallback;
+
+    // Pick the indexed dump carrying the boot disc's own digests. Relying on
+    // preferred_rom here only worked when "Disc 1" happened to sort first;
+    // generate must get the disc whose EXE the recompiler was built against.
+    auto has = [](const std::vector<std::string>& want, const std::string& got) {
+        if (want.empty() || got.empty()) return false;
+        return std::find(want.begin(), want.end(), got) != want.end();
+    };
+    for (const auto& f : index.files) {
+        if (f.title_id != title.id) continue;
+        if (!has(boot->crc32, f.crc32) && !has(boot->md5, f.md5) &&
+            !has(boot->sha1, f.sha1) && !has(boot->sha256, f.sha256))
+            continue;
+        // Disc titles launch/generate from the cue when one sits beside the dump.
+        const fs::path cue = companion_cue_path(f.path);
+        if (!cue.empty()) {
+            const std::string cue_norm = norm_path(cue);
+            if (index.find_path(cue_norm)) return fs::path(cue_norm);
+        }
+        return fs::path(f.path);
+    }
+    return fallback;
+}
+
 std::size_t rematch_library_titles(LibraryIndex& index, const Catalog& catalog) {
     // Pure re-bind against digests already in the index — no disk I/O, no
     // hashing. Catches catalog titles added after the last scan whose ROM the

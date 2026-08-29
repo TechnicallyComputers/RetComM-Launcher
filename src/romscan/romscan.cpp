@@ -88,8 +88,32 @@ std::uint64_t snes_hash_skip(const std::string& platform, std::uint64_t size) {
     return 0;
 }
 
+// True when any scanned file on this platform carries one of `d`'s digests.
+bool disc_identity_matched(const DiscIdentity& d, const std::string& platform,
+                           const ScanResult& result) {
+    for (const auto& rf : result.files) {
+        if (rf.platform != platform) continue;
+        if (!d.crc32.empty() && !rf.crc32.empty() && list_has(d.crc32, rf.crc32)) return true;
+        if (!d.md5.empty() && !rf.md5.empty() && list_has(d.md5, rf.md5)) return true;
+        if (!d.sha1.empty() && !rf.sha1.empty() && list_has(d.sha1, rf.sha1)) return true;
+        if (!d.sha256.empty() && !rf.sha256.empty() && list_has(d.sha256, rf.sha256))
+            return true;
+    }
+    return false;
+}
+
+// A single-disc title is satisfied by any one matching dump. A multi-disc set
+// needs EVERY disc: treating one hit as "done" made the hash loop stop early
+// and leave the other discs unhashed, so the boot disc could be missed entirely
+// and `generate` was handed whichever disc happened to be hashed first.
 bool title_identity_matched(const Title& t, const std::string& platform,
                             const ScanResult& result) {
+    if (t.rom_identity.is_multi_disc()) {
+        for (const auto& d : t.rom_identity.discs) {
+            if (!disc_identity_matched(d, platform, result)) return false;
+        }
+        return true;
+    }
     for (const auto& rf : result.files) {
         if (rf.platform != platform) continue;
         if (!t.rom_identity.crc32.empty() && !rf.crc32.empty() &&
@@ -125,6 +149,18 @@ bool size_eligible_for_unmatched(const PlatformNeed& need, const std::string& pl
     for (const Title* t : need.identity_titles) {
         if (title_identity_matched(*t, platform, result)) continue;
         if (full_rescan) return true;
+        // Multi-disc: only the discs still missing justify hashing, otherwise a
+        // partly-found set keeps re-admitting sizes it already has.
+        if (t->rom_identity.is_multi_disc()) {
+            for (const auto& d : t->rom_identity.discs) {
+                if (disc_identity_matched(d, platform, result)) continue;
+                if (d.sizes.empty()) return true;
+                for (auto sz : d.sizes) {
+                    if (sz == size) return true;
+                }
+            }
+            continue;
+        }
         // Empty sizes[] = no size gate (typical carts): any candidate may match.
         // Non-empty sizes[] = only those byte lengths can identify the title.
         if (t->rom_identity.sizes.empty()) return true;

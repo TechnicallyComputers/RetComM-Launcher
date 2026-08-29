@@ -101,6 +101,12 @@ int count_cue_tracks(const fs::path& cue_path);
 // Resolves companion .cue for .bin/.iso dumps. True when policy is empty or met.
 bool rom_identity_toc_ok(const RomIdentity& id, const fs::path& matched_path);
 
+// ROM path that boots the title. For a multi-disc set this is the disc whose
+// digests match rom_identity.discs[index==1] — the disc `generate` must be given,
+// since the recompiler is built against that disc's boot EXE. Falls back to
+// preferred_rom for single-disc titles or when the boot disc is not indexed.
+fs::path boot_disc_rom(const LibraryIndex& index, const Title& title);
+
 // Re-bind catalog titles against digests already stored in the index. No disk
 // I/O and no hashing — this only rescues titles the catalog gained since the
 // last scan whose ROM was already hashed. Returns files newly bound.

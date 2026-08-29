@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "retcomm/catalog.hpp"
 #include "retcomm/hash.hpp"
 #include "retcomm/paths.hpp"
@@ -91,6 +92,43 @@ Title parse_title(const json& j) {
                     if (n >= 1) t.rom_identity.track_counts.push_back(n);
                 }
             }
+        }
+        // Per-disc identity for multi-disc sets. Ignored when fewer than two
+        // entries — a lone disc is just the flat identity written the long way.
+        if (id.contains("discs") && id.at("discs").is_array()) {
+            for (const auto& dj : id.at("discs")) {
+                if (!dj.is_object()) continue;
+                DiscIdentity d;
+                d.index = dj.value("index", 0);
+                d.serial = dj.value("serial", "");
+                d.cue_name = dj.value("cue_name", "");
+                d.bin_name = dj.value("bin_name", "");
+                for (auto& c : string_array(dj, "crc32")) d.crc32.push_back(to_lower_hex(c));
+                for (auto& c : string_array(dj, "md5")) d.md5.push_back(to_lower_hex(c));
+                for (auto& c : string_array(dj, "sha1")) d.sha1.push_back(to_lower_hex(c));
+                for (auto& c : string_array(dj, "sha256")) d.sha256.push_back(to_lower_hex(c));
+                if (dj.contains("sizes") && dj.at("sizes").is_array()) {
+                    for (const auto& v : dj.at("sizes")) {
+                        if (v.is_number_unsigned() || v.is_number_integer())
+                            d.sizes.push_back(v.get<std::uint64_t>());
+                    }
+                }
+                if (dj.contains("track_counts") && dj.at("track_counts").is_array()) {
+                    for (const auto& v : dj.at("track_counts")) {
+                        if (v.is_number_unsigned() || v.is_number_integer()) {
+                            const int n = v.get<int>();
+                            if (n >= 1) d.track_counts.push_back(n);
+                        }
+                    }
+                }
+                if (d.index <= 0) d.index = static_cast<int>(t.rom_identity.discs.size()) + 1;
+                t.rom_identity.discs.push_back(std::move(d));
+            }
+            std::sort(t.rom_identity.discs.begin(), t.rom_identity.discs.end(),
+                      [](const DiscIdentity& a, const DiscIdentity& b) {
+                          return a.index < b.index;
+                      });
+            if (t.rom_identity.discs.size() < 2) t.rom_identity.discs.clear();
         }
         t.rom_identity.require_cue = id.value("require_cue", false);
         if (!t.rom_identity.require_cue) {

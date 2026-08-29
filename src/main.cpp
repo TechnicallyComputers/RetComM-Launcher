@@ -660,7 +660,7 @@ int cmd_build(const retcomm::Paths& paths, const retcomm::Catalog& cat, const st
     bopts.rom_path = rom_override;
     if (bopts.rom_path.empty()) {
         const auto idx = retcomm::load_library_index(paths.library_index_path);
-        bopts.rom_path = idx.preferred_rom(id);
+        bopts.rom_path = retcomm::boot_disc_rom(idx, *t);
     }
     {
         const auto st = retcomm::load_app_state(paths.state_path);
@@ -744,7 +744,7 @@ int cmd_launch(const retcomm::Paths& paths, const retcomm::Catalog& cat,
     std::string save_source;
     if (opts.rom_path.empty()) {
         auto idx = retcomm::load_library_index(paths.library_index_path);
-        opts.rom_path = idx.preferred_rom(id);
+        opts.rom_path = retcomm::boot_disc_rom(idx, *t);
         if (!opts.rom_path.empty()) rom_source = "library-index";
     } else {
         rom_source = "--rom";
