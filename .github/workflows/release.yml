@@ -172,6 +172,7 @@ jobs:
           name: linux-x86_64
           path: |
             dist/RetComM-Launcher-linux-x86_64.AppImage
+          retention-days: 5
 
   windows:
     needs: version
@@ -332,6 +333,7 @@ jobs:
           path: |
             dist/RetComM-Launcher-portable-windows.zip
             dist/RetComM-Launcher-windows-x64-setup.exe
+          retention-days: 5
 
   macos:
     needs: version
@@ -401,6 +403,7 @@ jobs:
           name: macos-${{ matrix.arch }}
           path: |
             dist/RetComM-Launcher-macos-${{ matrix.arch }}.dmg
+          retention-days: 5
 
   publish:
     needs: [version, linux, windows, macos]
