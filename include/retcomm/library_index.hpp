@@ -101,6 +101,17 @@ int count_cue_tracks(const fs::path& cue_path);
 // Resolves companion .cue for .bin/.iso dumps. True when policy is empty or met.
 bool rom_identity_toc_ok(const RomIdentity& id, const fs::path& matched_path);
 
+// Re-bind catalog titles against digests already stored in the index. No disk
+// I/O and no hashing — this only rescues titles the catalog gained since the
+// last scan whose ROM was already hashed. Returns files newly bound.
+std::size_t rematch_library_titles(LibraryIndex& index, const Catalog& catalog);
+
+// Catalog titles that have a rom_identity but no binding in the index. Fills
+// the distinct platforms (for a scoped rescan) and, optionally, the title ids.
+std::size_t catalog_titles_without_rom(const LibraryIndex& index, const Catalog& catalog,
+                                       std::vector<std::string>* platforms_out = nullptr,
+                                       std::vector<std::string>* title_ids_out = nullptr);
+
 std::int64_t file_mtime_sec(const fs::path& path);
 
 } // namespace retcomm

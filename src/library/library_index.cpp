@@ -751,6 +751,130 @@ void merge_scan_into_index(LibraryIndex& index, const Catalog& catalog,
               });
 }
 
+namespace {
+
+// Rebuild index.titles purely from the title_id already stamped on each file.
+// merge_library_scan_into_index has a richer version that also seeds from
+// scan.matches; this one is for callers with no scan in hand (rematch).
+void rebuild_title_binds(LibraryIndex& index) {
+    std::unordered_map<std::string, LibraryTitleBind> binds;
+    auto add_path = [](LibraryTitleBind& b, const std::string& path) {
+        if (path.empty()) return;
+        if (std::find(b.paths.begin(), b.paths.end(), path) == b.paths.end())
+            b.paths.push_back(path);
+    };
+
+    // Companion .cue sheets are unbound by hash — inherit from the dump.
+    for (size_t i = 0, n = index.files.size(); i < n; ++i) {
+        const LibraryFile f = index.files[i];
+        if (f.title_id.empty()) continue;
+        const std::string ext = f.ext.empty() ? lower_ext_str(f.path) : f.ext;
+        if (!is_disc_dump_ext(ext)) continue;
+        const fs::path cue = companion_cue_path(f.path);
+        if (cue.empty()) continue;
+        const std::string cue_norm = norm_path(cue);
+        LibraryFile* existing = index.find_path_mut(cue_norm);
+        if (existing) {
+            if (existing->title_id.empty()) {
+                existing->title_id = f.title_id;
+                existing->matched_by = "companion-cue";
+            }
+            continue;
+        }
+        std::error_code ec;
+        LibraryFile cf;
+        cf.path = cue_norm;
+        cf.platform = f.platform;
+        cf.ext = ".cue";
+        const auto size = fs::file_size(cue, ec);
+        cf.size = ec ? 0 : size;
+        cf.mtime_sec = file_mtime_sec(cue);
+        cf.title_id = f.title_id;
+        cf.matched_by = "companion-cue";
+        index.by_path[cue_norm] = index.files.size();
+        index.files.push_back(std::move(cf));
+    }
+    index.rebuild_path_map();
+
+    for (const auto& f : index.files) {
+        if (f.title_id.empty()) continue;
+        auto& b = binds[f.title_id];
+        b.title_id = f.title_id;
+        add_path(b, f.path);
+    }
+    for (auto& [id, b] : binds) {
+        std::sort(b.paths.begin(), b.paths.end(),
+                  [](const std::string& a, const std::string& bpath) {
+                      auto ext_of = [](const std::string& p) {
+                          auto pos = p.find_last_of('.');
+                          if (pos == std::string::npos) return std::string{};
+                          std::string e = p.substr(pos);
+                          for (char& c : e)
+                              c = char(std::tolower(static_cast<unsigned char>(c)));
+                          return e;
+                      };
+                      const int ra = rom_path_rank(ext_of(a));
+                      const int rb = rom_path_rank(ext_of(bpath));
+                      if (ra != rb) return ra < rb;
+                      return a < bpath;
+                  });
+        if (!b.paths.empty()) b.preferred_path = b.paths.front();
+    }
+    index.titles.clear();
+    for (auto& [id, b] : binds) index.titles.push_back(std::move(b));
+    std::sort(index.titles.begin(), index.titles.end(),
+              [](const LibraryTitleBind& a, const LibraryTitleBind& b) {
+                  return a.title_id < b.title_id;
+              });
+}
+
+} // namespace
+
+std::size_t rematch_library_titles(LibraryIndex& index, const Catalog& catalog) {
+    // Pure re-bind against digests already in the index — no disk I/O, no
+    // hashing. Catches catalog titles added after the last scan whose ROM the
+    // user already had indexed. Files the index never hashed with the digest a
+    // new title uses still need a scan; that is the caller's second step.
+    std::size_t bound = 0;
+    for (const auto& t : catalog.titles) {
+        if (!t.has_rom_identity()) continue;
+        for (auto& f : index.files) {
+            if (!f.title_id.empty()) continue; // already bound to some title
+            if (f.crc32.empty() && f.md5.empty() && f.sha1.empty() && f.sha256.empty())
+                continue; // never hashed — a scan has to reach this one
+            std::string by;
+            if (!digest_matches_identity(t.rom_identity, f.crc32, f.md5, f.sha1, f.sha256, &by))
+                continue;
+            if (!rom_identity_toc_ok(t.rom_identity, f.path)) continue;
+            f.title_id = t.id;
+            f.matched_by = by;
+            ++bound;
+        }
+    }
+    if (bound) rebuild_title_binds(index);
+    return bound;
+}
+
+std::size_t catalog_titles_without_rom(const LibraryIndex& index, const Catalog& catalog,
+                                       std::vector<std::string>* platforms_out,
+                                       std::vector<std::string>* title_ids_out) {
+    std::unordered_set<std::string> bound;
+    for (const auto& b : index.titles) bound.insert(b.title_id);
+    std::vector<std::string> plats;
+    std::size_t n = 0;
+    for (const auto& t : catalog.titles) {
+        if (!t.has_rom_identity()) continue;
+        if (bound.count(t.id)) continue;
+        ++n;
+        if (title_ids_out) title_ids_out->push_back(t.id);
+        if (!t.platform.empty() &&
+            std::find(plats.begin(), plats.end(), t.platform) == plats.end())
+            plats.push_back(t.platform);
+    }
+    if (platforms_out) *platforms_out = std::move(plats);
+    return n;
+}
+
 BindDownloadResult bind_downloaded_rom_to_index(LibraryIndex& index, const Title& title,
                                                 const fs::path& saved_path,
                                                 const fs::path& library_root) {

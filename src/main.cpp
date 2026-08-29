@@ -826,6 +826,29 @@ int cmd_catalog_update(const retcomm::Paths& paths, const retcomm::AppConfig& cf
         if (!result.synced_at.empty()) std::cout << "  synced_at: " << result.synced_at << "\n";
         try {
             const auto cat = retcomm::load_catalog(paths.catalog_dir);
+            // Free rebind: catalog titles added since the last scan often match
+            // a ROM already hashed in the index. Costs no disk I/O. Files the
+            // index never hashed still need `retcomm scan`.
+            if (!result.skipped && cfg.auto_scan_after_catalog_update) {
+                auto idx = retcomm::load_library_index(paths.library_index_path);
+                const auto bound = retcomm::rematch_library_titles(idx, cat);
+                if (bound) {
+                    retcomm::save_library_index(paths.library_index_path, idx);
+                    std::cout << "  matched " << bound
+                              << " file(s) to new titles from cached hashes\n";
+                }
+                std::vector<std::string> plats;
+                const auto missing =
+                    retcomm::catalog_titles_without_rom(idx, cat, &plats);
+                if (missing) {
+                    std::cout << "  " << missing << " title(s) still unmatched";
+                    if (!plats.empty()) {
+                        std::cout << " — run: retcomm scan";
+                        for (const auto& pl : plats) std::cout << " --platform " << pl;
+                    }
+                    std::cout << "\n";
+                }
+            }
             const auto orphans = retcomm::list_orphan_installs(paths, cat);
             if (!orphans.empty()) {
                 std::cout << "  unlisted installs: " << orphans.size()

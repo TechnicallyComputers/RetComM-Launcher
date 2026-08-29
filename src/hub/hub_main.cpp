@@ -2823,6 +2823,17 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0, 8));
+    if (ImGui::Checkbox("Scan For New Games After A Catalog Update",
+                        &hub.settings.auto_scan_after_catalog_update))
+        hub.settings.dirty = true;
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextWrapped(
+        "When the catalog adds titles, RetComM binds them to ROMs you already have using "
+        "cached hashes, then scans only the affected platforms for anything still unmatched. "
+        "New games show up without pressing Add/Scan Files. Save to apply.");
+    ImGui::PopStyleColor();
+
+    ImGui::Dummy(ImVec2(0, 8));
     if (ImGui::Checkbox("Always Check For Updates Before Game Launch",
                         &hub.settings.check_updates_before_launch))
         hub.settings.dirty = true;
@@ -5924,6 +5935,9 @@ int main(int argc, char** argv) {
     }
     // After a real catalog download, pull covers for titles missing from cache.
     if (catalog_updated) hub.start_job(HubJob::FetchBoxart);
+    // …and bind any newly catalogued titles to ROMs the user already owns.
+    hub.pending_auto_scan_new_titles =
+        catalog_updated && hub.cfg.auto_scan_after_catalog_update;
     // Defer game + toolchain update checks until idle (after catalog boxart job).
     hub.pending_startup_update_check = hub.cfg.check_updates_on_startup;
 
@@ -5953,7 +5967,11 @@ int main(int argc, char** argv) {
         hub.apply_pending_folder_pick();
         hub.apply_pending_file_pick();
 
-        if (hub.pending_startup_update_check && !hub.job_running.load()) {
+        // Run before the update check so new games appear as early as possible.
+        if (hub.pending_auto_scan_new_titles && !hub.job_running.load()) {
+            hub.pending_auto_scan_new_titles = false;
+            hub.auto_scan_for_new_titles("Catalog update");
+        } else if (hub.pending_startup_update_check && !hub.job_running.load()) {
             hub.pending_startup_update_check = false;
             if (hub.cfg.check_updates_on_startup) hub.start_job(HubJob::CheckUpdates);
         }

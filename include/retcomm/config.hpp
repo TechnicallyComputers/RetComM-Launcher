@@ -58,6 +58,10 @@ struct AppConfig {
     bool filter_unsupported_titles = false;
     // On hub launch, run Check Updates (catalog → launcher → games → toolchain).
     bool check_updates_on_startup = true;
+    // After a catalog update introduces titles that have no ROM binding yet,
+    // re-bind them from cached hashes and then scan the affected platforms, so
+    // newly catalogued games appear without a manual Scan Files.
+    bool auto_scan_after_catalog_update = true;
     // When Play is pressed, query GitHub for that title and prompt if newer.
     bool check_updates_before_launch = true;
     // After a successful local generate+cmake, delete apps/<title>/src/current/build/

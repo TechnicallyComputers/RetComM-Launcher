@@ -277,6 +277,9 @@ AppConfig load_app_config(const fs::path& config_path) {
             cfg.filter_unsupported_titles = j.value("filter_unsupported_titles", false);
         if (j.contains("check_updates_on_startup"))
             cfg.check_updates_on_startup = j.value("check_updates_on_startup", true);
+        if (j.contains("auto_scan_after_catalog_update"))
+            cfg.auto_scan_after_catalog_update =
+                j.value("auto_scan_after_catalog_update", true);
         if (j.contains("check_updates_before_launch"))
             cfg.check_updates_before_launch = j.value("check_updates_before_launch", true);
         if (j.contains("auto_clean_build_dirs"))
@@ -373,6 +376,7 @@ bool save_app_config(const fs::path& config_path, const AppConfig& cfg, std::str
               {"prefer_local_boxart", cfg.prefer_local_boxart},
               {"filter_unsupported_titles", cfg.filter_unsupported_titles},
               {"check_updates_on_startup", cfg.check_updates_on_startup},
+              {"auto_scan_after_catalog_update", cfg.auto_scan_after_catalog_update},
               {"check_updates_before_launch", cfg.check_updates_before_launch},
               {"auto_clean_build_dirs", cfg.auto_clean_build_dirs},
               {"auto_gc_caches", cfg.auto_gc_caches},

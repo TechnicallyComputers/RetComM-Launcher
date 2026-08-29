@@ -315,6 +315,7 @@ struct SettingsDraft {
     bool prefer_local_boxart = false;
     bool filter_unsupported_titles = false;
     bool check_updates_on_startup = true;
+    bool auto_scan_after_catalog_update = true;
     bool check_updates_before_launch = true;
     char github_token[512]{}; // PAT for api.github.com (optional; env still wins)
     bool auto_clean_build_dirs = false;
@@ -440,6 +441,9 @@ struct HubModel {
     bool job_prefetch_catalog = false;
     // Library modal Advanced scope (empty = all catalog platforms).
     std::string scans_platform_filter;
+    // Multi-platform scope for the auto-scan that follows a catalog update.
+    // Only consulted when scans_platform_filter is empty.
+    std::vector<std::string> scans_platform_list;
     SettingsDraft settings;
     RommSettingsDraft romm_settings;
     PsxSettingsDraft psx_settings;
@@ -487,6 +491,9 @@ struct HubModel {
     std::atomic<bool> pending_deferred_cache_gc{false};
     // After idle: CheckUpdates (catalog → launcher → toolchain → games).
     bool pending_startup_update_check = false;
+    // Startup catalog auto-update brought new titles: bind/scan once idle, so
+    // the boxart job that also fires on update is not fighting for the worker.
+    bool pending_auto_scan_new_titles = false;
     // Brief top-of-window notice (import / scan results). Main thread times display.
     std::string toast_message; // guarded by mu
     std::atomic<bool> toast_pending{false};
@@ -557,6 +564,11 @@ struct HubModel {
     // check_updates: query GitHub latest tags for installed titles.
     // force_github_tags: ignore the release-tag TTL (manual Check for Updates).
     void refresh_rows(bool check_updates, bool force_github_tags = false);
+    // After the catalog gained titles: re-bind them from cached hashes (free),
+    // then queue a scan of the affected platforms for anything still unmatched.
+    // No-op when cfg.auto_scan_after_catalog_update is false. Returns true when
+    // a scan was queued.
+    bool auto_scan_for_new_titles(const char* reason);
     void append_log(const std::string& line);
     void append_log(const std::string& line, LogLevel level);
     void set_status(const std::string& s);

@@ -1518,6 +1518,9 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
             case HubJob::FullScanRoms: {
                 const bool full = (j == HubJob::FullScanRoms);
                 const std::string plat_filter = scans_platform_filter;
+                // Auto-scan after a catalog update can target several platforms.
+                const std::vector<std::string> plat_list = scans_platform_list;
+                scans_platform_list.clear();
                 const bool prefetch = job_prefetch_catalog;
                 job_prefetch_catalog = false;
                 bool catalog_downloaded = false;
@@ -1553,6 +1556,7 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 opts.full_rescan = full;
                 opts.index = full ? nullptr : &library;
                 if (!plat_filter.empty()) opts.platforms = {plat_filter};
+                else if (!plat_list.empty()) opts.platforms = plat_list;
                 opts.on_progress = [this, full](const ScanProgress& p) {
                     const char* label = full ? "Full rebuild" : "Scan new files";
                     if (p.phase == "walk") {
@@ -1814,6 +1818,10 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     if (catalog_downloaded) {
                         library = load_library_index(paths.library_index_path);
                         fetch_boxart_for_catalog(false);
+                        // Bind/scan for titles the catalog just added, once this
+                        // job (and its update prompts) are done.
+                        if (cfg.auto_scan_after_catalog_update)
+                            pending_auto_scan_new_titles = true;
                     }
                 }
                 bool launcher_upd = false;
@@ -2096,6 +2104,10 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                         orphan_prompt_pending.store(true);
                     }
                 }
+                // New titles can match ROMs the user already owns. Defer the
+                // bind/scan to the idle handler so it never races this job.
+                if (!cr.skipped && cfg.auto_scan_after_catalog_update)
+                    pending_auto_scan_new_titles = true;
                 break;
             }
             case HubJob::CleanupOrphans:
@@ -2643,6 +2655,7 @@ void HubModel::open_settings() {
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
     settings.check_updates_on_startup = cfg.check_updates_on_startup;
+    settings.auto_scan_after_catalog_update = cfg.auto_scan_after_catalog_update;
     settings.check_updates_before_launch = cfg.check_updates_before_launch;
     copy_buf(settings.github_token, sizeof(settings.github_token), cfg.github_token);
     settings.auto_clean_build_dirs = cfg.auto_clean_build_dirs;
@@ -2687,6 +2700,7 @@ void HubModel::open_setup() {
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
     settings.check_updates_on_startup = cfg.check_updates_on_startup;
+    settings.auto_scan_after_catalog_update = cfg.auto_scan_after_catalog_update;
     settings.check_updates_before_launch = cfg.check_updates_before_launch;
     copy_buf(settings.github_token, sizeof(settings.github_token), cfg.github_token);
     settings.auto_clean_build_dirs = cfg.auto_clean_build_dirs;
@@ -2731,6 +2745,41 @@ bool HubModel::complete_setup(std::string* error) {
     setup_step = 0;
     setup_confirm_create_roots = false;
     setup_missing_roots.clear();
+    return true;
+}
+
+bool HubModel::auto_scan_for_new_titles(const char* reason) {
+    if (!cfg.auto_scan_after_catalog_update) return false;
+    if (cfg.library_root.empty()) return false; // nothing to scan against yet
+
+    library = load_library_index(paths.library_index_path);
+
+    // Tier 1 — free. Re-bind against digests the index already holds.
+    const std::size_t bound = rematch_library_titles(library, catalog);
+    if (bound) {
+        std::string err;
+        if (!save_library_index(paths.library_index_path, library))
+            append_log("auto-scan: could not save library index");
+        append_log(std::string(reason) + ": matched " + std::to_string(bound) +
+                   " file(s) to new titles from cached hashes (no rescan)");
+    }
+
+    // Tier 2 — what is left needs bytes read off disk.
+    std::vector<std::string> platforms;
+    std::vector<std::string> unmatched;
+    const std::size_t missing =
+        catalog_titles_without_rom(library, catalog, &platforms, &unmatched);
+    if (missing == 0 || platforms.empty()) {
+        if (bound) refresh_rows(false);
+        return false;
+    }
+
+    append_log(std::string(reason) + ": " + std::to_string(missing) +
+               " catalog title(s) still unmatched — scanning " +
+               join_csv(platforms) + " for new files");
+    scans_platform_filter.clear();
+    scans_platform_list = platforms;
+    start_job(HubJob::ScanRoms);
     return true;
 }
 
@@ -3176,6 +3225,7 @@ bool HubModel::save_settings(std::string* error) {
     next.prefer_local_boxart = settings.prefer_local_boxart;
     next.filter_unsupported_titles = settings.filter_unsupported_titles;
     next.check_updates_on_startup = settings.check_updates_on_startup;
+    next.auto_scan_after_catalog_update = settings.auto_scan_after_catalog_update;
     next.check_updates_before_launch = settings.check_updates_before_launch;
     next.github_token = settings.github_token;
     next.auto_clean_build_dirs = settings.auto_clean_build_dirs;
@@ -3222,6 +3272,7 @@ bool HubModel::save_settings(std::string* error) {
     settings.prefer_local_boxart = cfg.prefer_local_boxart;
     settings.filter_unsupported_titles = cfg.filter_unsupported_titles;
     settings.check_updates_on_startup = cfg.check_updates_on_startup;
+    settings.auto_scan_after_catalog_update = cfg.auto_scan_after_catalog_update;
     settings.check_updates_before_launch = cfg.check_updates_before_launch;
     copy_buf(settings.github_token, sizeof(settings.github_token), cfg.github_token);
     settings.auto_clean_build_dirs = cfg.auto_clean_build_dirs;
