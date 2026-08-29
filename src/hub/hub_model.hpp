@@ -4,6 +4,7 @@
 #include "retcomm/bios_index.hpp"
 #include "retcomm/catalog.hpp"
 #include "retcomm/config.hpp"
+#include "retcomm/data_root_migrate.hpp"
 #include "retcomm/install.hpp"
 #include "retcomm/launch.hpp"
 #include "retcomm/library_index.hpp"
@@ -77,6 +78,8 @@ enum class HubJob : int {
     CleanupSharedCaches,
     // Purge every install root + managed saves_root + platform/game config prefs.
     DeleteAllAppsAndSaves,
+    // Move config+data to a user-chosen root, then relaunch (portable / 2nd drive).
+    MigrateDataRoot,
     // Wipe library/RomM config + indexes, clear setup marker, relaunch into wizard.
     HardResetLibrarySettings,
 };
@@ -367,6 +370,7 @@ enum class FolderPickTarget : int {
     SavesRoot,
     EmulationRoot, // Easy setup: parent of roms/bios/saves
     InstallRoot,   // Library Settings → add/edit game install location
+    DataRoot,      // Advanced setup / Settings: RetComM's own config+data folder
 };
 
 // First-run wizard path after the Easy / Advanced chooser.
@@ -414,8 +418,12 @@ struct HubModel {
     bool show_psx_settings = false; // global PlayStation Configure page
     bool show_setup = false; // first-time library/BIOS/RomM wizard
     SetupPath setup_path = SetupPath::Chooser;
-    // Advanced wizard: 0 = roots (+ optional RomM), 1 = platform folder mappings.
+    // Advanced wizard: 0 = RetComM data folder, 1 = library roots (+ optional
+    // RomM), 2 = platform folder mappings.
     int setup_step = 0;
+    // Step 0: where RetComM keeps config + data. Empty buffer = OS default.
+    bool setup_use_custom_data_root = false;
+    char setup_data_root[1024]{};
     // Easy setup: Emulation parent folder (…/roms, …/bios, …/saves derived from this).
     char setup_emulation_root[1024]{};
     // After Next on step 0: confirm creating missing roms/saves/bios roots.
@@ -507,6 +515,20 @@ struct HubModel {
     std::string folder_pick_path;
     bool folder_pick_busy = false;
     int folder_pick_install_index = -1; // InstallRoot row being browsed
+
+    // ---- RetComM data folder (portable / second-drive root) ----------------
+    // Change requested from Settings or wizard Finish; applied by
+    // HubJob::MigrateDataRoot, which relaunches on success.
+    bool show_data_root_dialog = false;
+    char data_root_input[1024]{};
+    RootMigrationMode data_root_mode = RootMigrationMode::Move;
+    RootMigrationPlan data_root_plan;      // recomputed when the input changes
+    bool data_root_plan_dirty = true;
+    std::string data_root_plan_path;       // input the plan was computed for
+    // Set when the wizard's Finish should migrate before completing setup.
+    // pending_data_root empty + pending_data_root_change true = back to default.
+    fs::path pending_data_root;
+    bool pending_data_root_change = false;
 
     // ---- per-title HD texture packs (Texture Packs modal) ------------------
     // Scanned on demand rather than in refresh_rows: the scan walks every pack
@@ -631,6 +653,13 @@ struct HubModel {
     bool finish_easy_setup(std::string* error = nullptr);
     // Continue / Skip: write install setup marker so the wizard does not reappear.
     bool complete_setup(std::string* error = nullptr);
+    // Recompute data_root_plan for data_root_input when it changed. Cheap except
+    // for the directory-size walk, so it only runs when the text actually moves.
+    void refresh_data_root_plan();
+    // Seed data_root_input / setup_use_custom_data_root from the live paths.
+    void seed_data_root_input();
+    // True when this install should persist its root beside the binary.
+    bool prefers_portable_root_marker() const;
     bool save_settings(std::string* error = nullptr);
     void add_platform_folder_row();
 

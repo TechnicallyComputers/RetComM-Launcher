@@ -1,5 +1,7 @@
 #pragma once
 
+#include "retcomm/data_root.hpp"
+
 #include <filesystem>
 #include <string>
 
@@ -8,9 +10,15 @@ namespace retcomm {
 namespace fs = std::filesystem;
 
 // XDG-style (and Windows-friendly) data/config roots for RetComM.
+//
+// A custom root (portable / another drive) replaces the two OS locations with
+// <root>/config and <root>/data; every member below keeps its relative shape,
+// so call sites never need to know which layout is in play. See data_root.hpp.
 struct Paths {
-    fs::path config_dir;          // ~/.config/retcomm
-    fs::path data_dir;            // ~/.local/share/retcomm
+    fs::path root;                // custom root, empty when using OS defaults
+    DataRootSource root_source = DataRootSource::Default;
+    fs::path config_dir;          // ~/.config/retcomm   | <root>/config
+    fs::path data_dir;            // ~/.local/share/retcomm | <root>/data
     fs::path apps_dir;            // data_dir/apps
     fs::path toolchains_dir;      // data_dir/toolchains/<id>/<tag>
     fs::path sdks_dir;            // data_dir/sdks/<id>/<tag>
@@ -23,7 +31,15 @@ struct Paths {
     fs::path catalog_dir;         // data_dir/catalog (remote catalog cache)
 };
 
-Paths default_paths();
+// `exe_dir` lets the portable marker beside the binary be found; pass the
+// directory of argv[0]. Omitting it skips that source (env + config pointer
+// still apply).
+Paths default_paths(const fs::path& exe_dir = {});
+// Build Paths for an explicit root, ignoring markers and env. Used by the
+// migration flow to describe the destination before committing to it.
+Paths paths_for_root(const fs::path& root, DataRootSource source = DataRootSource::ConfigPointer);
+// True when this process is not using the OS default locations.
+bool using_custom_root(const Paths& p);
 void ensure_dirs(const Paths& p);
 // Ensure config/data dirs; also create apps_dir when missing.
 void ensure_apps_dir(const Paths& p);

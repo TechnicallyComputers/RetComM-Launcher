@@ -791,8 +791,13 @@ for ($tries = 1; $tries -le 40; $tries++) {
   }
 }
 if (-not $ok) { Fail-And-Relaunch $Old }
-$ver = Join-Path $env:LOCALAPPDATA 'retcomm\portable\version.txt'
-Remove-Item -LiteralPath $ver -Force -ErrorAction SilentlyContinue
+# Drop the extract stamp so the new stub unpacks its payload. Clear both layouts:
+# beside the .exe (portable default) and the LOCALAPPDATA fallback.
+$vers = @(
+  (Join-Path (Split-Path -Parent $Dest) 'RetComM-Data\version.txt'),
+  (Join-Path $env:LOCALAPPDATA 'retcomm\portable\version.txt')
+)
+foreach ($v in $vers) { Remove-Item -LiteralPath $v -Force -ErrorAction SilentlyContinue }
 if (Test-Path -LiteralPath $Dest) { Start-Process -FilePath $Dest }
 exit 0
 )ps1";

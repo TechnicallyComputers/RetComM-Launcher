@@ -6,7 +6,16 @@
 // No args  → launch retcomm-hub.exe from the extracted runtime
 // cli …    → launch retcomm.exe with the remaining arguments
 //
-// Extract cache: %LOCALAPPDATA%\retcomm\portable\current\
+// Portable layout — everything lives beside the .exe:
+//   <exe_dir>\RetComM-Data\runtime\   extracted hub + CLI
+//   <exe_dir>\RetComM-Data\config\    config.json
+//   <exe_dir>\RetComM-Data\data\      apps, toolchains, engines, catalog, …
+// RETCOMM_HOME is exported to the child so it resolves the same folder.
+//
+// When the exe folder is not writable (Downloads with MotW, a network share, a
+// read-only stick) we fall back to %LOCALAPPDATA%\retcomm\portable\current\ for
+// the runtime and leave RETCOMM_HOME unset, so config+data stay at the historical
+// %LOCALAPPDATA%\retcomm and an existing portable user's library still resolves.
 // Unpack via System32\tar.exe, then PowerShell Expand-Archive as fallback.
 
 #ifndef NOMINMAX
@@ -62,6 +71,23 @@ fs::path exe_path() {
         cap *= 2;
         buf.assign(cap, L'\0');
     }
+}
+
+// Create the folder and prove we can write in it. Deciding this up front keeps
+// a read-only medium from failing halfway through extraction.
+bool dir_is_writable(const fs::path& dir) {
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    if (!fs::is_directory(dir, ec)) return false;
+    const fs::path probe = dir / L".retcomm-write-test";
+    {
+        std::ofstream out(probe, std::ios::binary | std::ios::trunc);
+        if (!out) return false;
+        out << "ok";
+        if (!out) return false;
+    }
+    fs::remove(probe, ec);
+    return true;
 }
 
 fs::path local_app_data() {
@@ -251,24 +277,29 @@ std::string json_escape(std::string s) {
     return out;
 }
 
-void write_channel(const fs::path& dir, const fs::path& portable_exe) {
+void write_channel(const fs::path& dir, const fs::path& portable_exe,
+                   const fs::path& data_root) {
     std::ofstream out(dir / "channel.json", std::ios::trunc);
     if (!out) return;
     out << "{\n"
         << "  \"schema_version\": 1,\n"
         << "  \"channel\": \"portable\",\n"
-        << "  \"portable_exe\": \"" << json_escape(narrow(portable_exe.wstring())) << "\"\n"
+        << "  \"portable_exe\": \"" << json_escape(narrow(portable_exe.wstring())) << "\",\n"
+        << "  \"data_root\": \"" << json_escape(narrow(data_root.wstring())) << "\"\n"
         << "}\n";
 }
 
 bool launch(const fs::path& binary, const std::wstring& args, const fs::path& portable_exe,
-            bool attach_console, std::wstring* err) {
+            const fs::path& data_root, bool attach_console, std::wstring* err) {
     std::wstring cmd = L"\"" + binary.wstring() + L"\"";
     if (!args.empty()) cmd += L" " + args;
 
     std::wstring channel = L"portable";
     SetEnvironmentVariableW(L"RETCOMM_INSTALL_CHANNEL", channel.c_str());
     SetEnvironmentVariableW(L"RETCOMM_PORTABLE_EXE", portable_exe.wstring().c_str());
+    // Hub and CLI resolve config+data under this root (see data_root.cpp).
+    if (!data_root.empty())
+        SetEnvironmentVariableW(L"RETCOMM_HOME", data_root.wstring().c_str());
 
     if (attach_console) AttachConsole(ATTACH_PARENT_PROCESS);
 
@@ -336,9 +367,26 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         return 1;
     }
 
-    const fs::path base = local_app_data() / L"retcomm" / L"portable";
-    const fs::path current = base / L"current";
+    // Prefer a self-contained folder beside the .exe; fall back to the historical
+    // LOCALAPPDATA cache when this medium is read-only.
+    fs::path base = self.parent_path() / L"RetComM-Data";
+    bool portable_base = dir_is_writable(base);
+    if (!portable_base) {
+        const fs::path fallback = local_app_data();
+        if (fallback.empty()) {
+            LocalFree(argv);
+            fail(L"Cannot write beside the executable, and %LOCALAPPDATA% is unset.");
+            return 1;
+        }
+        base = fallback / L"retcomm" / L"portable";
+    }
+    const fs::path current = base / (portable_base ? L"runtime" : L"current");
     const fs::path version_file = base / L"version.txt";
+    // Only the beside-the-exe layout redirects config+data. In the LOCALAPPDATA
+    // fallback we leave RETCOMM_HOME unset so the hub resolves its normal
+    // %LOCALAPPDATA%\retcomm default — which is where an existing portable
+    // user's library already lives.
+    const fs::path data_root = portable_base ? base : fs::path();
     const std::string want_ver = RETCOMM_VERSION;
 
     bool need_extract = true;
@@ -364,7 +412,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         out << want_ver << "\n";
     }
 
-    write_channel(current, self);
+    write_channel(current, self, data_root);
 
     const bool cli = argc >= 2 && _wcsicmp(argv[1], L"cli") == 0;
     std::wstring err;
@@ -377,7 +425,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             fail(L"retcomm.exe missing from portable runtime.");
             return 1;
         }
-        ok = launch(bin, join_args(2, argc, argv), self, true, &err);
+        ok = launch(bin, join_args(2, argc, argv), self, data_root, true, &err);
     } else {
         const fs::path hub = current / "retcomm-hub.exe";
         std::error_code ec;
@@ -386,7 +434,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
             fail(L"retcomm-hub.exe missing from portable runtime.");
             return 1;
         }
-        ok = launch(hub, join_args(1, argc, argv), self, false, &err);
+        ok = launch(hub, join_args(1, argc, argv), self, data_root, false, &err);
     }
 
     LocalFree(argv);

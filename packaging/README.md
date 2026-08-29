@@ -139,6 +139,14 @@ Self-update channels (detected via `channel.json` / env from the portable stub):
 - **installer** (primary) → downloads `RetComM-Launcher-windows-*-setup.exe`, silent Inno into the current install dir
 - **portable** → downloads `RetComM-Launcher-portable-windows.zip`, extracts the stub, replaces the desktop exe, re-extracts on next launch
 
+The portable stub keeps everything beside the `.exe` — `RetComM-Data\runtime\`
+for the unpacked hub/CLI and `RetComM-Data\{config,data}\` for the toolchain,
+engines, installs and caches — and exports `RETCOMM_HOME` so the children resolve
+the same folder. When the exe directory is not writable (a network share, a
+read-only stick, Downloads under Mark-of-the-Web) it falls back to the historical
+`%LOCALAPPDATA%\retcomm\portable\current\`. The update script clears the
+`version.txt` stamp in both layouts so the new stub always re-extracts.
+
 Apply scripts/logs (Windows PowerShell; Unicode-safe path args):
 `%LOCALAPPDATA%\retcomm\self-update\bin\apply_setup_update.ps1` /
 `apply_setup_update.log`, or `apply_portable_update.ps1` /

@@ -7,7 +7,7 @@ cache and refreshes it from there.
 
 | Source | Location |
 |---|---|
-| On-device cache | `~/.local/share/retcomm/catalog/` |
+| On-device cache | `~/.local/share/retcomm/catalog/` (or `<root>/data/catalog/` with a custom data root) |
 | Optional override | `--catalog DIR` or `$RETCOMM_CATALOG` |
 
 Refresh with `retcomm catalog update` / `--force`, or **Refresh catalog** in the

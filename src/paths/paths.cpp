@@ -1,5 +1,7 @@
 #include "retcomm/paths.hpp"
 
+#include "retcomm/data_root.hpp"
+
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -31,34 +33,9 @@ fs::path user_home_dir() {
 
 namespace {
 
-fs::path home_dir() {
-    fs::path h = user_home_dir();
-    if (h.empty()) throw std::runtime_error("cannot resolve home directory");
-    return h;
-}
-
-fs::path xdg_config_home() {
-    if (const char* p = std::getenv("XDG_CONFIG_HOME")) return fs::path(p);
-#if defined(_WIN32)
-    if (const char* p = std::getenv("APPDATA")) return fs::path(p);
-#endif
-    return home_dir() / ".config";
-}
-
-fs::path xdg_data_home() {
-    if (const char* p = std::getenv("XDG_DATA_HOME")) return fs::path(p);
-#if defined(_WIN32)
-    if (const char* p = std::getenv("LOCALAPPDATA")) return fs::path(p);
-#endif
-    return home_dir() / ".local" / "share";
-}
-
-} // namespace
-
-Paths default_paths() {
-    Paths p;
-    p.config_dir = xdg_config_home() / "retcomm";
-    p.data_dir = xdg_data_home() / "retcomm";
+// Fill every member that hangs off config_dir / data_dir. Both layouts (OS
+// default and custom root) share this, so a new derived path only lands here.
+void fill_derived(Paths& p) {
     p.apps_dir = p.data_dir / "apps";
     p.toolchains_dir = p.data_dir / "toolchains";
     p.sdks_dir = p.data_dir / "sdks";
@@ -69,6 +46,36 @@ Paths default_paths() {
     p.bios_index_path = p.data_dir / "bios-index.json";
     p.romm_rom_index_path = p.data_dir / "romm-rom-index.json";
     p.catalog_dir = p.data_dir / "catalog";
+}
+
+} // namespace
+
+Paths paths_for_root(const fs::path& root, DataRootSource source) {
+    Paths p;
+    p.root = root;
+    p.root_source = source;
+    p.config_dir = root / "config";
+    p.data_dir = root / "data";
+    fill_derived(p);
+    return p;
+}
+
+bool using_custom_root(const Paths& p) {
+    return p.root_source != DataRootSource::Default && !p.root.empty();
+}
+
+Paths default_paths(const fs::path& exe_dir) {
+    const DataRootInfo info = resolve_data_root(exe_dir);
+    if (info.source != DataRootSource::Default && !info.root.empty())
+        return paths_for_root(info.root, info.source);
+
+    Paths p;
+    // No override — the historical XDG / AppData layout, unchanged.
+    p.config_dir = default_os_config_dir();
+    p.data_dir = default_os_data_dir();
+    if (p.config_dir.empty() || p.data_dir.empty())
+        throw std::runtime_error("cannot resolve home directory");
+    fill_derived(p);
     return p;
 }
 

@@ -3,6 +3,10 @@
 Local generate + cmake installs need a toolchain pack plus game source. SDK
 tools may be a separate pack **or** embedded in the game release zip.
 
+Paths below assume the default data dir. A custom root (see
+`docs/ARCHITECTURE.md` → "Custom data root") relocates all of them to
+`<root>/data/…`; the `RETCOMM_*` overrides still win per-pack.
+
 | Pack | Cache | Override |
 |---|---|---|
 | Toolchain (`cmake-clang-v1`) | `~/.local/share/retcomm/toolchains/<id>/<tag>/` (Windows: `%LOCALAPPDATA%\retcomm\toolchains\…`) — shared with standalone setup wizards | `RETCOMM_TOOLCHAIN_DIR` |

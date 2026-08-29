@@ -95,6 +95,27 @@ fs::path find_hub_font_file(const char* filename) {
     return find_hub_asset_file("fonts", filename);
 }
 
+// Fill a fixed-size UI text buffer, always NUL-terminated.
+void copy_buf(char* dest, size_t dest_n, const std::string& src) {
+    if (!dest || dest_n == 0) return;
+    const size_t n = std::min(src.size(), dest_n - 1);
+    std::memcpy(dest, src.data(), n);
+    dest[n] = '\0';
+}
+
+std::string human_bytes(std::uintmax_t n) {
+    const char* unit[] = {"B", "KB", "MB", "GB", "TB"};
+    double v = static_cast<double>(n);
+    int i = 0;
+    while (v >= 1024.0 && i < 4) {
+        v /= 1024.0;
+        ++i;
+    }
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), (i == 0 ? "%.0f %s" : "%.1f %s"), v, unit[i]);
+    return buf;
+}
+
 // Catalog platform slug → human-readable label for library cards.
 const char* platform_display_name(const std::string& slug) {
     if (slug.empty()) return "Library";
@@ -2625,6 +2646,42 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
     ImGui::TextWrapped("Paths and platform folder names written to config.json.");
     ImGui::Separator();
 
+    // Where RetComM itself lives (toolchain, engines, installs, caches). Read-only
+    // here — changing it relocates the tree, so it goes through its own dialog.
+    {
+        const bool custom = retcomm::using_custom_root(hub.paths);
+        ImGui::TextColored(th.text_muted, "RetComM data folder");
+        ImGui::TextWrapped("%s", hub.paths.data_dir.string().c_str());
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped("Source: %s%s",
+                           retcomm::data_root_source_label(hub.paths.root_source),
+                           custom ? "" : " (toolchain, engines, installs and caches)");
+        ImGui::PopStyleColor();
+        if (ImGui::Button("Open folder##data_root")) {
+            std::string err;
+            if (!retcomm::open_path_in_file_manager(hub.paths.data_dir, &err))
+                hub.append_log("open data folder failed: " + err);
+        }
+        ImGui::SameLine();
+        // RETCOMM_HOME and --root are re-read on every launch, so a pointer we
+        // wrote here would be silently ignored. Say why instead of misleading.
+        const bool env_pinned = hub.paths.root_source == retcomm::DataRootSource::Env ||
+                                hub.paths.root_source == retcomm::DataRootSource::Explicit;
+        ImGui::BeginDisabled(env_pinned || hub.job_running.load());
+        if (ImGui::Button("Change…##data_root")) {
+            hub.seed_data_root_input();
+            hub.data_root_mode = retcomm::RootMigrationMode::Move;
+            hub.show_data_root_dialog = true;
+        }
+        ImGui::EndDisabled();
+        if (env_pinned && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("Pinned by %s for this launch — clear it to change the folder here.",
+                              retcomm::data_root_source_label(hub.paths.root_source));
+        ImGui::Dummy(ImVec2(0, 10));
+        ImGui::Separator();
+        ImGui::Dummy(ImVec2(0, 6));
+    }
+
     if (path_field_with_browse("ROM library root", "##library_root", hub.settings.library_root,
                                sizeof(hub.settings.library_root), hub, window,
                                FolderPickTarget::LibraryRoot, th))
@@ -3186,7 +3243,7 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
 
     auto advance_to_platform_step = [&]() {
         hub.seed_setup_platform_folders();
-        hub.setup_step = 1;
+        hub.setup_step = 2;
         hub.setup_confirm_create_roots = false;
     };
 
@@ -3255,6 +3312,8 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
                                  "and saves under it with default platform folders.",
                                  "setup_easy_rocket.png", card_w, card_h)) {
             hub.setup_path = SetupPath::Easy;
+            hub.pending_data_root.clear();
+            hub.pending_data_root_change = false;
             hub.apply_suggested_emulation_root(/*overwrite_nonempty=*/false);
             hub.apply_roots_from_emulation_parent();
         }
@@ -3265,6 +3324,7 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
                                  "setup_advanced_wrench.png", card_w, card_h)) {
             hub.setup_path = SetupPath::Advanced;
             hub.setup_step = 0;
+            hub.seed_data_root_input();
             hub.apply_suggested_library_roots(/*overwrite_nonempty=*/false);
         }
         ImGui::EndChild();
@@ -3332,13 +3392,109 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
             ImGui::TextColored(th.warn, "Choose an Emulation folder to continue.");
         }
     } else if (hub.setup_step == 0) {
+        // Step 1 of 3 — where RetComM keeps its own files. This has to come
+        // first: everything the later steps create lands under it.
+        hub.refresh_data_root_plan();
+        const bool custom = hub.setup_use_custom_data_root;
+        const bool root_ok = !custom || hub.data_root_plan.blocker.empty();
+        const float warn_h = root_ok ? 0.f : ImGui::GetTextLineHeightWithSpacing();
+        const float footer_h = footer_reserve(warn_h);
+        ImGui::BeginChild("##setup_dataroot_body", ImVec2(0.f, -footer_h), ImGuiChildFlags_None);
+        push_wrap();
+        ImGui::TextWrapped(
+            "Step 1 of 3 — Choose where RetComM stores its own files: the build toolchain, "
+            "engine sources, installed games, and caches. This can grow to tens of GB, so "
+            "put it on a drive with room. Your ROM, BIOS, and saves folders are set next "
+            "and can live anywhere.");
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 12));
+
+        bool changed = false;
+        if (ImGui::RadioButton("Use the default location", !custom)) {
+            hub.setup_use_custom_data_root = false;
+            changed = true;
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        push_wrap();
+        ImGui::TextWrapped("  %s", retcomm::default_os_data_dir().string().c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+
+        ImGui::Dummy(ImVec2(0, 8));
+        if (ImGui::RadioButton("Use a custom folder (portable / another drive)", custom)) {
+            hub.setup_use_custom_data_root = true;
+            if (hub.data_root_input[0] == '\0' && !hub.exe_dir.empty()) {
+                // Sensible portable default: a folder beside the launcher.
+                copy_buf(hub.data_root_input, sizeof(hub.data_root_input),
+                         (hub.exe_dir / "RetComM-Data").string());
+            }
+            changed = true;
+        }
+        if (changed) hub.data_root_plan_dirty = true;
+
+        ImGui::Dummy(ImVec2(0, 8));
+        ImGui::BeginDisabled(!custom);
+        if (path_field_with_browse("RetComM folder", "##setup_data_root", hub.data_root_input,
+                                   sizeof(hub.data_root_input), hub, window,
+                                   FolderPickTarget::DataRoot, th))
+            hub.data_root_plan_dirty = true;
+        ImGui::EndDisabled();
+
+        if (custom) {
+            const auto& plan = hub.data_root_plan;
+            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+            push_wrap();
+            if (plan.blocker.empty()) {
+                ImGui::TextWrapped("Will use:\n  %s\n  %s", plan.to_config.string().c_str(),
+                                   plan.to_data.string().c_str());
+                if (plan.existing_bytes > 0) {
+                    ImGui::Dummy(ImVec2(0, 4));
+                    ImGui::TextWrapped(
+                        "Existing RetComM data (%s) will be moved here when you finish.",
+                        human_bytes(plan.existing_bytes).c_str());
+                }
+            } else {
+                ImGui::TextWrapped("Pick a folder RetComM can create and write to.");
+            }
+            ImGui::PopTextWrapPos();
+            ImGui::PopStyleColor();
+            if (!plan.warning.empty()) {
+                push_wrap();
+                ImGui::TextColored(th.warn, "%s", plan.warning.c_str());
+                ImGui::PopTextWrapPos();
+            }
+        }
+        ImGui::EndChild();
+
+        pin_footer_row(warn_h);
+        if (ImGui::Button("Back", ImVec2(100, 0))) {
+            hub.setup_path = SetupPath::Chooser;
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!root_ok);
+        if (accent_button("Next", th, ImVec2(120, 0))) {
+            const fs::path chosen =
+                custom ? fs::path(hub.data_root_input).lexically_normal() : fs::path();
+            hub.pending_data_root = chosen;
+            hub.pending_data_root_change =
+                custom ? !(retcomm::using_custom_root(hub.paths) && hub.paths.root == chosen)
+                       : retcomm::using_custom_root(hub.paths);
+            hub.setup_step = 1;
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Skip for now", ImVec2(120, 0))) skip_setup();
+        if (!root_ok) {
+            ImGui::TextColored(th.warn, "%s", hub.data_root_plan.blocker.c_str());
+        }
+    } else if (hub.setup_step == 1) {
         const bool library_ok = hub.settings.library_root[0] != '\0';
         const float warn_h = library_ok ? 0.f : ImGui::GetTextLineHeightWithSpacing();
         const float footer_h = footer_reserve(warn_h);
         ImGui::BeginChild("##setup_adv0_body", ImVec2(0.f, -footer_h), ImGuiChildFlags_None);
         push_wrap();
         ImGui::TextWrapped(
-            "Step 1 of 2 — Set your ROM library, BIOS, and game-saves folders. Suggested "
+            "Step 2 of 3 — Set your ROM library, BIOS, and game-saves folders. Suggested "
             "paths use ~/Emulation/{roms,bios,saves}. Optionally connect RomM for library "
             "sync later.");
         ImGui::PopTextWrapPos();
@@ -3408,7 +3564,7 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
 
         pin_footer_row(warn_h);
         if (ImGui::Button("Back", ImVec2(100, 0))) {
-            hub.setup_path = SetupPath::Chooser;
+            hub.setup_step = 0;
             hub.setup_confirm_create_roots = false;
             hub.setup_missing_roots.clear();
         }
@@ -3438,7 +3594,7 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
         push_wrap();
         ImGui::PushStyleColor(ImGuiCol_Text, th.text);
         ImGui::TextWrapped(
-            "Step 2 of 2 - Assign platform folder mappings.  Platform name is on the left, "
+            "Step 3 of 3 - Assign platform folder mappings.  Platform name is on the left, "
             "and on the right is a list of folder names to search.  RetComM will create empty "
             "folders for any platforms that are missing from your library, to import new files "
             "you provide.");
@@ -3486,7 +3642,7 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
 
         pin_footer_row();
         if (ImGui::Button("Back", ImVec2(100, 0))) {
-            hub.setup_step = 0;
+            hub.setup_step = 1;
         }
         ImGui::SameLine();
         if (accent_button("Finish", th, ImVec2(120, 0))) {
@@ -3504,6 +3660,13 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
             } else if (!hub.complete_setup(&err)) {
                 hub.append_log("setup marker failed: " + err);
                 hub.set_status("Setup marker failed");
+            } else if (hub.pending_data_root_change) {
+                // Config, indexes and the setup marker are all written under the
+                // current root by now, so they travel with the move. The job
+                // relaunches; the scan prompt comes back on the next run.
+                hub.append_log("First-time setup saved");
+                hub.pending_data_root_change = false;
+                hub.start_job(HubJob::MigrateDataRoot);
             } else {
                 hub.set_status("Setup complete");
                 hub.append_log("First-time setup saved");
@@ -3512,6 +3675,93 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
         }
     }
 
+    ImGui::EndPopup();
+}
+
+// Change where RetComM keeps config + data. The move itself runs on the job
+// thread (HubJob::MigrateDataRoot) and ends in a relaunch.
+void draw_data_root_dialog(HubModel& hub, const Theme& th, SDL_Window* window) {
+    if (!hub.show_data_root_dialog) return;
+    ImGui::OpenPopup("RetComM data folder###data_root_dialog");
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(std::min(660.f, vp->WorkSize.x * 0.94f), 0),
+                             ImGuiCond_Always);
+    if (!ImGui::BeginPopupModal("RetComM data folder###data_root_dialog", nullptr,
+                                ImGuiWindowFlags_AlwaysAutoResize))
+        return;
+
+    hub.refresh_data_root_plan();
+    const auto& plan = hub.data_root_plan;
+    const bool to_default = hub.data_root_input[0] == '\0';
+
+    ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 620.f);
+    ImGui::TextWrapped(
+        "Moves the toolchain, engine sources, installed games, and caches. Your ROM, BIOS, "
+        "and saves folders are not affected.");
+    ImGui::PopTextWrapPos();
+    ImGui::Dummy(ImVec2(0, 8));
+    ImGui::TextColored(th.text_muted, "Current");
+    ImGui::TextWrapped("%s", hub.paths.data_dir.string().c_str());
+
+    ImGui::Dummy(ImVec2(0, 8));
+    if (path_field_with_browse("New folder", "##data_root_new", hub.data_root_input,
+                               sizeof(hub.data_root_input), hub, window,
+                               FolderPickTarget::DataRoot, th))
+        hub.data_root_plan_dirty = true;
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    if (retcomm::using_custom_root(hub.paths))
+        ImGui::TextWrapped("Leave empty to go back to the default (%s).",
+                           retcomm::default_os_data_dir().string().c_str());
+    else
+        ImGui::TextWrapped("Pick a folder on a drive with room — RetComM creates "
+                           "config/ and data/ inside it.");
+    ImGui::PopStyleColor();
+
+    ImGui::Dummy(ImVec2(0, 10));
+    if (!plan.blocker.empty()) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 620.f);
+        ImGui::TextColored(th.warn, "%s", plan.blocker.c_str());
+        ImGui::PopTextWrapPos();
+    } else {
+        ImGui::TextColored(th.text_muted, "New location");
+        ImGui::TextWrapped("%s", plan.to_data.string().c_str());
+        ImGui::Dummy(ImVec2(0, 8));
+        ImGui::TextColored(th.text_muted, "Existing data: %s",
+                           human_bytes(plan.existing_bytes).c_str());
+        ImGui::Dummy(ImVec2(0, 4));
+        int mode = static_cast<int>(hub.data_root_mode);
+        ImGui::RadioButton("Move existing data to the new folder", &mode, 0);
+        ImGui::RadioButton("Use data already at the new folder", &mode, 1);
+        ImGui::RadioButton("Start fresh (old folder left on disk)", &mode, 2);
+        hub.data_root_mode = static_cast<retcomm::RootMigrationMode>(mode);
+        if (!plan.warning.empty()) {
+            ImGui::Dummy(ImVec2(0, 6));
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 620.f);
+            ImGui::TextColored(th.warn, "%s", plan.warning.c_str());
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::Dummy(ImVec2(0, 6));
+        ImGui::TextColored(th.warn, "RetComM will restart.");
+    }
+
+    ImGui::Dummy(ImVec2(0, 12));
+    const bool busy = hub.job_running.load();
+    ImGui::BeginDisabled(!plan.blocker.empty() || busy);
+    if (accent_button("Continue", th, ImVec2(160, 0))) {
+        hub.pending_data_root = to_default ? fs::path()
+                                           : fs::path(hub.data_root_input).lexically_normal();
+        hub.show_data_root_dialog = false;
+        hub.start_job(HubJob::MigrateDataRoot);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+        hub.show_data_root_dialog = false;
+        ImGui::CloseCurrentPopup();
+    }
+    close_modal_on_outside_click();
     ImGui::EndPopup();
 }
 
@@ -5807,6 +6057,7 @@ int main(int argc, char** argv) {
         }
         draw_setup_wizard(hub, boxart, th, window);
         draw_setup_scan_prompt(hub, th);
+        draw_data_root_dialog(hub, th, window);
         draw_menu_popup(hub, th, window);
         draw_library_popup(hub, th, window);
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # AppImage entry — launch the hub UI (CLI is still on PATH as retcomm).
 # Title catalog is maintained under ~/.local/share/retcomm/catalog (fetched on use).
+# Set RETCOMM_HOME=/some/dir (or drop a retcomm-root.json beside the AppImage) to
+# keep config+data under that folder instead — useful when / is short on space.
 set -euo pipefail
 HERE="$(dirname "$(readlink -f "$0")")"
 # Hub font lookup and other relocatable paths use APPDIR. The type-2 runtime

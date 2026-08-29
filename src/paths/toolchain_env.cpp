@@ -470,6 +470,18 @@ bool publish_toolchain_user_env(const Paths& paths, const std::string& pack_id,
         return false;
     }
 
+    // A custom root means a portable / self-contained install: leave the host
+    // machine alone. The toolchains/<id>/latest link above still gets refreshed
+    // because builds resolve through it; only the login-PATH copy is skipped.
+    // Builds are unaffected either way — RETCOMM_TOOLCHAIN_DIR is passed to
+    // child processes explicitly (see build.cpp).
+    if (using_custom_root(paths)) {
+        if (message)
+            *message = "toolchain PATH: skipped (custom RetComM folder — no shell/registry "
+                       "changes); pack at " + publish_root.string();
+        return true;
+    }
+
 #if defined(_WIN32)
     publish_windows(publish_root, message);
 #else

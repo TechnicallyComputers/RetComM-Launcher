@@ -5,6 +5,8 @@
 #include "retcomm/catalog.hpp"
 #include "retcomm/catalog_sync.hpp"
 #include "retcomm/config.hpp"
+#include "retcomm/data_root.hpp"
+#include "retcomm/data_root_migrate.hpp"
 #include "retcomm/http.hpp"
 #include "retcomm/install.hpp"
 #include "retcomm/launch.hpp"
@@ -15,6 +17,14 @@
 #include "retcomm/romm_saves.hpp"
 #include "retcomm/romscan.hpp"
 
+#include <cstdio>
+#if defined(_WIN32)
+#include <io.h>
+#define RETCOMM_ISATTY_STDIN() (_isatty(_fileno(stdin)) != 0)
+#else
+#include <unistd.h>
+#define RETCOMM_ISATTY_STDIN() (isatty(fileno(stdin)) != 0)
+#endif
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
@@ -75,13 +85,18 @@ void print_help(const char* argv0) {
         << "      --dry-run                Print argv/cwd only\n"
         << "  romm                         Show RomM config / stub ping\n"
         << "  catalog update [--force]     Download/update remote catalog cache\n"
+        << "  root [show|set DIR|reset]    Show / move the RetComM config+data folder\n"
+        << "      --move|--use-existing|--fresh   How to treat data already present\n"
+        << "      --yes                           Skip the confirmation prompt\n"
         << "  help                         This message\n\n"
         << "ROM scan uses config library_root (platform folders only).\n"
         << "BIOS scan uses config bios_root (flat + per-system folders).\n"
         << "Game saves use config saves_root/<platform>/<title_id>/ when set (else install saves/).\n"
         << "--full ignores the hash cache and rebuilds the index from disk\n"
         << "(drops missing files; recomputes digests for everything scanned).\n"
-        << "Indexes: ~/.local/share/retcomm/library-index.json and bios-index.json.\n";
+        << "Indexes live under the data dir (see `retcomm status`).\n"
+        << "--root DIR / RETCOMM_HOME put config+data under DIR instead of the\n"
+        << "OS default (portable installs, or a second drive).\n";
 }
 
 fs::path exe_dir_from(const char* argv0) {
@@ -130,7 +145,13 @@ int cmd_status(const retcomm::Paths& paths, const retcomm::AppConfig& cfg,
     }
     auto idx = retcomm::load_library_index(paths.library_index_path);
     auto bios_idx = retcomm::load_bios_index(paths.bios_index_path);
-    std::cout << "config:  " << paths.config_path.string() << "\n"
+    std::cout << "root:    "
+              << (retcomm::using_custom_root(paths)
+                      ? paths.root.string() + " (" +
+                            retcomm::data_root_source_label(paths.root_source) + ")"
+                      : std::string("OS default"))
+              << "\n"
+              << "config:  " << paths.config_path.string() << "\n"
               << "data:    " << paths.data_dir.string() << "\n"
               << "apps:    " << paths.apps_dir.string() << "\n"
               << "index:   " << paths.library_index_path.string() << " ("
@@ -867,15 +888,164 @@ int cmd_romm(const retcomm::Paths& paths, const retcomm::AppConfig& cfg) {
     return 0;
 }
 
+
+std::string human_bytes(std::uintmax_t n) {
+    const char* unit[] = {"B", "KB", "MB", "GB", "TB"};
+    double v = static_cast<double>(n);
+    int i = 0;
+    while (v >= 1024.0 && i < 4) {
+        v /= 1024.0;
+        ++i;
+    }
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), (i == 0 ? "%.0f %s" : "%.1f %s"), v, unit[i]);
+    return buf;
+}
+
+void print_root_status(const retcomm::Paths& paths) {
+    std::cout << "root:   "
+              << (retcomm::using_custom_root(paths) ? paths.root.string()
+                                                    : std::string("(OS default)"))
+              << "\n"
+              << "source: " << retcomm::data_root_source_label(paths.root_source) << "\n"
+              << "config: " << paths.config_dir.string() << "\n"
+              << "data:   " << paths.data_dir.string() << "\n";
+}
+
+// A root change relocates the whole data tree, so make the destructive form ask
+// first when a human is driving. --yes (or a pipe) skips the prompt.
+bool confirm_root_change(const retcomm::RootMigrationPlan& plan, retcomm::RootMigrationMode mode,
+                         bool assume_yes) {
+    if (assume_yes) return true;
+    if (!RETCOMM_ISATTY_STDIN()) {
+        std::cerr << "refusing to change the RetComM folder non-interactively; pass --yes\n";
+        return false;
+    }
+    if (mode == retcomm::RootMigrationMode::Move && plan.existing_bytes > 0)
+        std::cout << "This MOVES " << human_bytes(plan.existing_bytes) << " from "
+                  << plan.from_data.string() << "\n";
+    std::cout << "Continue? [y/N] " << std::flush;
+    std::string line;
+    if (!std::getline(std::cin, line)) return false;
+    return line == "y" || line == "Y" || line == "yes";
+}
+
+int cmd_root(const retcomm::Paths& paths, const std::vector<std::string>& args,
+             const fs::path& exe_dir) {
+    bool assume_yes = false;
+    for (const auto& a : args) {
+        if (a == "--yes" || a == "-y") assume_yes = true;
+    }
+    if (args.size() < 2 || args[1] == "show") {
+        print_root_status(paths);
+        return 0;
+    }
+
+    const bool reset = args[1] == "reset";
+    if (!reset && args[1] != "set") {
+        std::cerr << "usage: retcomm root [show | set <dir> [--move|--use-existing|--fresh] "
+                     "| reset]\n";
+        return 2;
+    }
+
+    if (reset) {
+        if (!retcomm::using_custom_root(paths)) {
+            std::cout << "Already using the OS default location.\n";
+            return 0;
+        }
+        auto reset_mode = retcomm::RootMigrationMode::Move;
+        for (size_t i = 2; i < args.size(); ++i) {
+            if (args[i] == "--move") reset_mode = retcomm::RootMigrationMode::Move;
+            else if (args[i] == "--use-existing") reset_mode = retcomm::RootMigrationMode::UseExisting;
+            else if (args[i] == "--fresh") reset_mode = retcomm::RootMigrationMode::StartFresh;
+            else if (args[i] == "--yes" || args[i] == "-y") continue;
+            else {
+                std::cerr << "unexpected root reset arg: " << args[i] << "\n";
+                return 2;
+            }
+        }
+        const retcomm::RootMigrationPlan rplan = retcomm::plan_root_migration(paths, {});
+        if (!rplan.blocker.empty()) {
+            std::cerr << "cannot reset: " << rplan.blocker << "\n";
+            return 1;
+        }
+        std::cout << "from: " << rplan.from_data.string() << " ("
+                  << human_bytes(rplan.existing_bytes) << ")\n"
+                  << "to:   " << rplan.to_data.string() << "  (OS default)\n";
+        if (!confirm_root_change(rplan, reset_mode, assume_yes)) {
+            std::cout << "Cancelled.\n";
+            return 1;
+        }
+        const retcomm::RootMigrationResult res = retcomm::migrate_data_root(
+            paths, {}, reset_mode, exe_dir, /*prefer_exe_marker=*/false,
+            [](const std::string& m) { std::cout << "  " << m << "\n"; });
+        for (const auto& n : res.notes) std::cout << "note: " << n << "\n";
+        if (!res.ok) {
+            std::cerr << res.message << "\n";
+            return 1;
+        }
+        std::cout << res.message << "\n";
+        return 0;
+    }
+
+    if (args.size() < 3) {
+        std::cerr << "usage: retcomm root set <dir> [--move|--use-existing|--fresh]\n";
+        return 2;
+    }
+    const fs::path target = fs::absolute(args[2]).lexically_normal();
+    auto mode = retcomm::RootMigrationMode::Move;
+    bool mode_given = false;
+    for (size_t i = 3; i < args.size(); ++i) {
+        if (args[i] == "--move") { mode = retcomm::RootMigrationMode::Move; mode_given = true; }
+        else if (args[i] == "--use-existing") { mode = retcomm::RootMigrationMode::UseExisting; mode_given = true; }
+        else if (args[i] == "--fresh") { mode = retcomm::RootMigrationMode::StartFresh; mode_given = true; }
+        else if (args[i] == "--yes" || args[i] == "-y") { continue; }
+        else {
+            std::cerr << "unexpected root set arg: " << args[i] << "\n";
+            return 2;
+        }
+    }
+
+    const retcomm::RootMigrationPlan plan = retcomm::plan_root_migration(paths, target);
+    if (!plan.blocker.empty()) {
+        std::cerr << "cannot use " << target.string() << ": " << plan.blocker << "\n";
+        return 1;
+    }
+    std::cout << "from: " << plan.from_data.string() << " (" << human_bytes(plan.existing_bytes)
+              << ")\n"
+              << "to:   " << plan.to_root.string() << "\n";
+    if (!plan.warning.empty()) std::cout << "note: " << plan.warning << "\n";
+    if (!mode_given && plan.existing_bytes > 0)
+        std::cout << "mode: --move (default; pass --use-existing or --fresh to skip moving)\n";
+    if (!confirm_root_change(plan, mode, assume_yes)) {
+        std::cout << "Cancelled.\n";
+        return 1;
+    }
+
+    const retcomm::RootMigrationResult res = retcomm::migrate_data_root(
+        paths, target, mode, exe_dir, /*prefer_exe_marker=*/false,
+        [](const std::string& m) { std::cout << "  " << m << "\n"; });
+    for (const auto& n : res.notes) std::cout << "note: " << n << "\n";
+    if (!res.ok) {
+        std::cerr << res.message << "\n";
+        return 1;
+    }
+    std::cout << res.message << "\n";
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     fs::path catalog_override;
+    fs::path root_override;
     std::vector<std::string> args;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--catalog" && i + 1 < argc) {
             catalog_override = argv[++i];
+        } else if (a == "--root" && i + 1 < argc) {
+            root_override = argv[++i];
         } else if (a == "-h" || a == "--help") {
             print_help(argv[0]);
             return 0;
@@ -889,7 +1059,13 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    retcomm::Paths paths = retcomm::default_paths();
+    // --root wins over the marker/env chain so a one-off command can target a
+    // portable folder without touching the environment.
+    retcomm::Paths paths =
+        root_override.empty()
+            ? retcomm::default_paths(exe_dir_from(argv[0]))
+            : retcomm::paths_for_root(fs::absolute(root_override).lexically_normal(),
+                                      retcomm::DataRootSource::Explicit);
     retcomm::AppConfig cfg = retcomm::load_app_config(paths.config_path);
     retcomm::set_github_token(cfg.github_token);
 
@@ -910,6 +1086,8 @@ int main(int argc, char** argv) {
         }
         return cmd_catalog_update(paths, cfg, force);
     }
+
+    if (cmd == "root") return cmd_root(paths, args, exe_dir_from(argv[0]));
 
     if (catalog_override.empty()) {
         try {

@@ -29,6 +29,34 @@ CLI / (future) ImGui hub
 ~/.config/retcomm/                         library/bios roots, RomM URL, tokens
 ```
 
+### Custom data root (portable / second drive)
+
+Those two OS locations are the default, not a constant. A **root** override
+replaces both with `<root>/config` and `<root>/data`; every path above keeps its
+relative shape, so nothing else in the codebase needs to know which layout is in
+play. Resolution happens once per process in `default_paths()`
+(`src/paths/paths.cpp`), first hit wins:
+
+| Source | Where |
+|---|---|
+| `--root DIR` | command line (CLI only, never persisted) |
+| `$RETCOMM_HOME` | environment — the Windows portable stub sets this |
+| `<exe_dir>/retcomm-root.json` | marker beside the binary; travels with a portable build |
+| `<os_config>/retcomm/root.json` | pointer written by Advanced Setup / Library Settings |
+| *(none)* | the OS defaults above |
+
+A marker may store a path relative to itself (`{"root": "RetComM-Data"}`) so a
+USB stick works whatever drive letter it gets. Set it in Advanced Setup step 1,
+in Library Settings → **RetComM data folder → Change…**, or with
+`retcomm root set <dir>` / `retcomm root reset`. Changing it moves the tree,
+repairs the absolute-target toolchain/engine links inside it, rebases
+`install_roots` in config.json, and restarts. See `src/paths/data_root.cpp` and
+`src/paths/data_root_migrate.cpp`.
+
+With a custom root RetComM does not write the user's shell rc or HKCU `Path`
+(`publish_toolchain_user_env` skips it) — a portable install leaves no trace
+outside its own folder.
+
 ## Recommendation pipeline
 
 1. Load catalog titles + `rom_identity` (CRC32 / SHA-1 / SHA-256 / disc serial).

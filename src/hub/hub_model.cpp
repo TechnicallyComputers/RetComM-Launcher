@@ -2305,6 +2305,47 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                                        : "Delete finished with errors — see Activity");
                 break;
             }
+            case HubJob::MigrateDataRoot: {
+                const fs::path target = pending_data_root;
+                if (target.empty()) {
+                    set_status("No folder chosen");
+                    break;
+                }
+                set_status("Moving RetComM folder…");
+                append_log("Changing RetComM folder to " + target.string());
+
+                const RootMigrationResult res = migrate_data_root(
+                    paths, target, data_root_mode, exe_dir, prefers_portable_root_marker(),
+                    [this](const std::string& m) { append_log(m); });
+                for (const auto& n : res.notes) append_log("note: " + n);
+
+                if (!res.ok) {
+                    append_log("Folder change failed: " + res.message);
+                    set_status("Folder change failed — see Activity");
+                    show_toast("Could not change the RetComM folder");
+                    pending_data_root.clear();
+                    break;
+                }
+                append_log(res.message);
+
+                // The new location only takes effect on a fresh process: every
+                // cached path in this one still points at the old tree.
+                std::string relaunch_err;
+                if (!schedule_retcomm_relaunch(&relaunch_err)) {
+                    append_log("Relaunch failed: " + relaunch_err);
+                    set_status("Folder changed — restart RetComM to use it");
+                    show_toast("Folder changed — restart RetComM");
+                    pending_data_root.clear();
+                    break;
+                }
+                set_status("Restarting into the new folder…");
+                discard_followup_update_prompts();
+                pending_data_root.clear();
+                request_exit.store(true);
+                job_running = false;
+                job = HubJob::None;
+                return;
+            }
             case HubJob::HardResetLibrarySettings: {
                 set_status("Hard-resetting library settings…");
                 int failed = 0;
@@ -2693,6 +2734,34 @@ bool HubModel::complete_setup(std::string* error) {
     return true;
 }
 
+void HubModel::seed_data_root_input() {
+    setup_use_custom_data_root = using_custom_root(paths);
+    const std::string cur = setup_use_custom_data_root ? paths.root.string() : std::string();
+    copy_buf(data_root_input, sizeof(data_root_input), cur);
+    copy_buf(setup_data_root, sizeof(setup_data_root), cur);
+    data_root_plan_dirty = true;
+}
+
+bool HubModel::prefers_portable_root_marker() const {
+    // A portable build carries its root with the binary; anything else records
+    // it in the OS config dir so a reinstall of the app folder does not lose it.
+    const RetcommInstallInfo info = retcomm_install_info();
+    return info.channel == RetcommInstallChannel::WindowsPortable;
+}
+
+void HubModel::refresh_data_root_plan() {
+    const std::string want = data_root_input;
+    if (!data_root_plan_dirty && want == data_root_plan_path) return;
+    data_root_plan_path = want;
+    data_root_plan_dirty = false;
+    // An empty path is a real choice — "go back to the OS default" — so it goes
+    // through plan_root_migration too, which reports "already the current
+    // location" when there is nothing to do.
+    // plan_root_migration walks the current tree to size it; on a large install
+    // that is a few seconds, so this only runs when the text actually changed.
+    data_root_plan = plan_root_migration(paths, want.empty() ? fs::path() : fs::path(want));
+}
+
 void HubModel::apply_pending_folder_pick() {
     std::string path;
     FolderPickTarget target = FolderPickTarget::None;
@@ -2723,6 +2792,10 @@ void HubModel::apply_pending_folder_pick() {
         copy_buf(setup_emulation_root, sizeof(setup_emulation_root), path);
         apply_roots_from_emulation_parent();
         set_status("Emulation folder selected");
+    } else if (target == FolderPickTarget::DataRoot) {
+        copy_buf(data_root_input, sizeof(data_root_input), path);
+        data_root_plan_dirty = true;
+        set_status("RetComM folder selected");
     } else if (target == FolderPickTarget::InstallRoot) {
         if (folder_pick_install_index >= 0 &&
             folder_pick_install_index < static_cast<int>(settings.install_roots.size())) {
