@@ -71,6 +71,23 @@ fi
 mkdir -p "${APPDIR}/usr/bin/controllers"
 cp -a "${CTRL_DST}/." "${APPDIR}/usr/bin/controllers/"
 
+# First-run setup path cards (Easy / Advanced).
+SETUP_DST="${APPDIR}/usr/share/retcomm/setup"
+if [[ ! -f "${SETUP_DST}/setup_easy_rocket.png" ]]; then
+  if [[ -f "${ROOT}/assets/setup/setup_easy_rocket.png" ]]; then
+    mkdir -p "${SETUP_DST}"
+    cp -a "${ROOT}/assets/setup/." "${SETUP_DST}/"
+  fi
+fi
+for n in setup_easy_rocket.png setup_advanced_wrench.png; do
+  if [[ ! -f "${SETUP_DST}/${n}" ]]; then
+    echo "error: hub setup card art missing (expected ${SETUP_DST}/${n} or assets/setup/)" >&2
+    exit 1
+  fi
+done
+mkdir -p "${APPDIR}/usr/bin/setup"
+cp -a "${SETUP_DST}/." "${APPDIR}/usr/bin/setup/"
+
 # Desktop + icon at AppDir root (linuxdeploy / appimagetool convention).
 install -m 644 "${ROOT}/packaging/linux/retcomm.desktop" "${APPDIR}/retcomm.desktop"
 if [[ -f "${ROOT}/assets/retcomm.png" ]]; then

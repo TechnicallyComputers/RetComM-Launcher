@@ -155,6 +155,10 @@ jobs:
           test -f out/share/retcomm/fonts/LatoLatin-Regular.ttf
           test -f out/share/retcomm/fonts/LatoLatin-Bold.ttf
           ls -lah out/share/retcomm/fonts/
+          # First-run setup card art — blank Easy/Advanced cards ship silently
+          # otherwise (the dev build finds assets/ by walking up; a package cannot).
+          test -f out/share/retcomm/setup/setup_easy_rocket.png
+          test -f out/share/retcomm/setup/setup_advanced_wrench.png
           # Bundle SDL3 next to binaries for the AppImage.
           mkdir -p out/lib
           cp -a "$HOME/sdl3/lib/"*.so* out/lib/
@@ -240,6 +244,8 @@ jobs:
           cmake --build build --config Release -j
           cmake --install build --config Release
           test -f out/share/retcomm/fonts/LatoLatin-Regular.ttf
+          test -f out/share/retcomm/setup/setup_easy_rocket.png
+          test -f out/share/retcomm/setup/setup_advanced_wrench.png
 
       - name: Install Inno Setup
         shell: pwsh
@@ -371,6 +377,8 @@ jobs:
           cmake --build build -j"$(sysctl -n hw.ncpu)"
           cmake --install build
           test -f out/share/retcomm/fonts/LatoLatin-Regular.ttf
+          test -f out/share/retcomm/setup/setup_easy_rocket.png
+          test -f out/share/retcomm/setup/setup_advanced_wrench.png
           # Smoke-check hub linked.
           file out/bin/retcomm-hub
           otool -L out/bin/retcomm-hub | head

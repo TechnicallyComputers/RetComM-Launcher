@@ -61,6 +61,21 @@ if [[ ! -f "${APP}/Contents/Resources/controllers/pad_analog.png" ]]; then
   exit 1
 fi
 
+# First-run setup path cards (Easy / Advanced).
+if [[ -d "${PREFIX}/share/retcomm/setup" ]]; then
+  mkdir -p "${APP}/Contents/Resources/setup"
+  cp -a "${PREFIX}/share/retcomm/setup/." "${APP}/Contents/Resources/setup/"
+elif [[ -f "${ROOT}/assets/setup/setup_easy_rocket.png" ]]; then
+  mkdir -p "${APP}/Contents/Resources/setup"
+  cp -a "${ROOT}/assets/setup/." "${APP}/Contents/Resources/setup/"
+fi
+for n in setup_easy_rocket.png setup_advanced_wrench.png; do
+  if [[ ! -f "${APP}/Contents/Resources/setup/${n}" ]]; then
+    echo "error: hub setup card art missing in app bundle (${n})" >&2
+    exit 1
+  fi
+done
+
 sed "s|@VERSION@|${VERSION}|g" "${ROOT}/packaging/macos/Info.plist.in" \
   > "${APP}/Contents/Info.plist"
 

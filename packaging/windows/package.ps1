@@ -214,6 +214,23 @@ if (-not (Test-Path (Join-Path $CtrlDst "pad_analog.png"))) {
     throw "Failed to stage hub PSX pad art into $CtrlDst"
 }
 
+# First-run setup path cards (Easy / Advanced).
+$SetupSrc = Join-Path $Prefix "share\retcomm\setup"
+if (-not (Test-Path (Join-Path $SetupSrc "setup_easy_rocket.png"))) {
+    $SetupSrc = Join-Path $Root "assets\setup"
+}
+if (-not (Test-Path (Join-Path $SetupSrc "setup_easy_rocket.png"))) {
+    throw "Hub setup card art missing (expected setup_easy_rocket.png under share/retcomm/setup or assets/setup)"
+}
+$SetupDst = Join-Path $Stage "setup"
+New-Item -ItemType Directory -Force -Path $SetupDst | Out-Null
+Copy-Item (Join-Path $SetupSrc "*.png") $SetupDst -Force
+foreach ($n in @("setup_easy_rocket.png", "setup_advanced_wrench.png")) {
+    if (-not (Test-Path (Join-Path $SetupDst $n))) {
+        throw "Failed to stage hub setup card art ($n) into $SetupDst"
+    }
+}
+
 # --- Portable: friendly-named stub+payload exe, wrapped in a release zip ---
 if (-not $PortableStub) {
     $candidates = @(
