@@ -349,6 +349,16 @@ void gc_release_zips(const Paths& paths, const AppConfig& cfg, CacheGcResult& r)
                 t.mtime = std::chrono::time_point_cast<clock::duration>(
                     ftime - fs::file_time_type::clock::now() + clock::now());
             }
+            // Sweep zips quarantined by a failed extract (see
+            // discard_cached_release_zip) — the good copy sits beside them.
+            std::error_code bec;
+            for (auto fit = fs::directory_iterator(t.path, bec);
+                 !bec && fit != fs::directory_iterator(); fit.increment(bec)) {
+                std::error_code fec;
+                if (!fit->is_regular_file(fec) || fec) continue;
+                if (fit->path().extension() != ".bad") continue;
+                remove_path_accounting(fit->path(), r, "release-zip");
+            }
             tags.push_back(std::move(t));
         }
         if (static_cast<int>(tags.size()) <= keep_n) continue;

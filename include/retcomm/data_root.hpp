@@ -50,8 +50,10 @@ bool write_data_root_pointer(const fs::path& exe_dir, const fs::path& root,
 // an error.
 bool clear_data_root_pointer(const fs::path& exe_dir, std::string* error = nullptr);
 
-// True when `dir` can be created and written to. Used to decide whether a
-// candidate root is usable before committing to it.
+// True when `dir` could be created and written to. Creates nothing: when `dir`
+// does not exist yet, the nearest existing ancestor is probed instead. Setup
+// re-plans on every keystroke, so creating as-you-type would leave a folder
+// behind for each prefix of a typed path.
 bool directory_is_writable(const fs::path& dir, std::string* error = nullptr);
 
 } // namespace retcomm

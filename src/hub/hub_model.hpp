@@ -499,6 +499,10 @@ struct HubModel {
     // Startup catalog auto-update brought new titles: bind/scan once idle, so
     // the boxart job that also fires on update is not fighting for the worker.
     bool pending_auto_scan_new_titles = false;
+    // First run skips the startup catalog fetch — nothing may be written before
+    // the wizard settles on a data folder. complete_setup() sets this so the
+    // catalog downloads as soon as that folder exists.
+    bool pending_initial_catalog = false;
     // Brief top-of-window notice (import / scan results). Main thread times display.
     std::string toast_message; // guarded by mu
     std::atomic<bool> toast_pending{false};
@@ -676,6 +680,8 @@ struct HubModel {
     // Seed data_root_input / setup_use_custom_data_root from the live paths.
     void seed_data_root_input();
     // True when this install should persist its root beside the binary.
+    // Directory the data-root marker is written to (portable: beside the stub).
+    fs::path root_marker_dir() const;
     bool prefers_portable_root_marker() const;
     bool save_settings(std::string* error = nullptr);
     void add_platform_folder_row();

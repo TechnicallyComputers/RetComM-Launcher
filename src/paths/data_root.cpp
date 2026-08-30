@@ -242,6 +242,30 @@ bool clear_data_root_pointer(const fs::path& exe_dir, std::string* error) {
     if (!ok && error) *error = err;
     return ok;
 }
+namespace {
+
+// Write a probe file into an existing directory and remove it again.
+bool write_probe(const fs::path& dir, const fs::path& reported_as, std::string* error) {
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path probe = dir / (".retcomm-write-test-" + std::to_string(stamp));
+    {
+        std::ofstream out(probe, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            if (error) *error = reported_as.string() + " is not writable";
+            return false;
+        }
+        out << "ok";
+        if (!out) {
+            if (error) *error = reported_as.string() + " is not writable";
+            return false;
+        }
+    }
+    std::error_code ec;
+    fs::remove(probe, ec);
+    return true;
+}
+
+} // namespace
 
 bool directory_is_writable(const fs::path& dir, std::string* error) {
     if (dir.empty()) {
@@ -257,32 +281,16 @@ bool directory_is_writable(const fs::path& dir, std::string* error) {
     fs::path probe_dir = dir;
     while (!probe_dir.empty() && !fs::is_directory(probe_dir, ec)) {
         const fs::path parent = probe_dir.parent_path();
-        if (parent == probe_dir) break;
+        if (parent == probe_dir) break; // hit the root of the volume
         probe_dir = parent;
     }
+    ec.clear();
     if (probe_dir.empty() || !fs::is_directory(probe_dir, ec)) {
         if (error) *error = "no existing parent directory for " + dir.string();
         return false;
     }
-    const fs::path dir_orig = dir;
-    const fs::path& probe_target = probe_dir;
-    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    const fs::path probe = probe_target / (".retcomm-write-test-" + std::to_string(stamp));
-    {
-        std::ofstream out(probe, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            if (error) *error = dir_orig.string() + " is not writable";
-            return false;
-        }
-        out << "ok";
-        if (!out) {
-            if (error) *error = dir_orig.string() + " is not writable";
-            return false;
-        }
-    }
-    ec.clear();
-    fs::remove(probe, ec);
-    return true;
+    // Errors name the folder the caller asked about, not the ancestor we probed.
+    return write_probe(probe_dir, dir, error);
 }
 
 } // namespace retcomm

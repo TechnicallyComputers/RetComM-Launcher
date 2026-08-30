@@ -980,6 +980,17 @@ bool schedule_retcomm_relaunch_impl(std::string* error) {
         if (!app.empty()) launch = app / "Contents" / "MacOS" / "retcomm-hub";
     }
 #endif
+#if defined(_WIN32)
+    // Portable: relaunch the stub, not the unpacked hub. The stub is what
+    // resolves the data root, exports RETCOMM_HOME and unpacks the runtime —
+    // restarting the hub directly would inherit this process's RETCOMM_HOME and
+    // so come back up pointing at the root we just moved away from.
+    if (launch.empty()) {
+        const std::wstring pe = win_getenv_w(L"RETCOMM_PORTABLE_EXE");
+        std::error_code ec;
+        if (!pe.empty() && fs::is_regular_file(fs::path(pe), ec)) launch = fs::path(pe);
+    }
+#endif
     if (launch.empty()) launch = current_executable_path();
     if (launch.empty()) {
         if (error) *error = "cannot resolve RetComM executable path for relaunch";

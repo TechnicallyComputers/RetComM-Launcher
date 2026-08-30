@@ -2388,7 +2388,8 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 append_log("Changing RetComM folder to " + target.string());
 
                 const RootMigrationResult res = migrate_data_root(
-                    paths, target, data_root_mode, exe_dir, prefers_portable_root_marker(),
+                    paths, target, data_root_mode, root_marker_dir(),
+                    prefers_portable_root_marker(),
                     [this](const std::string& m) { append_log(m); });
                 for (const auto& n : res.notes) append_log("note: " + n);
 
@@ -2800,7 +2801,19 @@ void HubModel::open_setup() {
 }
 
 bool HubModel::complete_setup(std::string* error) {
+    // First run deliberately created nothing at startup. The user has now chosen
+    // where RetComM's files live, so build the tree here — before the marker is
+    // written into it.
+    try {
+        ensure_dirs(paths);
+    } catch (const std::exception& e) {
+        if (error) *error = e.what();
+        return false;
+    }
     if (!mark_hub_setup_completed(paths, exe_dir, error)) return false;
+    // Startup skipped the catalog fetch for the same reason; pull it once idle
+    // unless a root migration is about to relaunch us anyway.
+    if (catalog.titles.empty()) pending_initial_catalog = true;
     show_setup = false;
     setup_path = SetupPath::Chooser;
     setup_step = 0;
@@ -2850,6 +2863,20 @@ void HubModel::seed_data_root_input() {
     copy_buf(data_root_input, sizeof(data_root_input), cur);
     copy_buf(setup_data_root, sizeof(setup_data_root), cur);
     data_root_plan_dirty = true;
+}
+
+fs::path HubModel::root_marker_dir() const {
+    // Portable: the marker belongs beside the launcher .exe the user actually
+    // double-clicks, not inside the runtime/ folder it unpacks. The stub reads
+    // it from there to decide where to unpack, and that folder is removed and
+    // re-extracted when the root moves — a marker written into it would be
+    // deleted by the very move it is supposed to record.
+    const RetcommInstallInfo info = retcomm_install_info();
+    if (info.channel == RetcommInstallChannel::WindowsPortable && !info.path.empty()) {
+        const fs::path dir = info.path.parent_path();
+        if (!dir.empty()) return dir;
+    }
+    return exe_dir;
 }
 
 bool HubModel::prefers_portable_root_marker() const {

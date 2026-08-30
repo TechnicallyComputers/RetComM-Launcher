@@ -287,6 +287,8 @@ RootMigrationPlan plan_root_migration(const Paths& current, const fs::path& new_
 
     std::string werr;
     const fs::path probe = plan.to_default ? plan.to_data : plan.to_root;
+    // Creates nothing — see directory_is_writable(). Planning runs on every
+    // keystroke while the user types a path.
     plan.target_writable = directory_is_writable(probe, &werr);
     if (!plan.target_writable) {
         plan.blocker = werr.empty() ? ("Cannot write to " + probe.string()) : werr;
@@ -318,6 +320,9 @@ RootMigrationResult migrate_data_root(const Paths& current, const fs::path& new_
         r.message = plan.blocker;
         return r;
     }
+    // Target == source: succeed without touching anything. Moving a tree onto
+    // itself would destroy it, and rewriting the root pointer on a path the
+    // user was told is a no-op is a side effect they did not ask for.
     if (plan.same_as_current) {
         r.ok = true;
         r.message = plan.note.empty() ? "Already using this folder" : plan.note;
