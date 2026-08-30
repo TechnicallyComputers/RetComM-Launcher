@@ -499,6 +499,10 @@ struct HubModel {
     // Startup catalog auto-update brought new titles: bind/scan once idle, so
     // the boxart job that also fires on update is not fighting for the worker.
     bool pending_auto_scan_new_titles = false;
+    // First run skips the startup catalog fetch — nothing may be written before
+    // the wizard settles on a data folder. complete_setup() sets this so the
+    // catalog downloads as soon as that folder exists.
+    bool pending_initial_catalog = false;
     // Brief top-of-window notice (import / scan results). Main thread times display.
     std::string toast_message; // guarded by mu
     std::atomic<bool> toast_pending{false};

@@ -3296,17 +3296,6 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
         hub.setup_confirm_create_roots = false;
     };
 
-    auto skip_setup = [&]() {
-        std::string err;
-        if (!hub.complete_setup(&err)) {
-            hub.append_log("setup marker failed: " + err);
-            hub.set_status("Setup marker failed");
-        } else {
-            hub.set_status("Setup skipped — set library root in Library settings");
-            hub.append_log("First-time setup skipped");
-        }
-    };
-
     if (hub.setup_confirm_create_roots && hub.setup_path == SetupPath::Advanced) {
         const float footer_h = footer_reserve();
         ImGui::BeginChild("##setup_create_roots_body", ImVec2(0.f, -footer_h),
@@ -3342,8 +3331,9 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
     }
 
     if (hub.setup_path == SetupPath::Chooser) {
-        const float footer_h = footer_reserve();
-        ImGui::BeginChild("##setup_chooser_body", ImVec2(0.f, -footer_h), ImGuiChildFlags_None,
+        // No footer here any more — first-run setup is not skippable, and the
+        // two cards are the only way forward. Give them the reclaimed height.
+        ImGui::BeginChild("##setup_chooser_body", ImVec2(0.f, -18.f), ImGuiChildFlags_None,
                           ImGuiWindowFlags_NoScrollbar);
         push_wrap();
         ImGui::TextWrapped("How do you want to set up your library?");
@@ -3378,8 +3368,6 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
         }
         ImGui::EndChild();
 
-        pin_footer_row();
-        if (ImGui::Button("Skip for now", ImVec2(150, 0))) skip_setup();
     } else if (hub.setup_path == SetupPath::Easy) {
         const bool emu_ok = hub.setup_emulation_root[0] != '\0';
         const float warn_h = emu_ok ? 0.f : ImGui::GetTextLineHeightWithSpacing();
@@ -3435,8 +3423,6 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
             }
         }
         ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (ImGui::Button("Skip for now", ImVec2(120, 0))) skip_setup();
         if (!emu_ok) {
             ImGui::TextColored(th.warn, "Choose an Emulation folder to continue.");
         }
@@ -3535,8 +3521,6 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
             hub.setup_step = 1;
         }
         ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (ImGui::Button("Skip for now", ImVec2(120, 0))) skip_setup();
         if (!root_ok) {
             ImGui::TextColored(th.warn, "%s", hub.data_root_plan.blocker.c_str());
         }
@@ -3632,8 +3616,6 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
             }
         }
         ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (ImGui::Button("Skip for now", ImVec2(120, 0))) skip_setup();
         if (!library_ok) {
             ImGui::TextColored(th.warn, "Choose a ROM library folder to continue.");
         }
@@ -5929,16 +5911,31 @@ int main(int argc, char** argv) {
     ImGui_ImplOpenGL3_Init(glsl);
 
     HubModel hub;
-    hub.paths = retcomm::default_paths();
+    // exe_dir has to come first: the portable root marker lives beside the
+    // binary, and default_paths() can only honour it when told where that is.
+    // The CLI already passes it (main.cpp); the hub used to resolve without it
+    // and so silently ignored a portable build's own root.
     if (argc > 0 && argv[0] && argv[0][0] != '\0') {
         std::error_code ec;
         hub.exe_dir = fs::weakly_canonical(fs::path(argv[0]).parent_path(), ec);
         if (ec || hub.exe_dir.empty()) hub.exe_dir = fs::path(argv[0]).parent_path();
     }
+    hub.paths = retcomm::default_paths(hub.exe_dir);
     hub.cfg = retcomm::load_app_config(hub.paths.config_path);
     retcomm::set_github_token(hub.cfg.github_token);
+
+    // First run: the wizard has not yet asked the user where RetComM should keep
+    // its files, so this launch must not create any of them. ensure_dirs() and
+    // the catalog cache both land under data_dir — running them here is what
+    // left a stray data folder at the default location that then collided with
+    // whatever the user picked a moment later. complete_setup() does this work
+    // once the location is settled.
+    const bool setup_pending = !retcomm::hub_setup_completed(hub.paths, hub.exe_dir) &&
+                               hub.cfg.library_root.empty();
+
     bool catalog_updated = false;
-    try {
+    if (!setup_pending) {
+      try {
         retcomm::ensure_dirs(hub.paths);
         const auto sync = retcomm::maybe_auto_update_catalog(hub.paths, hub.cfg);
         if (!sync.ok && !sync.skipped)
@@ -5958,24 +5955,23 @@ int main(int argc, char** argv) {
             cat_log += ", " + hub.catalog.catalog_date;
         cat_log += ")";
         hub.append_log(cat_log);
-    } catch (const std::exception& e) {
+      } catch (const std::exception& e) {
         hub.append_log(std::string("catalog error: ") + e.what());
+      }
     }
     hub.launcher_version = retcomm::retcomm_app_version();
     hub.refresh_rows(false);
-    // Prompt when neither a setup marker nor required config exists.
-    // Updates wipe exe-dir markers; if library_root is already set, skip the
-    // wizard and refresh the durable data-dir marker.
-    if (!retcomm::hub_setup_completed(hub.paths, hub.exe_dir)) {
-        if (!hub.cfg.library_root.empty()) {
-            std::string marker_err;
-            if (!retcomm::mark_hub_setup_completed(hub.paths, hub.exe_dir, &marker_err))
-                hub.append_log("setup marker migrate failed: " + marker_err);
-            hub.set_status("Ready");
-        } else {
-            hub.open_setup(); // pre-fills any partial config.json
-            hub.set_status("First-time setup — choose your ROM library folder");
-        }
+    // Updates wipe exe-dir markers; if library_root is already set the user has
+    // been through setup before, so adopt it and refresh the durable data-dir
+    // marker rather than prompting again.
+    if (setup_pending) {
+        hub.open_setup(); // pre-fills any partial config.json
+        hub.set_status("First-time setup — choose where RetComM keeps its files");
+    } else if (!retcomm::hub_setup_completed(hub.paths, hub.exe_dir)) {
+        std::string marker_err;
+        if (!retcomm::mark_hub_setup_completed(hub.paths, hub.exe_dir, &marker_err))
+            hub.append_log("setup marker migrate failed: " + marker_err);
+        hub.set_status("Ready");
     } else {
         hub.set_status("Ready");
     }
@@ -5985,7 +5981,10 @@ int main(int argc, char** argv) {
     hub.pending_auto_scan_new_titles =
         catalog_updated && hub.cfg.auto_scan_after_catalog_update;
     // Defer game + toolchain update checks until idle (after catalog boxart job).
-    hub.pending_startup_update_check = hub.cfg.check_updates_on_startup;
+    // Never while first-run setup is still open: every job worker opens with
+    // ensure_dirs(), which would recreate the tree this launch is deliberately
+    // leaving uncreated until the user picks a location.
+    hub.pending_startup_update_check = !setup_pending && hub.cfg.check_updates_on_startup;
 
     retcomm::hub::BoxartCache boxart;
     bool running = true;
@@ -6013,11 +6012,19 @@ int main(int argc, char** argv) {
         hub.apply_pending_folder_pick();
         hub.apply_pending_file_pick();
 
+        // First run: the catalog could not be fetched before the wizard picked a
+        // data folder, so do it the moment setup finishes.
+        if (hub.pending_initial_catalog && !hub.show_setup && !hub.job_running.load()) {
+            hub.pending_initial_catalog = false;
+            hub.start_job(HubJob::RefreshCatalog);
+        }
         // Run before the update check so new games appear as early as possible.
-        if (hub.pending_auto_scan_new_titles && !hub.job_running.load()) {
+        // Both start jobs, so both wait for the setup wizard to close.
+        if (hub.pending_auto_scan_new_titles && !hub.show_setup && !hub.job_running.load()) {
             hub.pending_auto_scan_new_titles = false;
             hub.auto_scan_for_new_titles("Catalog update");
-        } else if (hub.pending_startup_update_check && !hub.job_running.load()) {
+        } else if (hub.pending_startup_update_check && !hub.show_setup &&
+                   !hub.job_running.load()) {
             hub.pending_startup_update_check = false;
             if (hub.cfg.check_updates_on_startup) hub.start_job(HubJob::CheckUpdates);
         }

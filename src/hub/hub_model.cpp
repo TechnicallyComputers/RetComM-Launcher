@@ -2800,7 +2800,19 @@ void HubModel::open_setup() {
 }
 
 bool HubModel::complete_setup(std::string* error) {
+    // First run deliberately created nothing at startup. The user has now chosen
+    // where RetComM's files live, so build the tree here — before the marker is
+    // written into it.
+    try {
+        ensure_dirs(paths);
+    } catch (const std::exception& e) {
+        if (error) *error = e.what();
+        return false;
+    }
     if (!mark_hub_setup_completed(paths, exe_dir, error)) return false;
+    // Startup skipped the catalog fetch for the same reason; pull it once idle
+    // unless a root migration is about to relaunch us anyway.
+    if (catalog.titles.empty()) pending_initial_catalog = true;
     show_setup = false;
     setup_path = SetupPath::Chooser;
     setup_step = 0;
