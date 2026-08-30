@@ -4,6 +4,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace retcomm {
 
@@ -78,5 +79,26 @@ SelfUpdateCheckInfo check_retcomm_update(const Paths& paths,
 
 // Relaunch the current hub/AppImage after this process exits (hard-reset, etc.).
 bool schedule_retcomm_relaunch(std::string* error = nullptr);
+
+// Full removal. Covers every RetComM tree this build can reach: the active
+// config/data roots (custom root included), the OS-default AppData /
+// .local/share pair an earlier root move may have left behind, both data-root
+// markers, and the app itself when the install channel supports it.
+//
+// plan_retcomm_uninstall() only describes the work, so the confirm dialog can
+// name the exact paths; nothing is touched until schedule_retcomm_uninstall()
+// writes a detached script that waits for this process to exit, deletes
+// everything, and - unlike the update scripts - does not relaunch.
+struct RetcommUninstallPlan {
+    std::vector<fs::path> data_paths; // roots + marker files, deleted recursively
+    fs::path app_path;                // exe / .app bundle / install dir
+    fs::path uninstaller;             // Windows: unins000.exe when the installer left one
+    bool removes_app = false;         // false for dev / loose builds: data only
+    std::string channel_id;           // retcomm_install_info().channel_id
+    std::string app_note;             // what happens to the binary, for the UI
+};
+
+RetcommUninstallPlan plan_retcomm_uninstall(const Paths& paths, const fs::path& exe_dir);
+bool schedule_retcomm_uninstall(const RetcommUninstallPlan& plan, std::string* error = nullptr);
 
 } // namespace retcomm

@@ -1422,4 +1422,281 @@ SelfUpdateResult self_update_retcomm(const Paths& paths, const SelfUpdateOptions
                             channel_name + "). " + unsupported_hint());
 }
 
+namespace {
+
+// Uninstall deletes whole trees, so a bad root must never widen into "wipe the
+// drive". Accept only paths that sit at least one level below their filesystem
+// root and are not the user's home directory itself.
+bool safe_to_delete(const fs::path& p, fs::path* normalized) {
+    if (p.empty()) return false;
+    std::error_code ec;
+    const fs::path abs = fs::absolute(p, ec);
+    if (ec || abs.empty()) return false;
+    const fs::path norm = abs.lexically_normal();
+    if (norm.relative_path().empty()) return false; // "C:\" / "/"
+    if (norm == norm.root_path()) return false;
+    if (norm.parent_path() == norm) return false;
+    const fs::path home = user_home_dir();
+    if (!home.empty() && norm == home.lexically_normal()) return false;
+    if (normalized) *normalized = norm;
+    return true;
+}
+
+void push_uninstall_path(std::vector<fs::path>& out, const fs::path& p) {
+    fs::path norm;
+    if (!safe_to_delete(p, &norm)) return;
+    for (const auto& existing : out)
+        if (existing == norm) return;
+    out.push_back(norm);
+}
+
+#if !defined(_WIN32)
+// Single-quoted shell literal.
+std::string sh_single_quote(const fs::path& p) {
+    std::string out = "'";
+    for (char c : p.string()) {
+        if (c == '\'') out += "'\\''";
+        else out += c;
+    }
+    out += "'";
+    return out;
+}
+#endif
+
+} // namespace
+
+RetcommUninstallPlan plan_retcomm_uninstall(const Paths& paths, const fs::path& exe_dir) {
+    RetcommUninstallPlan plan;
+    const RetcommInstallInfo install = retcomm_install_info();
+    plan.channel_id = install.channel_id;
+
+    // Active roots. With a custom root, config_dir/data_dir already live inside
+    // it; listing them anyway clears a half-finished root move.
+    push_uninstall_path(plan.data_paths, paths.root);
+    push_uninstall_path(plan.data_paths, paths.data_dir);
+    push_uninstall_path(plan.data_paths, paths.config_dir);
+    // OS defaults stay populated after a move to a custom root, and the config
+    // pointer naming that root lives in the default config dir.
+    push_uninstall_path(plan.data_paths, default_os_data_dir());
+    push_uninstall_path(plan.data_paths, default_os_config_dir());
+    // The portable marker travels beside the binary, outside every root above.
+    if (!exe_dir.empty()) push_uninstall_path(plan.data_paths, exe_dir / "retcomm-root.json");
+
+    switch (install.channel) {
+    case RetcommInstallChannel::WindowsInstaller: {
+        plan.app_path = install.path; // install directory
+        std::error_code ec;
+        for (const char* name : {"unins000.exe", "unins001.exe"}) {
+            const fs::path candidate = plan.app_path / name;
+            if (fs::is_regular_file(candidate, ec)) {
+                plan.uninstaller = candidate;
+                break;
+            }
+        }
+        plan.removes_app = true;
+        plan.app_note = plan.uninstaller.empty()
+                            ? "Deletes the install folder " + plan.app_path.string()
+                            : "Runs the Windows uninstaller, then clears leftovers in " +
+                                  plan.app_path.string();
+        break;
+    }
+    case RetcommInstallChannel::WindowsPortable: {
+        // install.path is the stub only when the hub was launched through it;
+        // otherwise it is the unpacked hub exe, which lives inside RetComM-Data
+        // and is removed with that root rather than on its own.
+        bool is_stub = false;
+#if defined(_WIN32)
+        is_stub = !install.path.empty() && looks_like_retcomm_portable_stub(install.path);
+#endif
+        if (is_stub) {
+            plan.app_path = install.path;
+            plan.removes_app = true;
+            plan.app_note = "Deletes the portable executable " + plan.app_path.string();
+            push_uninstall_path(plan.data_paths, plan.app_path.parent_path() / "RetComM-Data");
+        } else {
+            plan.app_note = "Portable stub not resolved: the unpacked runtime goes with the data "
+                            "folder, but RetComM Launcher.exe has to be deleted by hand.";
+        }
+        break;
+    }
+    case RetcommInstallChannel::MacosApp:
+        plan.app_path = install.path;
+        plan.removes_app = !plan.app_path.empty();
+        plan.app_note = plan.removes_app ? "Deletes the app bundle " + plan.app_path.string()
+                                         : unsupported_hint();
+        break;
+    case RetcommInstallChannel::LinuxAppImage:
+        plan.app_path = install.path;
+        plan.removes_app = !plan.app_path.empty();
+        plan.app_note = plan.removes_app ? "Deletes the AppImage " + plan.app_path.string()
+                                         : unsupported_hint();
+        break;
+    case RetcommInstallChannel::Unsupported:
+        plan.app_note = "Unrecognised install layout (dev build or loose copy): data is removed "
+                        "but the binary stays put - delete it yourself.";
+        break;
+    }
+
+    if (plan.removes_app) {
+        fs::path norm;
+        if (!safe_to_delete(plan.app_path, &norm)) {
+            plan.removes_app = false;
+            plan.app_note = "Refusing to delete " + plan.app_path.string() +
+                            " - remove the binary yourself.";
+        } else {
+            plan.app_path = norm;
+        }
+    }
+    return plan;
+}
+
+bool schedule_retcomm_uninstall(const RetcommUninstallPlan& plan, std::string* error) {
+    if (plan.data_paths.empty() && !plan.removes_app) {
+        if (error) *error = "nothing to uninstall";
+        return false;
+    }
+
+    // The script has to live outside every tree it deletes.
+    fs::path script_dir;
+#if defined(_WIN32)
+    wchar_t tmp[MAX_PATH]{};
+    const DWORD n = GetTempPathW(MAX_PATH, tmp);
+    if (n > 0 && n < MAX_PATH) script_dir = fs::path(tmp);
+#else
+    if (const char* t = std::getenv("TMPDIR"); t && *t) script_dir = t;
+    else script_dir = "/tmp";
+#endif
+    if (script_dir.empty()) {
+        if (error) *error = "cannot resolve a temp directory for the uninstall script";
+        return false;
+    }
+
+#if defined(_WIN32)
+    const DWORD pid = GetCurrentProcessId();
+    const std::string tag = std::to_string(pid);
+    const fs::path script = script_dir / ("retcomm_uninstall_" + tag + ".ps1");
+    const fs::path log_path = script_dir / ("retcomm_uninstall_" + tag + ".log");
+    const fs::path ready = script_dir / ("retcomm_uninstall_" + tag + ".ready");
+    const char* body = R"ps1(
+param(
+  [Parameter(Mandatory=$true)][int]$WaitPid,
+  [Parameter(Mandatory=$true)][string]$Log,
+  [Parameter(Mandatory=$true)][string]$Ready,
+  [Parameter(Mandatory=$false)][string]$Uninstaller = '',
+  [Parameter(Mandatory=$false)][string]$App = '',
+  [Parameter(Mandatory=$false)][string[]]$Paths = @()
+)
+$ErrorActionPreference = 'Continue'
+# Signal the hub early so it can ExitProcess without killing us mid-start.
+if ($Ready) { try { Set-Content -LiteralPath $Ready -Value '1' -Encoding ASCII -Force } catch {} }
+function Log([string]$m) { try { Add-Content -LiteralPath $Log -Value $m -Encoding UTF8 } catch {} }
+function Nuke([string]$p) {
+  if (-not $p) { return $true }
+  if (-not (Test-Path -LiteralPath $p)) { Log ("Not present " + $p); return $true }
+  for ($i = 1; $i -le 12; $i++) {
+    try { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction Stop }
+    catch { Log ("Attempt " + $i + " on " + $p + ": " + $_) }
+    if (-not (Test-Path -LiteralPath $p)) { Log ("Removed " + $p); return $true }
+    Start-Sleep -Milliseconds 400
+  }
+  Log ("GAVE UP on " + $p)
+  return $false
+}
+try { Remove-Item -LiteralPath $Log -Force -ErrorAction SilentlyContinue } catch {}
+Log 'RetComM uninstall'
+Log ("Waiting for PID " + $WaitPid)
+$deadline = (Get-Date).AddSeconds(120)
+while ((Get-Date) -lt $deadline) {
+  if (-not (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue)) { break }
+  Start-Sleep -Milliseconds 400
+}
+if (Get-Process -Id $WaitPid -ErrorAction SilentlyContinue) {
+  Log ("Timed out waiting for PID " + $WaitPid + " - continuing")
+}
+# The hub runs the CLI and game binaries out of the trees below; anything still
+# alive would keep them locked and leave a half-deleted install.
+foreach ($procName in @('retcomm-hub', 'retcomm')) {
+  Get-Process -Name $procName -ErrorAction SilentlyContinue |
+    Where-Object { $_.Id -ne $PID } |
+    ForEach-Object {
+      Log ("Stopping " + $_.ProcessName + " (" + $_.Id + ")")
+      try { $_.Kill() } catch { Log ("Kill failed: " + $_) }
+    }
+}
+Start-Sleep -Milliseconds 500
+if ($Uninstaller -and (Test-Path -LiteralPath $Uninstaller)) {
+  Log ("Running uninstaller " + $Uninstaller)
+  try {
+    $u = Start-Process -FilePath $Uninstaller -ArgumentList @(
+      '/VERYSILENT', '/NORESTART', '/SUPPRESSMSGBOXES'
+    ) -Wait -PassThru
+    Log ("Uninstaller exit=" + $u.ExitCode)
+  } catch { Log ("Uninstaller failed: " + $_) }
+  # Inno relaunches itself from %TEMP% and returns early; give it a moment
+  # before deleting whatever it leaves behind.
+  Start-Sleep -Seconds 3
+}
+$failed = @()
+foreach ($p in $Paths) { if (-not (Nuke $p)) { $failed += $p } }
+if ($App) { if (-not (Nuke $App)) { $failed += $App } }
+if ($failed.Count -gt 0) {
+  Log 'FINISHED WITH ERRORS'
+  $msg = "RetComM was uninstalled, but these could not be deleted:`n`n" +
+         ($failed -join "`n") +
+         "`n`nClose anything still using them and delete them by hand.`n`nLog:`n" + $Log
+  try {
+    Add-Type -AssemblyName System.Windows.Forms
+    [void][System.Windows.Forms.MessageBox]::Show($msg, 'RetComM Launcher')
+  } catch {}
+  exit 1
+}
+Log 'Uninstall complete'
+exit 0
+)ps1";
+    if (!write_text_file(script, body, error)) return false;
+    std::error_code ec;
+    fs::remove(log_path, ec);
+
+    std::wstring args = L"-WaitPid " + std::to_wstring(pid) + L" -Log " +
+                        ps_single_quote(log_path) + L" -Ready " + ps_single_quote(ready);
+    if (!plan.uninstaller.empty())
+        args += L" -Uninstaller " + ps_single_quote(plan.uninstaller);
+    if (plan.removes_app && !plan.app_path.empty())
+        args += L" -App " + ps_single_quote(plan.app_path);
+    if (!plan.data_paths.empty()) {
+        args += L" -Paths ";
+        for (size_t i = 0; i < plan.data_paths.size(); ++i) {
+            if (i) args += L",";
+            args += ps_single_quote(plan.data_paths[i]);
+        }
+    }
+    return schedule_powershell(script, body, args, ready, error);
+#else
+    const pid_t pid = ::getpid();
+    const fs::path script = script_dir / ("retcomm_uninstall_" + std::to_string(pid) + ".sh");
+    {
+        std::ofstream out(script);
+        if (!out) {
+            if (error) *error = "cannot write uninstall script";
+            return false;
+        }
+        out << "#!/usr/bin/env bash\n"
+            << "pid=" << pid << "\n"
+            << "self=\"$0\"\n"
+            << "while kill -0 \"$pid\" 2>/dev/null; do sleep 0.2; done\n"
+            << "sleep 0.3\n";
+        for (const auto& p : plan.data_paths)
+            out << "rm -rf -- " << sh_single_quote(p) << "\n";
+        if (plan.removes_app && !plan.app_path.empty())
+            out << "rm -rf -- " << sh_single_quote(plan.app_path) << "\n";
+        out << "rm -f -- \"$self\"\n";
+        if (!out) {
+            if (error) *error = "cannot write uninstall script";
+            return false;
+        }
+    }
+    return schedule_shell(script, error);
+#endif
+}
+
 } // namespace retcomm

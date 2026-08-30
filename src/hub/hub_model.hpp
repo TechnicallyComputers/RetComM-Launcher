@@ -11,6 +11,7 @@
 #include "retcomm/paths.hpp"
 #include "retcomm/psx_platform_settings.hpp"
 #include "retcomm/romm_fetch.hpp"
+#include "retcomm/self_update.hpp"
 #include "retcomm/texture_packs.hpp"
 
 #include <atomic>
@@ -82,6 +83,8 @@ enum class HubJob : int {
     MigrateDataRoot,
     // Wipe library/RomM config + indexes, clear setup marker, relaunch into wizard.
     HardResetLibrarySettings,
+    // Delete every RetComM data/config root plus the app itself, then exit for good.
+    UninstallEverything,
 };
 
 // Title install/build/update family — mutually exclusive with library scans.
@@ -98,6 +101,7 @@ inline bool hub_job_is_install(HubJob j) {
     case HubJob::MoveInstall:
     case HubJob::DeleteAllAppsAndSaves:
     case HubJob::HardResetLibrarySettings:
+    case HubJob::UninstallEverything:
     case HubJob::FetchRommRom:
     case HubJob::FetchRommBios:
         return true;
@@ -545,6 +549,13 @@ struct HubModel {
     // pending_data_root empty + pending_data_root_change true = back to default.
     fs::path pending_data_root;
     bool pending_data_root_change = false;
+
+    // ---- uninstall everything (Library Settings > Advanced) ---------------
+    // Computed once when the confirm modal opens so the dialog can name the
+    // exact paths, and so the per-frame draw does not re-stat the filesystem.
+    RetcommUninstallPlan uninstall_plan;
+    char uninstall_confirm[32]{}; // must read UNINSTALL before the button arms
+    void refresh_uninstall_plan();
 
     // ---- per-title HD texture packs (Texture Packs modal) ------------------
     // Scanned on demand rather than in refresh_rows: the scan walks every pack

@@ -3061,6 +3061,26 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
             "and BIOS dumps are not deleted.");
         ImGui::PopStyleColor();
 
+        ImGui::Dummy(ImVec2(0, 8));
+        {
+            const bool busy = hub.job_running.load();
+            ImGui::BeginDisabled(busy);
+            if (danger_button("\xE2\x9A\xA0 Uninstall All RetComM Data \xE2\x9A\xA0", th,
+                              ImVec2(-1, 0))) {
+                hub.refresh_uninstall_plan();
+                hub.uninstall_confirm[0] = '\0';
+                ImGui::OpenPopup("Uninstall RetComM?###uninstall_retcomm");
+            }
+            ImGui::EndDisabled();
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        ImGui::TextWrapped(
+            "Removes RetComM entirely: the whole RetComM data folder (AppData / .local/share "
+            "or your custom folder) with every installed game, save, toolchain and cache, plus "
+            "the launcher itself. Your ROM library and BIOS folders are the only things kept. "
+            "This cannot be undone.");
+        ImGui::PopStyleColor();
+
         if (ImGui::BeginPopupModal("Delete everything?###delete_all_apps", nullptr,
                                    ImGuiWindowFlags_AlwaysAutoResize)) {
             ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 420.f);
@@ -3107,6 +3127,54 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
             ImGui::EndDisabled();
             ImGui::SameLine();
             if (ImGui::Button("Cancel", ImVec2(120, 0))) ImGui::CloseCurrentPopup();
+            close_modal_on_outside_click();
+            ImGui::EndPopup();
+        }
+
+        if (ImGui::BeginPopupModal("Uninstall RetComM?###uninstall_retcomm", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize)) {
+            ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 460.f);
+            ImGui::TextColored(th.warn,
+                               "\xE2\x9A\xA0 This deletes RetComM and everything it stores. "
+                               "There is no undo. \xE2\x9A\xA0");
+            ImGui::TextWrapped(
+                "Deleted for good:\n"
+                "\xE2\x80\xA2 Every installed game, managed save, toolchain, engine and cache\n"
+                "\xE2\x80\xA2 Library / BIOS / RomM settings and every scan database\n"
+                "\xE2\x80\xA2 The launcher itself\n\n"
+                "Kept: your ROM library folder and BIOS folder, and any install location "
+                "outside the RetComM data folder.");
+            ImGui::Dummy(ImVec2(0, 6));
+            ImGui::TextColored(th.text_muted, "Folders that will be deleted:");
+            for (const auto& p : hub.uninstall_plan.data_paths)
+                ImGui::BulletText("%s", p.string().c_str());
+            if (!hub.uninstall_plan.app_note.empty()) {
+                ImGui::Dummy(ImVec2(0, 4));
+                ImGui::TextColored(th.text_muted, "The app: %s",
+                                   hub.uninstall_plan.app_note.c_str());
+            }
+            ImGui::PopTextWrapPos();
+
+            ImGui::Dummy(ImVec2(0, 10));
+            ImGui::TextColored(th.text_muted, "Type UNINSTALL to confirm:");
+            ImGui::SetNextItemWidth(240.f);
+            ImGui::InputText("##uninstall_confirm", hub.uninstall_confirm,
+                             sizeof(hub.uninstall_confirm));
+
+            ImGui::Dummy(ImVec2(0, 10));
+            const bool busy = hub.job_running.load();
+            const bool confirmed = std::string(hub.uninstall_confirm) == "UNINSTALL";
+            ImGui::BeginDisabled(busy || !confirmed);
+            if (danger_button("Yes, uninstall RetComM", th, ImVec2(240, 0))) {
+                hub.start_job(HubJob::UninstallEverything);
+                ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (ImGui::Button("Cancel", ImVec2(120, 0))) {
+                hub.uninstall_confirm[0] = '\0';
+                ImGui::CloseCurrentPopup();
+            }
             close_modal_on_outside_click();
             ImGui::EndPopup();
         }

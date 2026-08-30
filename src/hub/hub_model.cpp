@@ -2481,6 +2481,36 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                 job = HubJob::None;
                 return;
             }
+            case HubJob::UninstallEverything: {
+                set_status("Uninstalling RetComM…");
+                append_log("Uninstall: removing all RetComM data and the app itself",
+                           LogLevel::Warn);
+
+                // Recompute rather than trusting the UI copy: the modal may have
+                // been open across a data-root change.
+                const RetcommUninstallPlan plan = plan_retcomm_uninstall(paths, exe_dir);
+                for (const auto& p : plan.data_paths)
+                    append_log("Uninstall: will delete " + p.string());
+                if (!plan.app_note.empty()) append_log("Uninstall: " + plan.app_note);
+
+                // Everything happens after this process exits — a running hub
+                // holds its own binaries and data files open.
+                std::string uninstall_err;
+                if (!schedule_retcomm_uninstall(plan, &uninstall_err)) {
+                    append_log("Uninstall failed to start: " + uninstall_err, LogLevel::Error);
+                    set_status("Uninstall failed — see Activity");
+                    show_toast("Could not start the uninstaller");
+                    break;
+                }
+
+                append_log("Uninstall scheduled — closing RetComM", LogLevel::Good);
+                set_status("Closing — RetComM is being removed…");
+                discard_followup_update_prompts();
+                request_exit.store(true);
+                job_running = false;
+                job = HubJob::None;
+                return;
+            }
             case HubJob::None:
                 break;
             }
@@ -3509,7 +3539,12 @@ void HubModel::remove_texture_pack_now(const std::string& title_id,
     append_log("Removed texture pack " + pack_id + " from " + title_id, LogLevel::Good);
 }
 
+void HubModel::refresh_uninstall_plan() {
+    uninstall_plan = plan_retcomm_uninstall(paths, exe_dir);
+}
+
 bool HubModel::save_romm_settings(std::string* error, bool refresh_boxart) {
+    const std::string prev_source = active_boxart_source(cfg);
     AppConfig next = cfg;
     next.romm.base_url = romm_settings.base_url;
     next.romm.api_token = romm_settings.api_token;
@@ -3539,9 +3574,13 @@ bool HubModel::save_romm_settings(std::string* error, bool refresh_boxart) {
     append_log("Wrote RomM settings to " + paths.config_path.string() +
                (cfg.romm.sync_boxart ? " (boxart=RomM)" : " (boxart=Libretro)"));
     refresh_rows(false);
-    // Re-pull covers so RomM menu art replaces any prior url_cover (IGDB) cache.
+    // Re-pull covers only when the art source actually flipped (Libretro <-> RomM).
+    // Saving a URL / API key edit alone must not re-download the whole library;
+    // Resync All Boxart in Library Settings stays the manual way to force that.
     // Setup wizard skips this so ScanRoms can run as the first post-setup job.
-    if (refresh_boxart) start_job(HubJob::FetchBoxart, {}, true);
+    const bool boxart_source_changed = prev_source != active_boxart_source(cfg);
+    if (refresh_boxart && boxart_source_changed)
+        start_job(HubJob::FetchBoxart, {}, true);
     return true;
 }
 
