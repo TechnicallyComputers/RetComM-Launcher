@@ -114,6 +114,15 @@ jobs:
 
       - name: Install packages
         run: |
+          # The runner image ships Microsoft apt repos (azure-cli, prod) that
+          # none of the packages below come from. When their CDN returns 403 —
+          # it does, intermittently, and only for the Azure runner egress —
+          # apt-get update exits 100 and fails the build even though every
+          # Ubuntu archive we actually need fetched fine. Drop the sources we
+          # do not use rather than swallowing the exit code, so a genuine
+          # archive failure still stops the build.
+          sudo rm -f /etc/apt/sources.list.d/*microsoft* \
+                     /etc/apt/sources.list.d/*azure-cli* || true
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build pkg-config \
