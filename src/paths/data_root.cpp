@@ -249,22 +249,34 @@ bool directory_is_writable(const fs::path& dir, std::string* error) {
         return false;
     }
     std::error_code ec;
-    fs::create_directories(dir, ec);
-    if (ec && !fs::is_directory(dir, ec)) {
-        if (error) *error = "cannot create " + dir.string() + ": " + ec.message();
+    // Never create the target here. This runs from the setup wizard on every
+    // keystroke, and creating as-you-type litters the disk with half-typed
+    // folder names and makes the real choice "already exist" before the user
+    // has confirmed it. When the folder is absent, ask the nearest existing
+    // ancestor whether we could create it there instead.
+    fs::path probe_dir = dir;
+    while (!probe_dir.empty() && !fs::is_directory(probe_dir, ec)) {
+        const fs::path parent = probe_dir.parent_path();
+        if (parent == probe_dir) break;
+        probe_dir = parent;
+    }
+    if (probe_dir.empty() || !fs::is_directory(probe_dir, ec)) {
+        if (error) *error = "no existing parent directory for " + dir.string();
         return false;
     }
+    const fs::path dir_orig = dir;
+    const fs::path& probe_target = probe_dir;
     const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    const fs::path probe = dir / (".retcomm-write-test-" + std::to_string(stamp));
+    const fs::path probe = probe_target / (".retcomm-write-test-" + std::to_string(stamp));
     {
         std::ofstream out(probe, std::ios::binary | std::ios::trunc);
         if (!out) {
-            if (error) *error = dir.string() + " is not writable";
+            if (error) *error = dir_orig.string() + " is not writable";
             return false;
         }
         out << "ok";
         if (!out) {
-            if (error) *error = dir.string() + " is not writable";
+            if (error) *error = dir_orig.string() + " is not writable";
             return false;
         }
     }

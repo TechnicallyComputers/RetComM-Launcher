@@ -35,6 +35,9 @@ struct RootMigrationPlan {
     bool to_default = false;           // new_root was empty → back to the OS default
     std::string blocker;               // non-empty → migration must not run
     std::string warning;               // advisory only
+    // Set when the target IS the current location: a valid no-op, not an
+    // error. Callers should proceed and skip the move, not refuse.
+    std::string note;
 };
 
 // An empty `new_root` plans a move back to the OS default location.

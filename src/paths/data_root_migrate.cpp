@@ -269,7 +269,11 @@ RootMigrationPlan plan_root_migration(const Paths& current, const fs::path& new_
     plan.same_as_current = path_under(plan.to_data, plan.from_data) &&
                            path_under(plan.from_data, plan.to_data);
     if (plan.same_as_current) {
-        plan.blocker = "That is already the current location.";
+        // Keeping the folder where it already is is a legitimate answer, not an
+        // error. Blocking here stopped the setup wizard dead for portable
+        // builds, where the stub has already pointed RETCOMM_HOME at the folder
+        // beside the .exe and the wizard offers that same path back.
+        plan.note = "Already using this folder — nothing to move.";
         return plan;
     }
     if (path_under(plan.to_data, plan.from_data) || path_under(plan.to_config, plan.from_config)) {
@@ -312,6 +316,11 @@ RootMigrationResult migrate_data_root(const Paths& current, const fs::path& new_
     const RootMigrationPlan plan = plan_root_migration(current, new_root);
     if (!plan.blocker.empty()) {
         r.message = plan.blocker;
+        return r;
+    }
+    if (plan.same_as_current) {
+        r.ok = true;
+        r.message = plan.note.empty() ? "Already using this folder" : plan.note;
         return r;
     }
 

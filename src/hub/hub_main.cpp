@@ -3496,6 +3496,10 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
             if (plan.blocker.empty()) {
                 ImGui::TextWrapped("Will use:\n  %s\n  %s", plan.to_config.string().c_str(),
                                    plan.to_data.string().c_str());
+                if (!plan.note.empty()) {
+                    ImGui::Dummy(ImVec2(0, 4));
+                    ImGui::TextWrapped("%s", plan.note.c_str());
+                }
                 if (plan.existing_bytes > 0) {
                     ImGui::Dummy(ImVec2(0, 4));
                     ImGui::TextWrapped(
@@ -3772,6 +3776,10 @@ void draw_data_root_dialog(HubModel& hub, const Theme& th, SDL_Window* window) {
         ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 620.f);
         ImGui::TextColored(th.warn, "%s", plan.blocker.c_str());
         ImGui::PopTextWrapPos();
+    } else if (plan.same_as_current) {
+        ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + 620.f);
+        ImGui::TextColored(th.text_muted, "%s", plan.note.c_str());
+        ImGui::PopTextWrapPos();
     } else {
         ImGui::TextColored(th.text_muted, "New location");
         ImGui::TextWrapped("%s", plan.to_data.string().c_str());
@@ -3796,7 +3804,7 @@ void draw_data_root_dialog(HubModel& hub, const Theme& th, SDL_Window* window) {
 
     ImGui::Dummy(ImVec2(0, 12));
     const bool busy = hub.job_running.load();
-    ImGui::BeginDisabled(!plan.blocker.empty() || busy);
+    ImGui::BeginDisabled(!plan.blocker.empty() || plan.same_as_current || busy);
     if (accent_button("Continue", th, ImVec2(160, 0))) {
         hub.pending_data_root = to_default ? fs::path()
                                            : fs::path(hub.data_root_input).lexically_normal();

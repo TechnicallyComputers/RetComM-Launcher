@@ -73,11 +73,12 @@ fs::path exe_path() {
     }
 }
 
-// Create the folder and prove we can write in it. Deciding this up front keeps
-// a read-only medium from failing halfway through extraction.
+// Can we write inside `dir`? Probes an EXISTING directory only — it never
+// creates one. The data folder must not appear beside the .exe before the
+// setup wizard has asked where the user wants it; creating it here made the
+// wizard offer a folder that already existed.
 bool dir_is_writable(const fs::path& dir) {
     std::error_code ec;
-    fs::create_directories(dir, ec);
     if (!fs::is_directory(dir, ec)) return false;
     const fs::path probe = dir / L".retcomm-write-test";
     {
@@ -369,8 +370,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
 
     // Prefer a self-contained folder beside the .exe; fall back to the historical
     // LOCALAPPDATA cache when this medium is read-only.
+    // Probe the exe's own directory — it exists already, so this answers "can
+    // we put a data folder here" without creating one.
     fs::path base = self.parent_path() / L"RetComM-Data";
-    bool portable_base = dir_is_writable(base);
+    bool portable_base = dir_is_writable(self.parent_path());
     if (!portable_base) {
         const fs::path fallback = local_app_data();
         if (fallback.empty()) {
