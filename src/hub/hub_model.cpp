@@ -508,6 +508,58 @@ void HubModel::refresh_rows(bool check_updates, bool force_github_tags) {
                 row.bios_path = row.bios_choice;
                 row.has_bios = true;
             }
+
+        }
+
+        // --- Multi-disc: one Play-time choice per disc of the set -----------
+        // Order follows rom_identity.discs[] (index 1 = boot disc), and only
+        // discs actually present in the library are offered.
+        row.disc_choice_paths.clear();
+        row.disc_choice_labels.clear();
+        row.selected_disc_index = -1;
+        if (t.rom_identity.is_multi_disc()) {
+                        auto has = [](const std::vector<std::string>& want, const std::string& got) {
+                return !want.empty() && !got.empty() &&
+                       std::find(want.begin(), want.end(), got) != want.end();
+            };
+            for (const auto& d : t.rom_identity.discs) {
+                std::string found;
+                for (const auto& f : library.files) {
+                    if (f.title_id != t.id) continue;
+                    if (!has(d.crc32, f.crc32) && !has(d.md5, f.md5) &&
+                        !has(d.sha1, f.sha1) && !has(d.sha256, f.sha256))
+                        continue;
+                    // Disc titles boot from the cue when one sits beside the dump.
+                    const fs::path cue = companion_cue_for_disc_dump(f.path);
+                    found = cue.empty() ? f.path : cue.string();
+                    break;
+                }
+                if (found.empty()) continue;
+                std::string label = "Disc " + std::to_string(d.index);
+                if (!d.serial.empty()) label += " — " + d.serial;
+                row.disc_choice_paths.push_back(found);
+                row.disc_choice_labels.push_back(label);
+            }
+        }
+        if (!row.disc_choice_paths.empty()) {
+            // What the install is actually set to wins over our own memory: the
+            // player may have changed discs inside the game.
+            std::string want;
+            if (row.installed && !row.install_root.empty()) {
+                const fs::path cwd = resolve_current_release_dir(fs::path(row.install_root));
+                if (!cwd.empty())
+                    want = read_psxrecomp_settings_disc(cwd / "settings.toml").string();
+            }
+            if (want.empty()) want = preferred_disc_for(app_state, t.id);
+            for (size_t i = 0; i < row.disc_choice_paths.size(); ++i) {
+                if (same_install_root_path(fs::path(row.disc_choice_paths[i]), fs::path(want))) {
+                    row.selected_disc_index = static_cast<int>(i);
+                    break;
+                }
+            }
+            if (row.selected_disc_index < 0) row.selected_disc_index = 0; // boot disc
+        }
+        {
         }
 
         row.dual_memcard = title_uses_memcards(t);
@@ -1013,6 +1065,15 @@ bool HubModel::start_job(HubJob j, const std::string& title_id, bool force_boxar
                     opts.mode = LaunchMode::Default;
                     opts.detach = true;
                     opts.rom_path = boot_disc_rom(library, *t);
+                    // Multi-disc: Play boots the disc chosen under the button.
+                    // Builds deliberately keep the boot disc — generate is
+                    // compiled against disc 1's EXE.
+                    if (t->rom_identity.is_multi_disc()) {
+                        const std::string chosen =
+                            preferred_disc_for(load_app_state(paths.state_path), title_id);
+                        if (!chosen.empty() && fs::exists(fs::path(chosen)))
+                            opts.rom_path = fs::path(chosen);
+                    }
                     {
                         auto ensured =
                             ensure_canonical_save(paths, cfg, *t, opts.rom_path, true);
@@ -3454,6 +3515,59 @@ bool HubModel::save_romm_settings(std::string* error, bool refresh_boxart) {
     // Re-pull covers so RomM menu art replaces any prior url_cover (IGDB) cache.
     // Setup wizard skips this so ScanRoms can run as the first post-setup job.
     if (refresh_boxart) start_job(HubJob::FetchBoxart, {}, true);
+    return true;
+}
+
+bool HubModel::set_title_preferred_disc(const std::string& title_id,
+                                        const std::string& disc_path, std::string* error) {
+    app_state = load_app_state(paths.state_path);
+    set_preferred_disc(app_state, title_id, disc_path);
+    if (!save_app_state(paths.state_path, app_state, error)) return false;
+
+    // state.json is only the launcher's memory. The runtime boots
+    // settings.toml [disc] path, so an installed title has to be updated there
+    // too or Play would keep booting the old disc.
+    fs::path settings;
+    int disc_index = 0; // 1-based roster position; 0 = unknown
+    {
+        std::lock_guard<std::mutex> lock(mu);
+        for (auto& row : rows) {
+            if (row.id != title_id) continue;
+            row.selected_disc_index = -1;
+            for (size_t i = 0; i < row.disc_choice_paths.size(); ++i) {
+                if (row.disc_choice_paths[i] == disc_path) {
+                    row.selected_disc_index = static_cast<int>(i);
+                    disc_index = static_cast<int>(i) + 1;
+                    break;
+                }
+            }
+            if (row.installed && !row.install_root.empty()) {
+                const fs::path cwd = resolve_current_release_dir(fs::path(row.install_root));
+                if (!cwd.empty()) settings = cwd / "settings.toml";
+            }
+            break;
+        }
+    }
+    if (!settings.empty()) {
+        // disc.cfg is the runtime's remembered pick and RetComM rewrites it on
+        // every Play. Updating settings.toml alone leaves the two disagreeing
+        // until the next launch — and a game started outside RetComM would read
+        // the stale disc.cfg if anything went wrong parsing settings.toml.
+        const fs::path cfg = settings.parent_path() / "disc.cfg";
+        {
+            std::ofstream out(cfg, std::ios::binary | std::ios::trunc);
+            if (out) out << disc_path;
+            if (!out)
+                append_log("Disc selection: could not write " + cfg.string(), LogLevel::Error);
+        }
+        std::string err;
+        if (!set_psxrecomp_settings_disc(settings, fs::path(disc_path), disc_index, &err)) {
+            append_log("Disc selection: could not write " + settings.string() + ": " + err,
+                       LogLevel::Error);
+            if (error) *error = err;
+            return false;
+        }
+    }
     return true;
 }
 

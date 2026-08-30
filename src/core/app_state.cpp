@@ -31,6 +31,7 @@ AppState load_app_state(const fs::path& path) {
         load_string_map(j, "preferred_save", st.preferred_save);
         load_string_map(j, "preferred_save_card2", st.preferred_save_card2);
         load_string_map(j, "preferred_bios", st.preferred_bios);
+        load_string_map(j, "preferred_disc", st.preferred_disc);
         load_string_map(j, "active_texture_pack", st.active_texture_pack);
         if (j.contains("exclude_platform_config") && j.at("exclude_platform_config").is_object()) {
             for (auto it = j.at("exclude_platform_config").begin();
@@ -94,6 +95,10 @@ bool save_app_state(const fs::path& path, const AppState& state, std::string* er
     j["preferred_bios"] = json::object();
     for (const auto& [id, bios] : state.preferred_bios) {
         if (!id.empty() && !bios.empty()) j["preferred_bios"][id] = bios;
+    }
+    j["preferred_disc"] = json::object();
+    for (const auto& [id, disc] : state.preferred_disc) {
+        if (!id.empty() && !disc.empty()) j["preferred_disc"][id] = disc;
     }
     j["exclude_platform_config"] = json::object();
     for (const auto& id : state.exclude_platform_config) {
@@ -163,6 +168,21 @@ void set_preferred_bios(AppState& state, const std::string& title_id,
         state.preferred_bios.erase(title_id);
     else
         state.preferred_bios[title_id] = bios_choice;
+}
+
+std::string preferred_disc_for(const AppState& state, const std::string& title_id) {
+    const auto it = state.preferred_disc.find(title_id);
+    if (it == state.preferred_disc.end()) return {};
+    return it->second;
+}
+
+void set_preferred_disc(AppState& state, const std::string& title_id,
+                        const std::string& disc_path) {
+    if (title_id.empty()) return;
+    if (disc_path.empty())
+        state.preferred_disc.erase(title_id);
+    else
+        state.preferred_disc[title_id] = disc_path;
 }
 
 std::string active_texture_pack_for(const AppState& state, const std::string& title_id) {

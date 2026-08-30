@@ -24,6 +24,10 @@ struct AppState {
     std::unordered_map<std::string, std::string> preferred_save_card2;
     // title_id → absolute BIOS dump path, or kOpenBiosChoice for OpenBIOS.
     std::unordered_map<std::string, std::string> preferred_bios;
+    // Multi-disc titles: title_id → absolute path of the disc Play should boot.
+    // Mirrored into the install's settings.toml [disc] path, which is what the
+    // runtime actually reads; this map is the launcher-side memory of it.
+    std::unordered_map<std::string, std::string> preferred_disc;
     // Titles that skip global platform Configure merge on install/update/launch.
     std::unordered_set<std::string> exclude_platform_config;
     // title_id → active HD texture pack id (a directory name under
@@ -45,6 +49,10 @@ void set_preferred_save_card2(AppState& state, const std::string& title_id,
 std::string preferred_bios_for(const AppState& state, const std::string& title_id);
 void set_preferred_bios(AppState& state, const std::string& title_id,
                         const std::string& bios_choice);
+
+std::string preferred_disc_for(const AppState& state, const std::string& title_id);
+void set_preferred_disc(AppState& state, const std::string& title_id,
+                        const std::string& disc_path);
 
 bool title_excludes_platform_config(const AppState& state, const std::string& title_id);
 

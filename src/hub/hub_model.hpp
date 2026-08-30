@@ -187,6 +187,11 @@ struct TitleRow {
     std::vector<std::string> bios_choice_ids;
     std::vector<std::string> bios_choice_labels;
     int preferred_bios_index = -1;
+    // Multi-disc sets: one entry per catalog rom_identity.discs[] that resolved
+    // to a file in the library. Empty for single-disc titles.
+    std::vector<std::string> disc_choice_paths;
+    std::vector<std::string> disc_choice_labels;
+    int selected_disc_index = -1;
     std::string bios_choice; // selected id (path or kOpenBiosChoice)
     // Active HD texture pack id, or "" for native textures. Just the selection —
     // the pack list itself is scanned on demand (HubModel::texpack_*) because
@@ -695,6 +700,11 @@ struct HubModel {
 
     // Persist BIOS choice: absolute dump path, or kOpenBiosChoice.
     bool set_title_preferred_bios(const std::string& title_id, const std::string& bios_choice,
+                                  std::string* error = nullptr);
+    // Pick which disc of a multi-disc set Play boots. Writes the install's
+    // settings.toml [disc] (what the runtime reads) and remembers it in
+    // state.json so the choice survives reinstalls that rewrite settings.toml.
+    bool set_title_preferred_disc(const std::string& title_id, const std::string& disc_path,
                                   std::string* error = nullptr);
 
     // Mint a new empty managed save in the library (or install saves/), set preferred.

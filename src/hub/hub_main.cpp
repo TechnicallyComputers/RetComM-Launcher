@@ -2478,6 +2478,44 @@ void draw_detail(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_Window
         ImGui::EndDisabled();
     }
 
+    // Disc selection under Play (multi-disc sets only). Writes the install's
+    // settings.toml [disc], which is what the runtime boots, so the choice
+    // holds whether the game is started from here or run directly.
+    if (row.disc_choice_paths.size() > 1) {
+        ImGui::Dummy(ImVec2(0, 8));
+        ImGui::TextColored(th.text_muted, "Disc");
+        const char* preview =
+            (row.selected_disc_index >= 0 &&
+             row.selected_disc_index < static_cast<int>(row.disc_choice_labels.size()))
+                ? row.disc_choice_labels[static_cast<size_t>(row.selected_disc_index)].c_str()
+                : "(select)";
+        ImGui::SetNextItemWidth(-1);
+        ImGui::BeginDisabled(hub.launch_running.load());
+        if (ImGui::BeginCombo("##disc_choice", preview)) {
+            for (size_t i = 0; i < row.disc_choice_paths.size(); ++i) {
+                const bool selected = static_cast<int>(i) == row.selected_disc_index;
+                const std::string item =
+                    row.disc_choice_labels[i] + "##disc" + std::to_string(i);
+                if (ImGui::Selectable(item.c_str(), selected)) {
+                    std::string err;
+                    if (!hub.set_title_preferred_disc(row.id, row.disc_choice_paths[i], &err))
+                        hub.append_log("Disc selection failed: " + err);
+                    else
+                        hub.set_status("Disc set to " + row.disc_choice_labels[i]);
+                }
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("%s", row.disc_choice_paths[i].c_str());
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::EndDisabled();
+        if (!row.installed) {
+            ImGui::TextColored(th.text_muted,
+                               "Applies to the install once this title is installed.");
+        }
+    }
+
     // Slot selection under Play; install lifecycle in Manage Game Data.
     if (row.installed) {
         ImGui::Dummy(ImVec2(0, 8));

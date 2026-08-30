@@ -10,6 +10,20 @@
 
 namespace retcomm {
 
+// Disc path recorded in an install's settings.toml [disc], or empty. The
+// runtime boots this over game.toml's discs list, so it is what the install is
+// actually set to — read it back rather than assuming a written preference
+// stuck (the player can change discs inside the game).
+fs::path read_psxrecomp_settings_disc(const fs::path& settings_path);
+
+// Point an install's settings.toml [disc] at `disc`, leaving [bios] and every
+// other table alone. Empty `disc` clears the table (runtime falls back to
+// game.toml's discs list).
+// `disc_index` is the 1-based position in the title's disc roster; pass 0 when
+// unknown. recomp-ui preselects on that index, not on the path.
+bool set_psxrecomp_settings_disc(const fs::path& settings_path, const fs::path& disc,
+                                 int disc_index, std::string* error = nullptr);
+
 namespace fs = std::filesystem;
 
 // How RetComM boots a title. Default opens the game's dedicated recomp-ui

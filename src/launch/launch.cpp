@@ -331,6 +331,85 @@ void strip_toml_table(std::string& body, const std::string& name) {
     body = out.str();
 }
 
+} // namespace
+
+fs::path read_psxrecomp_settings_disc(const fs::path& settings_path) {
+    // The runtime boots settings.toml [disc] path when present (it overrides
+    // game.toml's discs list), so this is the authoritative answer to "which
+    // disc is this install set to" — including changes made inside the game.
+    std::ifstream in(settings_path);
+    if (!in) return {};
+    std::string line;
+    bool in_disc = false;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::string t = line;
+        const auto first = t.find_first_not_of(" \t");
+        if (first == std::string::npos) continue;
+        t = t.substr(first);
+        if (t.front() == '[') {
+            in_disc = (t.rfind("[disc]", 0) == 0);
+            continue;
+        }
+        if (!in_disc) continue;
+        if (t.rfind("path", 0) != 0) continue;
+        const auto eq = t.find('=');
+        if (eq == std::string::npos) continue;
+        const auto q1 = t.find('"', eq);
+        if (q1 == std::string::npos) continue;
+        std::string val;
+        for (size_t i = q1 + 1; i < t.size(); ++i) {
+            if (t[i] == '\\' && i + 1 < t.size()) {
+                val.push_back(t[++i]);
+                continue;
+            }
+            if (t[i] == '"') break;
+            val.push_back(t[i]);
+        }
+        if (!val.empty()) return fs::path(val);
+    }
+    return {};
+}
+
+bool set_psxrecomp_settings_disc(const fs::path& settings_path, const fs::path& disc,
+                                 int disc_index, std::string* error) {
+    // Only the [disc] table is rewritten. upsert_psxrecomp_settings() replaces
+    // [bios] as well, which would drop a configured BIOS when the caller has
+    // none to pass (OpenBIOS titles keep no bios path).
+    std::string body;
+    {
+        std::ifstream in(settings_path);
+        if (in) {
+            std::ostringstream ss;
+            ss << in.rdbuf();
+            body = ss.str();
+        }
+    }
+    strip_toml_table(body, "disc");
+    while (!body.empty() && (body.back() == '\n' || body.back() == '\r' ||
+                             body.back() == ' ' || body.back() == '\t'))
+        body.pop_back();
+    if (!body.empty()) body.push_back('\n');
+    if (!disc.empty()) {
+        body += "\n[disc]\npath = \"";
+        body += toml_escape(path_utf8(disc));
+        body += "\"\n";
+        // `selected` is the 1-based roster index recomp-ui actually preselects
+        // on (RecompLauncherCSettings.disc_index). `path` alone is not enough:
+        // the host normalizes a .cue to its .bin before seeding the launcher,
+        // so matching that path against a roster of .cue entries misses and the
+        // UI falls back to disc 1. Harmless on builds that predate the key.
+        if (disc_index >= 1) {
+            body += "selected = ";
+            body += std::to_string(disc_index);
+            body += "\n";
+        }
+    }
+    return write_text_file(settings_path, body, error);
+}
+
+namespace {
+
 // Upsert MotK/psxrecomp [bios]/[disc] tables next to the release binary.
 // Paths should already be guest-facing (Wine Z:\… when needed).
 bool upsert_psxrecomp_settings(const fs::path& settings_path, const std::string& bios,
