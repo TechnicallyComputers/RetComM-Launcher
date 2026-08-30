@@ -224,6 +224,17 @@ std::string fetch_latest_release_tag(const std::string& github_slug, std::string
 // Extract zip/tar/7z into dest (creates dest). Used by install + self-update.
 bool extract_archive_to(const fs::path& archive, const fs::path& dest, std::string* error = nullptr);
 
+// Cheap structural check on a downloaded archive (zip: local-header signature +
+// end-of-central-directory). Catches truncated/zeroed cache files — e.g. a drive
+// that dropped mid-write — before we hand them to an extractor.
+bool archive_structure_ok(const fs::path& archive, std::string* error = nullptr);
+
+// Drop a cached release download so the next resolve re-fetches it. Needed when
+// an archive fails to extract: an interrupted write leaves a file whose size
+// still matches the GitHub asset, so the size-based cache check accepts it
+// forever. Renames it aside when the delete is blocked (AV/scanner holds).
+bool discard_cached_release_zip(const fs::path& zip_path, std::string* error = nullptr);
+
 // Durable release zip cache: data_dir/cache/releases/<owner_repo>/<tag>/<asset>.
 fs::path release_download_cache_path(const Paths& paths, const std::string& github_slug,
                                     const std::string& tag, const std::string& asset_name);

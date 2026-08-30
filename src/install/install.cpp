@@ -416,24 +416,43 @@ std::wstring win_ps_single_quote(const fs::path& p) {
 
 bool extract_archive_windows(const fs::path& archive, const fs::path& dest, std::string* error) {
     std::string err;
+    std::error_code ec;
+
+    // A failed extractor stops at the first bad member and leaves the files it
+    // already wrote behind; the next one would then extract over that partial
+    // tree. Only safe to wipe when dest was ours to begin with (empty on entry) —
+    // nested-archive unwrapping extracts into a populated parent.
+    const bool dest_was_empty = fs::is_empty(dest, ec) && !ec;
+    auto reset_dest = [&] {
+        if (!dest_was_empty) return;
+        std::error_code rec;
+        fs::remove_all(dest, rec);
+        fs::create_directories(dest, rec);
+    };
 
     // Windows 10+ ships tar.exe (libarchive) — handles zip and common tar.* formats.
     if (win_exe_on_path(L"tar")) {
         if (win_run_hidden(L"tar.exe",
                            {L"-xf", archive.wstring(), L"-C", dest.wstring()}, &err) == 0)
             return true;
+        reset_dest();
     }
 
     // PowerShell Expand-Archive for .zip (same approach as the portable stub).
+    // -ErrorAction Stop + catch is required: Expand-Archive writes non-terminating
+    // errors on a corrupt member, and powershell.exe would still exit 0 — which
+    // reported a truncated tree as a successful extract.
     const std::string name = archive.filename().string();
     if (ends_with_ci(name, ".zip") && win_exe_on_path(L"powershell")) {
         const std::wstring cmd =
-            L"Expand-Archive -LiteralPath '" + win_ps_single_quote(archive) +
-            L"' -DestinationPath '" + win_ps_single_quote(dest) + L"' -Force";
+            L"try { Expand-Archive -LiteralPath '" + win_ps_single_quote(archive) +
+            L"' -DestinationPath '" + win_ps_single_quote(dest) +
+            L"' -Force -ErrorAction Stop } catch { exit 1 }";
         if (win_run_hidden(L"powershell.exe",
                            {L"-NoProfile", L"-ExecutionPolicy", L"Bypass", L"-Command", cmd},
                            &err) == 0)
             return true;
+        reset_dest();
     }
 
     // Optional 7-Zip on PATH.
@@ -441,9 +460,14 @@ bool extract_archive_windows(const fs::path& archive, const fs::path& dest, std:
         const std::wstring out_sw = L"-o" + dest.wstring();
         if (win_run_hidden(L"7z.exe", {L"x", L"-y", out_sw, archive.wstring()}, &err) == 0)
             return true;
+        reset_dest();
     }
 
-    if (error) *error = err.empty() ? "no extractor succeeded for " + archive.string() : err;
+    if (error) {
+        *error = "no extractor succeeded for " + archive.filename().string() +
+                 " (archive may be corrupt or incomplete)";
+        if (!err.empty()) *error += ": " + err;
+    }
     return false;
 }
 
@@ -1620,6 +1644,66 @@ bool extract_archive_to(const fs::path& archive, const fs::path& dest, std::stri
     return extract_archive(archive, dest, error);
 }
 
+bool archive_structure_ok(const fs::path& archive, std::string* error) {
+    const std::string name = archive.filename().string();
+    std::error_code ec;
+    const std::uintmax_t size = fs::file_size(archive, ec);
+    if (ec || size == 0) {
+        if (error) *error = name + " is empty or unreadable";
+        return false;
+    }
+    // Only zip has a cheap, seek-only structure to verify; tar.* streams do not.
+    if (!ends_with_ci(name, ".zip")) return true;
+
+    std::ifstream in(archive, std::ios::binary);
+    if (!in) {
+        if (error) *error = name + " could not be opened";
+        return false;
+    }
+    char head[4] = {};
+    in.read(head, sizeof(head));
+    if (in.gcount() != 4 || head[0] != 'P' || head[1] != 'K') {
+        if (error) *error = name + " is not a zip (bad signature)";
+        return false;
+    }
+    // The end-of-central-directory record sits in the last 22 bytes plus up to a
+    // 64K comment. Its absence means the tail of the file never landed.
+    const std::uintmax_t want = 22u + 65535u;
+    const std::size_t tail = static_cast<std::size_t>(size < want ? size : want);
+    std::vector<char> buf(tail);
+    in.seekg(static_cast<std::streamoff>(size - tail), std::ios::beg);
+    in.read(buf.data(), static_cast<std::streamsize>(tail));
+    const std::size_t got = static_cast<std::size_t>(in.gcount());
+    if (got >= 4) {
+        for (std::size_t i = got - 4;; --i) {
+            if (buf[i] == 'P' && buf[i + 1] == 'K' && buf[i + 2] == '\x05' &&
+                buf[i + 3] == '\x06')
+                return true;
+            if (i == 0) break;
+        }
+    }
+    if (error) *error = name + " is truncated (no end-of-central-directory)";
+    return false;
+}
+
+bool discard_cached_release_zip(const fs::path& zip_path, std::string* error) {
+    std::error_code ec;
+    if (zip_path.empty() || !fs::is_regular_file(zip_path, ec)) {
+        if (error) *error = "no cached file to discard";
+        return false;
+    }
+    if (fs::remove(zip_path, ec) && !ec) return true;
+    // Held open by a scanner: park it beside the cache entry so the size-based
+    // cache check misses and the next resolve downloads a clean copy.
+    const fs::path aside = zip_path.string() + ".bad";
+    std::error_code rec;
+    fs::remove(aside, rec);
+    fs::rename(zip_path, aside, rec);
+    if (!rec) return true;
+    if (error) *error = rec.message();
+    return false;
+}
+
 InstallRecord load_install_record(const fs::path& install_root) {
     InstallRecord rec;
     const fs::path path = install_root / "install.json";
@@ -2036,7 +2120,11 @@ EnsuredReleaseAsset ensure_release_asset_cached(const Paths& paths, const Title&
                 if (!it->is_regular_file(ec)) continue;
                 const std::string name = it->path().filename().string();
                 if (name.size() > 5 && name.compare(name.size() - 5, 5, ".part") == 0) continue;
+                if (name.size() > 4 && name.compare(name.size() - 4, 4, ".bad") == 0) continue;
                 if (!asset_name_matches_glob(glob, name)) continue;
+                // Offline: no asset size to compare against, so a structure check
+                // is the only guard against handing back a half-written zip.
+                if (!archive_structure_ok(it->path())) continue;
                 int score = ends_with_ci(name, ".zip") ? 3 : 0;
                 if (score < best_score) continue;
                 best_score = score;
@@ -2126,10 +2214,16 @@ EnsuredReleaseAsset ensure_release_asset_cached(const Paths& paths, const Title&
     std::error_code ec;
     if (asset->size > 0 && fs::is_regular_file(out.download, ec) &&
         fs::file_size(out.download, ec) == asset->size) {
-        out.ok = true;
-        out.from_cache = true;
-        out.message = "cached " + asset->name + " (" + out.rel.tag + ")";
-        return out;
+        // A write the drive never flushed can leave a full-size file of garbage,
+        // so size alone is not enough to trust the cache.
+        std::string bad;
+        if (archive_structure_ok(out.download, &bad)) {
+            out.ok = true;
+            out.from_cache = true;
+            out.message = "cached " + asset->name + " (" + out.rel.tag + ")";
+            return out;
+        }
+        discard_cached_release_zip(out.download);
     }
 
     ensure_dirs(paths);
@@ -2261,8 +2355,30 @@ InstallResult install_title(const Paths& paths_in, const Title& title, const Ins
 
     std::string err;
     if (!extract_archive(download, staging, &err)) {
-        result.message = "extract failed: " + err;
-        return result;
+        // Corrupt cache entry (interrupted write / bad sectors): evict it and pull
+        // a clean copy once, instead of failing identically on every retry.
+        if (!ensured.from_cache || !discard_cached_release_zip(download)) {
+            result.message = "extract failed: " + err;
+            return result;
+        }
+        std::cerr << "Cached " << ensured.asset_name
+                  << " failed to extract — discarded, re-downloading…\n";
+        auto fresh = ensure_release_asset_cached(paths, title, opts,
+                                                 /*allow_skip_uptodate=*/false, nullptr);
+        if (!fresh.ok || fresh.from_cache || fresh.download.empty()) {
+            result.message = "extract failed: " + err +
+                             "\n  discarded the corrupt cached " + ensured.asset_name +
+                             "; re-download failed: " + fresh.message +
+                             "\n  Run Check Updates when GitHub is reachable, then retry.";
+            return result;
+        }
+        fs::remove_all(staging, ec);
+        fs::create_directories(staging, ec);
+        if (!extract_archive(fresh.download, staging, &err)) {
+            result.message =
+                "extract failed after re-downloading " + fresh.asset_name + ": " + err;
+            return result;
+        }
     }
     const std::string launch_name = title.launch_binary_for_os(target_os);
     if (!unwrap_nested_archives(staging, launch_name, &err)) {

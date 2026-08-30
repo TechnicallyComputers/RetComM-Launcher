@@ -3953,18 +3953,34 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
 
         progress(on_progress, "Resolving release source zip…");
         int last_pct = -1;
-        auto zip = resolve_title_release_zip(
-            paths, title, iopts, [&](std::uint64_t got, std::uint64_t total) {
-                if (!on_progress || total == 0) return;
-                const int pct = static_cast<int>((got * 100) / total);
-                if (pct == last_pct || (pct != 100 && pct % 5 != 0)) return;
-                last_pct = pct;
-                progress(on_progress,
-                         "Downloading release source… " + std::to_string(pct) + "%",
-                         static_cast<float>(got) / static_cast<float>(total));
-            });
+        auto dl_progress = [&](std::uint64_t got, std::uint64_t total) {
+            if (!on_progress || total == 0) return;
+            const int pct = static_cast<int>((got * 100) / total);
+            if (pct == last_pct || (pct != 100 && pct % 5 != 0)) return;
+            last_pct = pct;
+            progress(on_progress, "Downloading release source… " + std::to_string(pct) + "%",
+                     static_cast<float>(got) / static_cast<float>(total));
+        };
+        auto zip = resolve_title_release_zip(paths, title, iopts, dl_progress);
 
-        if (zip.ok && !zip.zip_path.empty() && !zip.tag.empty()) {
+        // A cached zip that lost bytes (drive dropped mid-write) still matches the
+        // GitHub asset size, so it would fail identically on every rebuild. Evict
+        // it once and pull a clean copy rather than reporting a broken source tree.
+        std::string discarded;
+        auto refetch_after_bad_zip = [&](const std::string& why) -> bool {
+            if (!zip.from_cache || zip.zip_path.empty()) return false;
+            if (!discard_cached_release_zip(zip.zip_path)) return false;
+            discarded = zip.asset_name;
+            progress(on_progress,
+                     "Cached " + zip.asset_name + " unusable (" + why + ") — re-downloading…");
+            last_pct = -1;
+            zip = resolve_title_release_zip(paths, title, iopts, dl_progress);
+            return zip.ok && !zip.zip_path.empty() && !zip.tag.empty() && !zip.from_cache;
+        };
+
+        for (int attempt = 0; attempt < 2; ++attempt) {
+            if (!zip.ok || zip.zip_path.empty() || zip.tag.empty()) break;
+
             ensure_working_source_dir(title, src_base, dest, zip.tag, on_progress);
             if (source_up_to_date(zip.tag)) {
                 // Convert any leftover full engine copies on cached source trees.
@@ -3982,21 +3998,36 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
             fs::remove_all(staging, ec);
             fs::create_directories(staging, ec);
             std::string err;
-            if (extract_archive_to(zip.zip_path, staging, &err) &&
-                install_into_working(staging, &err)) {
-                // Engines are excluded from content-sync; link them before the
-                // cmake-buildable check so a fresh preserving install still passes.
-                promote_shared_engines(paths, title, dest, staging, on_progress, engines_dir);
-                if (source_tree_buildable(title, dest)) {
-                    finish_ok(zip.tag, zip.asset_name, "release", staging);
-                    if (zip.from_cache) r.message += " [" + zip.message + "]";
-                    return r;
-                }
-                r.message = describe_unbuildable_source(title, dest, zip.asset_name);
+            if (!extract_archive_to(zip.zip_path, staging, &err)) {
+                if (attempt == 0 && refetch_after_bad_zip("extract failed")) continue;
+                r.message = "release source extract failed: " +
+                            (err.empty() ? zip.message : err);
+                if (!discarded.empty())
+                    r.message += " (discarded corrupt cached " + discarded + ")";
                 return r;
             }
-            r.message = "release source extract failed: " +
-                        (err.empty() ? zip.message : err);
+            if (!install_into_working(staging, &err)) {
+                r.message = "release source install failed: " +
+                            (err.empty() ? zip.message : err);
+                return r;
+            }
+            // Engines are excluded from content-sync; link them before the
+            // cmake-buildable check so a fresh preserving install still passes.
+            promote_shared_engines(paths, title, dest, staging, on_progress, engines_dir);
+            if (source_tree_buildable(title, dest)) {
+                finish_ok(zip.tag, zip.asset_name, "release", staging);
+                if (zip.from_cache) r.message += " [" + zip.message + "]";
+                if (!discarded.empty())
+                    r.message += " (replaced corrupt cached " + discarded + ")";
+                return r;
+            }
+            // Extraction reported success but the tree is short of files — a
+            // partially decompressed archive is the usual cause, so try a clean
+            // download before blaming the tree.
+            if (attempt == 0 && refetch_after_bad_zip("incomplete source tree")) continue;
+            r.message = describe_unbuildable_source(title, dest, zip.asset_name);
+            if (!discarded.empty())
+                r.message += " (already re-downloaded " + discarded + " once)";
             return r;
         }
 
@@ -4007,6 +4038,9 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
                 (zip.message.empty() ? "no cached zip and GitHub API failed" : zip.message) +
                 ". Run Check Updates when GitHub is reachable so the release zip can "
                 "prefetch, then retry Update.";
+            if (!discarded.empty())
+                r.message += " (the cached " + discarded +
+                             " was corrupt and has been discarded)";
             return r;
         }
         progress(on_progress, "Release source unavailable (" + zip.message +
@@ -4049,7 +4083,10 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
     }
     progress(on_progress, "Extracting source zipball…");
     if (!extract_archive_to(download, staging, &err)) {
-        r.message = "source extract failed: " + err;
+        // Drop the partial/corrupt download so the next attempt re-fetches it
+        // instead of resuming onto bad bytes.
+        fs::remove(download, ec);
+        r.message = "source extract failed: " + err + " (discarded the download; retry Update)";
         return r;
     }
     if (!install_into_working(staging, &err)) {
