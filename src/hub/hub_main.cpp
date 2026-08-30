@@ -3258,8 +3258,11 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     float target_w = kWizW;
     float target_h = kWizH;
-    if (hub.setup_path == SetupPath::Easy) {
-        // Sparse content — ~30% smaller than the shared wizard size.
+    if (hub.setup_path == SetupPath::Easy && hub.setup_step != 0) {
+        // Sparse content — ~30% smaller than the shared wizard size. The
+        // Installation Directory step (step 0) is as dense as the Advanced one,
+        // so it keeps the full size rather than cramming radios and two paths
+        // into the compact window.
         target_w = 780.f * 0.70f;
         target_h = 628.f * 0.70f;
     }
@@ -3351,6 +3354,8 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
                                  "and saves under it with default platform folders.",
                                  "setup_easy_rocket.png", card_w, card_h)) {
             hub.setup_path = SetupPath::Easy;
+            hub.setup_step = 0; // Installation Directory, then the game folder.
+            hub.seed_data_root_input();
             hub.pending_data_root.clear();
             hub.pending_data_root_change = false;
             hub.apply_suggested_emulation_root(/*overwrite_nonempty=*/false);
@@ -3368,6 +3373,104 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
         }
         ImGui::EndChild();
 
+    } else if (hub.setup_path == SetupPath::Easy && hub.setup_step == 0) {
+        // Step 1 of 2 — the install location. Deliberately plainer language than
+        // the Advanced wording: "Installation Directory" is what people expect
+        // to be asked for, and it has to come first because everything the next
+        // step creates lands under it.
+        hub.refresh_data_root_plan();
+        const bool custom = hub.setup_use_custom_data_root;
+        const bool root_ok = !custom || hub.data_root_plan.blocker.empty();
+        const float warn_h = root_ok ? 0.f : ImGui::GetTextLineHeightWithSpacing();
+        const float footer_h = footer_reserve(warn_h);
+        ImGui::BeginChild("##setup_easy_root_body", ImVec2(0.f, -footer_h), ImGuiChildFlags_None);
+        push_wrap();
+        ImGui::TextWrapped(
+            "Step 1 of 2 — Installation Directory. This is where RetComM installs itself: "
+            "the games it builds, the build tools it downloads, and its caches. It can grow "
+            "to tens of GB, so pick a drive with room. Your game files are chosen next and "
+            "can live anywhere.");
+        ImGui::PopTextWrapPos();
+        ImGui::Dummy(ImVec2(0, 12));
+
+        bool changed = false;
+        if (ImGui::RadioButton("Install to the default location", !custom)) {
+            hub.setup_use_custom_data_root = false;
+            changed = true;
+        }
+        ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+        push_wrap();
+        ImGui::TextWrapped("  %s", retcomm::default_os_data_dir().string().c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+
+        ImGui::Dummy(ImVec2(0, 8));
+        if (ImGui::RadioButton("Install to a folder I choose", custom)) {
+            hub.setup_use_custom_data_root = true;
+            if (hub.data_root_input[0] == '\0' && !hub.exe_dir.empty()) {
+                copy_buf(hub.data_root_input, sizeof(hub.data_root_input),
+                         (hub.exe_dir / "RetComM").string());
+            }
+            changed = true;
+        }
+        if (changed) hub.data_root_plan_dirty = true;
+
+        ImGui::Dummy(ImVec2(0, 8));
+        ImGui::BeginDisabled(!custom);
+        if (path_field_with_browse("Installation Directory", "##setup_easy_data_root",
+                                   hub.data_root_input, sizeof(hub.data_root_input), hub, window,
+                                   FolderPickTarget::DataRoot, th))
+            hub.data_root_plan_dirty = true;
+        ImGui::EndDisabled();
+
+        if (custom) {
+            const auto& plan = hub.data_root_plan;
+            ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+            push_wrap();
+            if (plan.blocker.empty()) {
+                ImGui::TextWrapped("RetComM will be installed in:\n  %s",
+                                   plan.to_root.string().c_str());
+                if (!plan.note.empty()) {
+                    ImGui::Dummy(ImVec2(0, 4));
+                    ImGui::TextWrapped("%s", plan.note.c_str());
+                }
+                if (plan.existing_bytes > 0) {
+                    ImGui::Dummy(ImVec2(0, 4));
+                    ImGui::TextWrapped("Existing RetComM files (%s) move here when you finish.",
+                                       human_bytes(plan.existing_bytes).c_str());
+                }
+            } else {
+                ImGui::TextWrapped("Pick a folder RetComM can create and write to.");
+            }
+            ImGui::PopTextWrapPos();
+            ImGui::PopStyleColor();
+            if (!plan.warning.empty()) {
+                push_wrap();
+                ImGui::TextColored(th.warn, "%s", plan.warning.c_str());
+                ImGui::PopTextWrapPos();
+            }
+        }
+        ImGui::EndChild();
+
+        pin_footer_row(warn_h);
+        if (ImGui::Button("Back", ImVec2(100, 0))) {
+            hub.setup_path = SetupPath::Chooser;
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!root_ok);
+        if (accent_button("Next", th, ImVec2(120, 0))) {
+            const fs::path chosen =
+                custom ? fs::path(hub.data_root_input).lexically_normal() : fs::path();
+            hub.pending_data_root = chosen;
+            hub.pending_data_root_change =
+                custom ? !(retcomm::using_custom_root(hub.paths) && hub.paths.root == chosen)
+                       : retcomm::using_custom_root(hub.paths);
+            hub.setup_step = 1;
+        }
+        ImGui::EndDisabled();
+        if (!root_ok) {
+            ImGui::TextColored(th.warn, "%s", hub.data_root_plan.blocker.c_str());
+        }
     } else if (hub.setup_path == SetupPath::Easy) {
         const bool emu_ok = hub.setup_emulation_root[0] != '\0';
         const float warn_h = emu_ok ? 0.f : ImGui::GetTextLineHeightWithSpacing();
@@ -3375,8 +3478,10 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
         ImGui::BeginChild("##setup_easy_body", ImVec2(0.f, -footer_h), ImGuiChildFlags_None);
         push_wrap();
         ImGui::TextWrapped(
-            "Choose your Emulation folder. RetComM will use …/roms, …/bios, and …/saves "
-            "under it, create any that are missing, and seed default platform folders.");
+            "Step 2 of 2 — Choose your Emulation folder. This is where your game files "
+            "live, separate from the installation directory. RetComM will use …/roms, "
+            "…/bios, and …/saves under it, create any that are missing, and seed default "
+            "platform folders.");
         ImGui::PopTextWrapPos();
         ImGui::Dummy(ImVec2(0, 10));
         if (ImGui::Button("Use ~/Emulation")) {
@@ -3408,7 +3513,7 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
 
         pin_footer_row(warn_h);
         if (ImGui::Button("Back", ImVec2(100, 0))) {
-            hub.setup_path = SetupPath::Chooser;
+            hub.setup_step = 0; // back to the Installation Directory
         }
         ImGui::SameLine();
         ImGui::BeginDisabled(!emu_ok);
@@ -3417,6 +3522,15 @@ void draw_setup_wizard(HubModel& hub, BoxartCache& boxart, const Theme& th, SDL_
             if (!hub.finish_easy_setup(&err)) {
                 hub.append_log("easy setup failed: " + err);
                 hub.set_status("Easy setup failed");
+            } else if (hub.pending_data_root_change) {
+                // Same as the Advanced path: config, indexes and the setup
+                // marker are written under the current root, so they travel
+                // with the move. The job relaunches; the scan prompt comes back
+                // on the next run.
+                hub.append_log("First-time easy setup saved");
+                hub.pending_data_root_change = false;
+                hub.show_setup_scan_prompt = false;
+                hub.start_job(HubJob::MigrateDataRoot);
             } else {
                 hub.set_status("Setup complete");
                 hub.append_log("First-time easy setup saved");
