@@ -12,6 +12,11 @@
 //   <exe_dir>\RetComM-Data\data\      apps, toolchains, engines, catalog, …
 // RETCOMM_HOME is exported to the child so it resolves the same folder.
 //
+// When setup moves the RetComM folder elsewhere, the hub records the new root
+// in <exe_dir>\retcomm-root.json. We then unpack into <root>\runtime\ instead
+// and delete the old RetComM-Data, so the launcher ends up as a lone .exe with
+// one folder holding the runtime, config and data together.
+//
 // When the exe folder is not writable (Downloads with MotW, a network share, a
 // read-only stick) we fall back to %LOCALAPPDATA%\retcomm\portable\current\ for
 // the runtime and leave RETCOMM_HOME unset, so config+data stay at the historical
@@ -89,6 +94,68 @@ bool dir_is_writable(const fs::path& dir) {
     }
     fs::remove(probe, ec);
     return true;
+}
+
+bool same_path(const fs::path& a, const fs::path& b) {
+    if (a.empty() || b.empty()) return false;
+    const std::wstring aw = a.lexically_normal().wstring();
+    const std::wstring bw = b.lexically_normal().wstring();
+    return _wcsicmp(aw.c_str(), bw.c_str()) == 0;
+}
+
+// Pull the "root" string out of retcomm-root.json. The stub links nothing but
+// shell32 on purpose, so this reads the single field it needs rather than
+// pulling in a JSON library — the mirror of read_data_root_marker() in
+// data_root.cpp, including resolving a relative root against the marker's own
+// directory so a moved stick still works.
+fs::path read_root_marker(const fs::path& marker) {
+    std::error_code ec;
+    if (!fs::is_regular_file(marker, ec)) return {};
+    std::ifstream in(marker, std::ios::binary);
+    if (!in) return {};
+    const std::string text((std::istreambuf_iterator<char>(in)),
+                            std::istreambuf_iterator<char>());
+
+    const std::string key = "\"root\"";
+    const size_t k = text.find(key);
+    if (k == std::string::npos) return {};
+    size_t p = text.find(':', k + key.size());
+    if (p == std::string::npos) return {};
+    ++p;
+    while (p < text.size() && (text[p] == ' ' || text[p] == '\t' || text[p] == '\r' ||
+                               text[p] == '\n'))
+        ++p;
+    if (p >= text.size() || text[p] != '"') return {};
+    ++p;
+
+    std::string raw;
+    for (; p < text.size() && text[p] != '"'; ++p) {
+        if (text[p] == '\\' && p + 1 < text.size()) ++p; // \\ \" \/ → literal
+        raw.push_back(text[p]);
+    }
+    if (raw.empty()) return {};
+
+    fs::path root(std::wstring(raw.begin(), raw.end()));
+    if (root.is_relative()) {
+        fs::path joined = fs::absolute(marker.parent_path() / root, ec);
+        root = ec ? (marker.parent_path() / root) : joined;
+    }
+    return root.lexically_normal();
+}
+
+// True when `dir` holds nothing but a previously unpacked runtime. Anything
+// else — config/, data/, a file the user dropped in — means it is not ours to
+// delete, and we leave the whole folder alone.
+bool holds_only_runtime(const fs::path& dir) {
+    std::error_code ec;
+    if (!fs::is_directory(dir, ec)) return false;
+    for (fs::directory_iterator it(dir, ec), end; !ec && it != end; it.increment(ec)) {
+        const std::wstring name = it->path().filename().wstring();
+        if (_wcsicmp(name.c_str(), L"runtime") == 0) continue;
+        if (_wcsicmp(name.c_str(), L"version.txt") == 0) continue;
+        return false;
+    }
+    return !ec;
 }
 
 fs::path local_app_data() {
@@ -372,8 +439,21 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     // LOCALAPPDATA cache when this medium is read-only.
     // Probe the exe's own directory — it exists already, so this answers "can
     // we put a data folder here" without creating one.
-    fs::path base = self.parent_path() / L"RetComM-Data";
+    const fs::path default_base = self.parent_path() / L"RetComM-Data";
+    fs::path base = default_base;
     bool portable_base = dir_is_writable(self.parent_path());
+
+    // Setup may have moved the RetComM folder elsewhere; retcomm-root.json
+    // beside this .exe records where. Unpack the runtime into that folder too,
+    // so the whole install stays one directory and nothing is stranded next to
+    // the launcher. Missing drive or unwritable target → fall back to the
+    // default beside the .exe rather than refusing to start.
+    const fs::path marked = read_root_marker(self.parent_path() / L"retcomm-root.json");
+    if (!marked.empty() && dir_is_writable(marked)) {
+        base = marked;
+        portable_base = true;
+    }
+
     if (!portable_base) {
         const fs::path fallback = local_app_data();
         if (fallback.empty()) {
@@ -383,6 +463,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
         }
         base = fallback / L"retcomm" / L"portable";
     }
+    // The runtime now lives under the chosen folder, so the one we used to
+    // unpack beside the .exe is dead weight. Remove it — but only once it holds
+    // nothing but that old runtime, so a folder still containing config/ or
+    // data/ (an interrupted move, a user's own files) is never touched.
+    if (portable_base && !same_path(base, default_base) && holds_only_runtime(default_base)) {
+        std::error_code rm_ec;
+        fs::remove_all(default_base, rm_ec);
+    }
+
     const fs::path current = base / (portable_base ? L"runtime" : L"current");
     const fs::path version_file = base / L"version.txt";
     // Only the beside-the-exe layout redirects config+data. In the LOCALAPPDATA

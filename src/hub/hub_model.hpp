@@ -680,6 +680,8 @@ struct HubModel {
     // Seed data_root_input / setup_use_custom_data_root from the live paths.
     void seed_data_root_input();
     // True when this install should persist its root beside the binary.
+    // Directory the data-root marker is written to (portable: beside the stub).
+    fs::path root_marker_dir() const;
     bool prefers_portable_root_marker() const;
     bool save_settings(std::string* error = nullptr);
     void add_platform_folder_row();
