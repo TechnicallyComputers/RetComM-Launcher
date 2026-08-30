@@ -3579,6 +3579,20 @@ bool stage_build_output(const fs::path& src_root, const fs::path& build_dir,
 
     const fs::path exe_dir = binary.parent_path();
     if (!copy_tree_if_exists(exe_dir / "assets", staging / "assets", error)) return false;
+    // The mod catalog is runtime data the game resolves beside its executable,
+    // exactly like assets/. Staging without it produced installs whose Mods
+    // page was empty even though the build had staged the catalog correctly --
+    // the release zip carried it, the build produced it, and only this copy
+    // list was missing it.
+    //
+    // Only packages/ is copied. mods/state.toml is per-machine enable/disable
+    // state: the build tree's copy is the BUILDER's selections, and the
+    // staging tree's is the player's, restored from preserved/ or written on
+    // first run. Copying the directory wholesale would let one overwrite the
+    // other.
+    if (!copy_tree_if_exists(exe_dir / "mods" / "packages", staging / "mods" / "packages",
+                             error))
+        return false;
     // Prefer compile-time lobby pin stamp over source VERSION (avoids shipping
     // a bumped VERSION file next to a binary still built as an older pin).
     {
