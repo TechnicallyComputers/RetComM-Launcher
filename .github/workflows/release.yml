@@ -137,6 +137,10 @@ jobs:
         run: |
           chmod +x packaging/make-icons.sh packaging/linux/*.sh
           ./packaging/make-icons.sh
+          # This is the only job with a rasterizer; macOS and Windows ship the
+          # committed PNG. If they have drifted apart, say which release did it.
+          git diff --quiet -- assets/retcomm.png || echo \
+            "::warning::assets/retcomm.png differs from a fresh render of assets/retcomm.svg — re-run packaging/make-icons.sh and commit it, or macOS and Windows ship a stale icon"
 
       - name: Build SDL3
         run: |
@@ -374,7 +378,25 @@ jobs:
       - name: Install deps
         run: |
           brew update
-          brew install cmake ninja sdl3 curl librsvg || brew install cmake ninja sdl3 curl
+          # Homebrew stopped bottling macOS Intel x86_64 in September 2026, so
+          # anything it does not already have gets COMPILED on the runner. Two
+          # consequences, both learned the slow way:
+          #
+          #  * librsvg is gone from this list. It pulls llvm@22 + rust, and with
+          #    no bottles that is a multi-hour source build that held up the
+          #    whole release. The 512x512 icon it used to rasterize is committed
+          #    (assets/retcomm.png, byte-identical to a fresh rsvg-convert of
+          #    assets/retcomm.svg), and make-icons.sh uses it when no
+          #    rasterizer is present. Re-render it on a machine that has
+          #    rsvg-convert, not here.
+          #  * install only what is missing. cmake, ninja and curl ship on both
+          #    runner images; `brew install` on an already-present formula
+          #    UPGRADES it, which on Intel meant building openssl@3 and curl
+          #    from source for ~7 minutes to replace a working curl.
+          for formula in cmake ninja curl sdl3; do
+            brew list --formula "$formula" >/dev/null 2>&1 || brew install "$formula"
+          done
+          cmake --version && ninja --version
           chmod +x packaging/make-icons.sh packaging/macos/build-app.sh \
             packaging/macos/bundle_dylibs.sh
 

@@ -15,14 +15,27 @@ fi
 
 if command -v rsvg-convert >/dev/null 2>&1; then
   rsvg-convert -w "${SIZE}" -h "${SIZE}" "${SVG}" -o "${PNG}"
+  echo "rasterized ${SVG} with rsvg-convert"
 elif command -v magick >/dev/null 2>&1; then
   magick -background none "${SVG}" -resize "${SIZE}x${SIZE}" "${PNG}"
+  echo "rasterized ${SVG} with magick"
 elif command -v convert >/dev/null 2>&1; then
   convert -background none "${SVG}" -resize "${SIZE}x${SIZE}" "${PNG}"
+  echo "rasterized ${SVG} with convert"
 elif command -v inkscape >/dev/null 2>&1; then
   inkscape "${SVG}" -w "${SIZE}" -h "${SIZE}" -o "${PNG}"
+  echo "rasterized ${SVG} with inkscape"
+elif [[ -f "${PNG}" ]]; then
+  # No rasterizer: keep the committed PNG. It is the real icon, rendered from
+  # this SVG by whoever last changed it. Overwriting it with the placeholder
+  # below would ship a crude stand-in on exactly the platforms that cannot
+  # rasterize -- macOS (Homebrew stopped bottling Intel, so librsvg means a
+  # multi-hour llvm+rust source build) and Windows.
+  echo "no rasterizer found; keeping the committed ${PNG}"
 else
-  # Pure-Python fallback (no Cairo): draw a matching placeholder PNG at 512.
+  # Pure-Python fallback (no Cairo, and no committed PNG to fall back on):
+  # draw a matching placeholder at 512 so packaging has something to embed.
+  echo "WARNING: no rasterizer and no committed ${PNG}; writing a PLACEHOLDER icon" >&2
   python3 - "${PNG}" "${SIZE}" <<'PY'
 import struct, zlib, sys
 from pathlib import Path
