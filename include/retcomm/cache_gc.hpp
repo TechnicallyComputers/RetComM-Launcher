@@ -22,6 +22,7 @@ struct CacheGcResult {
     std::size_t removed_engines = 0;
     std::size_t removed_release_zips = 0;
     std::size_t removed_idle_builds = 0;
+    std::size_t removed_disc_copies = 0;
     std::uint64_t bytes_freed = 0;
 };
 

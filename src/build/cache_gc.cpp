@@ -1,5 +1,7 @@
 #include "retcomm/cache_gc.hpp"
 
+#include "retcomm/disc_stage.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -406,6 +408,38 @@ void gc_idle_build_dirs(const Paths& paths, const AppConfig& cfg, CacheGcResult&
     }
 }
 
+// A disc image belongs to the emulation library and nowhere else. psxrecomp's
+// prepare_disc copies the tracks into <title>/src/current/disc when the host
+// refuses the links the build stages, and older installs predate that staging
+// entirely — sweep those duplicates on every GC (issue #8).
+void gc_duplicated_disc_images(const Paths& paths, const AppConfig& cfg, CacheGcResult& r) {
+    std::error_code ec;
+    for (const auto& root : scan_install_roots(cfg, paths)) {
+        if (root.path.empty() || !fs::is_directory(root.path, ec)) continue;
+        for (auto it = fs::directory_iterator(root.path, ec); !ec && it != fs::directory_iterator();
+             it.increment(ec)) {
+            if (!it->is_directory(ec)) continue;
+            const fs::path src_dir = it->path() / "src";
+            if (!fs::is_directory(src_dir, ec)) continue;
+            // Every source tag dir, not just current/: an abandoned one holds a
+            // full disc copy too.
+            for (auto sit = fs::directory_iterator(src_dir, ec);
+                 !ec && sit != fs::directory_iterator(); sit.increment(ec)) {
+                if (!fs::is_directory(sit->path(), ec)) continue;
+                const DiscPruneResult d = prune_copied_disc_media(sit->path());
+                for (const std::string& m : d.messages) r.messages.push_back(m);
+                if (d.removed == 0) continue;
+                r.removed_disc_copies += d.removed;
+                r.bytes_freed += d.bytes_freed;
+                r.messages.push_back("removed " + std::to_string(d.removed) +
+                                     " duplicated disc image(s) under " + sit->path().string());
+            }
+            ec.clear();
+        }
+        ec.clear();
+    }
+}
+
 } // namespace
 
 fs::path shared_ccache_dir(const Paths& paths) {
@@ -439,6 +473,7 @@ CacheGcResult run_cache_gc(const Paths& paths, const AppConfig& cfg) {
         gc_engines(paths, cfg, r);
         gc_release_zips(paths, cfg, r);
         gc_idle_build_dirs(paths, cfg, r);
+        gc_duplicated_disc_images(paths, cfg, r);
 
         // Best-effort: apply ccache max size via CLI when present.
         if (cfg.ccache_max_gb > 0) {
@@ -458,7 +493,8 @@ CacheGcResult run_cache_gc(const Paths& paths, const AppConfig& cfg) {
         std::ostringstream oss;
         oss << "Cache GC: removed " << r.removed_toolchains << " toolchain(s), " << r.removed_sdks
             << " sdk(s), " << r.removed_engines << " engine pin(s), " << r.removed_release_zips
-            << " release zip folder(s), " << r.removed_idle_builds << " idle build dir(s)";
+            << " release zip folder(s), " << r.removed_idle_builds << " idle build dir(s), "
+            << r.removed_disc_copies << " duplicated disc image(s)";
         if (r.bytes_freed > 0) {
             const double gib = static_cast<double>(r.bytes_freed) / (1024.0 * 1024.0 * 1024.0);
             char buf[64];

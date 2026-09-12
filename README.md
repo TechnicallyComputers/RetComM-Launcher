@@ -206,6 +206,13 @@ cp config.example.json ~/.config/retcomm/config.json
 `~/.local/share/retcomm/apps/<install_dir>/` (or your configured install roots)
 with `releases/<tag>/`, a `current` link, and `install.json`.
 
+Your ROMs and disc images stay in the emulation library: an install folder only
+ever links to them or names their path, never keeps a second copy. A build links
+the library's tracks into the recompiler's work tree before codegen runs, and
+anything a host that refuses links forced it to copy is removed again afterwards
+— also swept for existing installs by `retcomm cache gc` and hub
+**Clean up shared caches**.
+
 Scan walks only the platform folders the catalog needs, skips junk dirs, and
 hashes when identity digests are present. Results go to
 `library-index.json` with incremental cache hits; use `scan --full` (or hub

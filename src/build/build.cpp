@@ -2,6 +2,7 @@
 #include "retcomm/asset_arch.hpp"
 #include "retcomm/cache_gc.hpp"
 #include "retcomm/config.hpp"
+#include "retcomm/disc_stage.hpp"
 #include "retcomm/hash.hpp"
 #include "retcomm/http.hpp"
 #include "retcomm/library_index.hpp"
@@ -2466,12 +2467,29 @@ PackEnsureResult harvest_embedded_toolchain(const Paths& paths, const Title& tit
 }
 
 void prune_build_tree_after_success(const fs::path& src_root, const fs::path& build_dir,
-                                    bool auto_clean_build_dirs) {
+                                    bool auto_clean_build_dirs,
+                                    const std::string& game_config_rel,
+                                    BuildOutputFn on_output) {
     std::error_code ec;
     // Optional: drop cmake intermediates to save disk (next update rebuilds cold).
     if (auto_clean_build_dirs && !build_dir.empty()) fs::remove_all(build_dir, ec);
     // Always drop leftover embedded toolchain/ (compilers live in the shared cache).
     prune_embedded_toolchain(src_root);
+    // An install folder never keeps a disc image. Where the tracks were linked
+    // from the library this finds nothing; where the host refused links,
+    // prepare_disc copied the set and this is what reclaims it.
+    const DiscPruneResult disc = prune_copied_disc_media(src_root, game_config_rel);
+    if (on_output) {
+        for (const std::string& m : disc.messages) on_output(m);
+        if (disc.removed > 0) {
+            const double mib = static_cast<double>(disc.bytes_freed) / (1024.0 * 1024.0);
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%.0f", mib);
+            on_output("Removed " + std::to_string(disc.removed) +
+                      " duplicated disc image(s) from the install tree (~" + buf +
+                      " MiB); the library copy stays the only one");
+        }
+    }
 }
 
 // Pins must match RetroPorting-Toolchains/pins.env (PYTHON_VERSION / PYTHON_PBS_TAG).
@@ -4467,6 +4485,17 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
             const std::string cfg = title.build.generate.config.empty()
                                         ? "game.toml"
                                         : title.build.generate.config;
+            // prepare_disc copies the whole Redump set into the project's disc/
+            // work tree unless each destination already resolves to its source.
+            // Link the library tracks in first so a 700 MB dump is never
+            // duplicated into the install folder (issue #8).
+            {
+                const DiscStageResult staged =
+                    stage_disc_tracks_from_library(src.root, cfg, opts.rom_path);
+                if (opts.on_output && !staged.message.empty())
+                    opts.on_output((staged.ok ? "disc: " : "disc: not linked — ") +
+                                   staged.message);
+            }
             gen_args.push_back("--config");
             gen_args.push_back(cfg);
             gen_args.push_back("--project-root");
@@ -4930,7 +4959,8 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
     const bool auto_clean = post_cfg.auto_clean_build_dirs;
     if (auto_clean)
         progress(opts.on_progress, "Cleaning cmake build directory…", 0.97f);
-    prune_build_tree_after_success(src.root, build_dir, auto_clean);
+    prune_build_tree_after_success(src.root, build_dir, auto_clean,
+                                   title.build.generate.config, opts.on_output);
     prune_stale_source_tag_dirs(paths.apps_dir / title.install_dir_name / "src", src.root);
 
     CacheGcResult gc;

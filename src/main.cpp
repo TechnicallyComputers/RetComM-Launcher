@@ -77,6 +77,7 @@ void print_help(const char* argv0) {
         << "      --dry-run                Show what would be removed\n"
         << "      --no-prune               Don't prune stale index/state entries\n"
         << "  cache gc                     Prune old toolchains/SDKs/engines/zips/idle builds\n"
+        << "                               and disc images duplicated into install folders\n"
         << "  launch <title-id> [opts]     Launch title into its dedicated launcher\n"
         << "      --rom PATH               ROM/disc path (else library index)\n"
         << "      --bios PATH              BIOS path (else bios index)\n"

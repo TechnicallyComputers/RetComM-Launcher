@@ -1,6 +1,7 @@
 #include "retcomm/launch.hpp"
 #include "retcomm/app_state.hpp"
 #include "retcomm/config.hpp"
+#include "retcomm/disc_stage.hpp"
 #include "retcomm/install.hpp"
 #include "retcomm/library_index.hpp"
 #include "retcomm/process_env.hpp"
@@ -12,6 +13,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <map>
@@ -160,9 +163,11 @@ fs::path absolute_target(const fs::path& target) {
     return abs;
 }
 
-// True when dest already exposes the same bytes as target (symlink, hardlink,
-// or a still-fresh copy). Avoids re-copying cart ROMs every Play on Windows.
-bool sidecar_already_staged(const fs::path& dest, const fs::path& abs_target) {
+// True when dest already exposes the same bytes as target. A symlink or hard
+// link always counts — both share the target's inode. A still-fresh copy counts
+// only where copying is permitted at all (saves); for media it must not, or a
+// ROM copied in by an older release would be reused forever instead of dropped.
+bool sidecar_already_staged(const fs::path& dest, const fs::path& abs_target, bool accept_copy) {
     std::error_code ec;
     if (!fs::exists(dest, ec) && !fs::is_symlink(dest, ec)) return false;
     if (fs::equivalent(dest, abs_target, ec) && !ec) return true;
@@ -170,7 +175,7 @@ bool sidecar_already_staged(const fs::path& dest, const fs::path& abs_target) {
         const fs::path cur = fs::weakly_canonical(dest, ec);
         if (!ec && !cur.empty() && cur == abs_target) return true;
     }
-    if (fs::is_regular_file(dest, ec) && fs::is_regular_file(abs_target, ec)) {
+    if (accept_copy && fs::is_regular_file(dest, ec) && fs::is_regular_file(abs_target, ec)) {
         const auto sd = fs::file_size(dest, ec);
         if (ec) return false;
         const auto st = fs::file_size(abs_target, ec);
@@ -184,14 +189,15 @@ bool sidecar_already_staged(const fs::path& dest, const fs::path& abs_target) {
 }
 
 // Stage dest → target for launch sidecars. Prefer symlink (Unix / Dev Mode),
-// then hardlink (same volume), then copy — Windows without symlink privilege
-// must still be able to Play cart titles.
-bool stage_sidecar_file(const fs::path& dest, const fs::path& target, std::string* method,
-                        std::string* error) {
+// then hardlink (same volume). `allow_copy` is the last resort for small
+// sidecars only: a ROM or disc image is never copied into an install folder —
+// the library is its one home, and rom.cfg can name it by absolute path.
+bool stage_sidecar_file(const fs::path& dest, const fs::path& target, bool allow_copy,
+                        std::string* method, std::string* error) {
     const fs::path abs = absolute_target(target);
     std::error_code ec;
 
-    if (sidecar_already_staged(dest, abs)) {
+    if (sidecar_already_staged(dest, abs, allow_copy)) {
         if (method) *method = "reuse";
         return true;
     }
@@ -236,22 +242,44 @@ bool stage_sidecar_file(const fs::path& dest, const fs::path& target, std::strin
         return true;
     }
 
-    ec.clear();
-    fs::copy_file(abs, dest, fs::copy_options::overwrite_existing, ec);
-    if (!ec) {
-        if (method) *method = "copy";
-        return true;
+    if (allow_copy) {
+        ec.clear();
+        fs::copy_file(abs, dest, fs::copy_options::overwrite_existing, ec);
+        if (!ec) {
+            if (method) *method = "copy";
+            return true;
+        }
     }
 
     if (error) {
-        *error = "cannot stage " + dest.string() + " → " + abs.string() + ": " + ec.message();
+        *error = "cannot link " + dest.string() + " → " + abs.string() + ": " + ec.message();
+        if (!allow_copy) *error += " (and a ROM is never copied into an install folder)";
     }
     return false;
+}
+
+// Delete an install-local ROM that an earlier build of Retro copied in. Only a
+// file that owns its bytes outright is removed: a symlink or a second hard link
+// costs nothing and is left for stage_sidecar_file to reuse.
+std::uint64_t drop_copied_rom_sidecar(const fs::path& dest) {
+    std::error_code ec;
+    if (!is_rom_or_disc_media_ext(lower_ext(dest))) return 0;
+    if (fs::is_symlink(dest, ec) || !fs::is_regular_file(dest, ec)) return 0;
+    const auto links = fs::hard_link_count(dest, ec);
+    if (!ec && links > 1) return 0;
+    ec.clear();
+    const auto size = fs::file_size(dest, ec);
+    const std::uint64_t bytes = ec ? 0 : static_cast<std::uint64_t>(size);
+    ec.clear();
+    fs::remove(dest, ec);
+    return ec ? 0 : bytes;
 }
 
 // Stage install-local library.<ext> → library ROM so rom.cfg can use a path
 // next to the binary (native absolute or Wine Z:/…/library.ext). GBA also
 // stages library.sav for the launcher Save row (ignores --save-path).
+// The ROM itself is only ever linked; when the host refuses links the plan
+// falls back to naming the library path outright rather than copying it in.
 bool stage_cart_launcher_sidecars(LaunchPlan& plan, const Title& title, std::string* note) {
     if (is_disc_platform(title.platform) || plan.media_path.empty() || plan.cwd.empty())
         return false;
@@ -263,8 +291,20 @@ bool stage_cart_launcher_sidecars(LaunchPlan& plan, const Title& title, std::str
     const fs::path rom_link = plan.cwd / ("library" + ext);
     std::string err;
     std::string rom_method;
-    if (!stage_sidecar_file(rom_link, plan.media_path, &rom_method, &err)) {
-        if (note) *note = err;
+    if (!stage_sidecar_file(rom_link, plan.media_path, /*allow_copy=*/false, &rom_method, &err)) {
+        // A copy left by an older release is pure duplication now — reclaim it
+        // and let rom.cfg point straight at the library instead.
+        const std::uint64_t freed = drop_copied_rom_sidecar(rom_link);
+        if (note) {
+            *note = err;
+            if (freed > 0) {
+                const double mib = static_cast<double>(freed) / (1024.0 * 1024.0);
+                char buf[64];
+                std::snprintf(buf, sizeof(buf), "%.0f", mib);
+                *note += "; removed the ROM copy it had left behind (~" + std::string(buf) +
+                         " MiB) — rom.cfg now points at the library";
+            }
+        }
         return false;
     }
     plan.staged_rom_link = rom_link;
@@ -273,7 +313,10 @@ bool stage_cart_launcher_sidecars(LaunchPlan& plan, const Title& title, std::str
         (fs::is_regular_file(plan.save_path, ec) || fs::is_symlink(plan.save_path, ec))) {
         const fs::path sav_link = plan.cwd / "library.sav";
         std::string sav_method;
-        if (!stage_sidecar_file(sav_link, plan.save_path, &sav_method, &err)) {
+        // Saves are small and must exist beside the binary for the GBA launcher
+        // UI, so a copy is acceptable here — unlike the ROM.
+        if (!stage_sidecar_file(sav_link, plan.save_path, /*allow_copy=*/true, &sav_method,
+                                &err)) {
             if (note)
                 *note = "library" + ext + " (" + rom_method + "); library.sav failed: " + err;
             return true; // rom sidecar still useful
@@ -899,10 +942,13 @@ LaunchResult launch_title(const Paths& paths, const Title& title, const LaunchOp
     // (native + Wine). GBA also gets library.sav for the launcher Save row.
     {
         std::string note;
+        // Not linking the ROM is a normal outcome (no symlink privilege, library
+        // on another volume) — rom.cfg then names the library path directly, so
+        // report it as staging detail rather than a warning.
         if (stage_cart_launcher_sidecars(result.plan, title, &note) && !note.empty())
             result.plan.message += "  stage:  " + note + "\n";
         else if (!note.empty())
-            result.plan.message += "  warning: " + note + "\n";
+            result.plan.message += "  stage:  ROM stays in the library — " + note + "\n";
     }
 
     if (!result.plan.staged_bios_cfg.empty() &&
