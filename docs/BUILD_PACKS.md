@@ -28,8 +28,8 @@ linking fails — so a failed `mklink` never leaves Install without `psxrecomp`.
 If linking is still impossible, Retro falls back to a private copy from the
 engines cache. Titles that pin the
 same `psxrecomp` / `recomp-ui` commit therefore share one source tree on disk.
-BIOS generated C under `psxrecomp/generated/` lives in that shared pin (OpenBIOS
-/ SCPH1001 are pin-identical). Content-sync of game updates never writes through
+BIOS generated C under `psxrecomp/generated/` lives in that shared pin. Readiness
+checks recognize OpenBIOS, SCPH1001, and SCPH5552 output. Content-sync of game updates never writes through
 those links — engines are re-harvested from the staging zip instead. Developer
 overrides via `RETCOMM_SOURCE_DIR` skip promotion so local checkouts stay intact.
 
@@ -40,6 +40,15 @@ restores saves + user config (`settings.toml`, etc.) across updates. Harvest
 requires **both** emitters (no separate tools zip). The setup host inside `src/`
 is never treated as a finished Play install — only `releases/` (or `current/`)
 counts.
+
+The harvested PSX SDK retains the SCPH5552 profile and its matching seed file.
+It does not copy the player's retail BIOS image into the shared SDK.
+The selected game recipe still decides which BIOS to generate.
+Run `python scripts/test_psx_bios_readiness.py` to check the production readiness
+and SDK harvest functions with synthetic files. GCC or Clang with C++17 and LTO
+is required. Add `--baseline-ref <commit>` to run the same tests against an
+older build implementation, or `--owned-root <setup-root>` to check existing
+private generated outputs. These checks do not install or play a game.
 
 **Incremental cmake on update:** source always lives at `src/current/`. A newer
 release zip is **content-synced** into that tree (overwrite only when bytes

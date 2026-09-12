@@ -1037,7 +1037,8 @@ bool psx_generated_ready(const fs::path& src_root) {
     if (!game_ok) return false;
     const fs::path bios_gen = src_root / "psxrecomp" / "generated";
     return fs::is_regular_file(bios_gen / "OpenBIOS_dispatch.c", ec) ||
-           fs::is_regular_file(bios_gen / "SCPH1001_dispatch.c", ec);
+           fs::is_regular_file(bios_gen / "SCPH1001_dispatch.c", ec) ||
+           fs::is_regular_file(bios_gen / "SCPH5552_dispatch.c", ec);
 }
 
 bool snes_generated_ready(const Title& title, const fs::path& src_root) {
@@ -1453,11 +1454,11 @@ PackEnsureResult harvest_embedded_sdk(const Paths& paths, const Title& title,
             copy_rel_file(eng, dest, fs::path("recompiler/build") / name, ec);
         }
         for (const char* name : {"OpenBIOS.toml", "openbios.bin", "OpenBIOS.LICENSE",
-                                 "SCPH1001.toml"}) {
+                                 "SCPH1001.toml", "SCPH5552.toml"}) {
             copy_rel_file(eng, dest, fs::path("bios") / name, ec);
         }
         for (const char* name : {"openbios_elf_seeds.json", "openbios_dispatch_miss.json",
-                                 "phase2_ghidra_seeds.json"}) {
+                                 "phase2_ghidra_seeds.json", "phase2_ghidra_seeds_SCPH5552.json"}) {
             copy_rel_file(eng, dest, fs::path("recompiler/seeds") / name, ec);
         }
     }
@@ -1971,7 +1972,8 @@ bool bios_generated_present(const fs::path& eng_or_src) {
     std::error_code ec;
     const fs::path bios_gen = eng_or_src / "generated";
     return fs::is_regular_file(bios_gen / "OpenBIOS_dispatch.c", ec) ||
-           fs::is_regular_file(bios_gen / "SCPH1001_dispatch.c", ec);
+           fs::is_regular_file(bios_gen / "SCPH1001_dispatch.c", ec) ||
+           fs::is_regular_file(bios_gen / "SCPH5552_dispatch.c", ec);
 }
 
 // Prefer an existing engines/<name>/<pin>/ tree whose key-file content_id matches
