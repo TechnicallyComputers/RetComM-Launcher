@@ -906,6 +906,75 @@ bool romm_button(const char* label, const Theme& /*th*/, const ImVec2& size = Im
     return clicked;
 }
 
+// Settings pages fill the window, so their Save / Cancel appear twice: in the
+// page footer and in the header. One implementation of each keeps the two from
+// ever disagreeing about what Cancel throws away.
+void cancel_psx_bind_capture(HubModel& hub);
+void cancel_snes_bind_capture(HubModel& hub);
+
+bool any_settings_page_open(const HubModel& hub) {
+    return hub.show_settings || hub.show_romm_settings || hub.show_psx_settings ||
+           hub.show_snes_settings;
+}
+
+bool active_settings_dirty(const HubModel& hub) {
+    if (hub.show_settings) return hub.settings.dirty;
+    if (hub.show_romm_settings) return hub.romm_settings.dirty;
+    if (hub.show_psx_settings) return hub.psx_settings.dirty;
+    if (hub.show_snes_settings) return hub.snes_settings.dirty;
+    return false;
+}
+
+// Write the open page to disk. False on failure — the caller must leave the
+// page open then, or the edits vanish with no way back to them.
+bool save_active_settings(HubModel& hub) {
+    std::string err;
+    const char* what = nullptr;
+    bool ok = false;
+    if (hub.show_settings) {
+        what = "settings";
+        ok = hub.save_settings(&err);
+    } else if (hub.show_romm_settings) {
+        what = "RomM settings";
+        ok = hub.save_romm_settings(&err);
+    } else if (hub.show_psx_settings) {
+        what = "PlayStation settings";
+        ok = hub.save_psx_settings(&err);
+    } else if (hub.show_snes_settings) {
+        what = "Super Nintendo settings";
+        ok = hub.save_snes_settings(&err);
+    } else {
+        return false;
+    }
+    if (!ok) {
+        hub.append_log(std::string(what) + " save failed: " + err);
+        hub.set_status("Save failed");
+        return false;
+    }
+    hub.show_toast("Saved!");
+    return true;
+}
+
+// Leave every settings page and drop the drafts. Also ends any in-progress key
+// or pad capture — walking away from the page must not leave the next keypress
+// bound to a button the user can no longer see.
+void close_settings_pages(HubModel& hub) {
+    hub.show_settings = false;
+    hub.show_romm_settings = false;
+    hub.show_psx_settings = false;
+    hub.show_snes_settings = false;
+    hub.settings.dirty = false;
+    hub.romm_settings.dirty = false;
+    hub.psx_settings.dirty = false;
+    hub.psx_settings.capturing_hotkey = -1;
+    hub.psx_settings.configuring_player = -1;
+    hub.psx_settings.gamepads_tab = false;
+    cancel_psx_bind_capture(hub);
+    hub.snes_settings.dirty = false;
+    hub.snes_settings.capturing_hotkey = -1;
+    cancel_snes_bind_capture(hub);
+}
+
 void draw_marquee(HubModel& hub, const Theme& th, float width) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const ImVec2 p0 = ImGui::GetCursorScreenPos();
@@ -1010,25 +1079,52 @@ void draw_marquee(HubModel& hub, const Theme& th, float width) {
         }
     }
 
-    // Top-right: Add/Scan Files + Check for Updates + Menu, or Back when editing settings.
+    // Top-right: Add/Scan Files + Check for Updates + Menu, or Save / Cancel
+    // while a settings page is open — the header is where the eye lands, so it
+    // carries the commit/discard choice rather than a bare way out.
     constexpr float kMenuH = 36.f;
     constexpr float kBtnGap = 8.f;
-    const bool in_settings =
-        hub.show_settings || hub.show_romm_settings || hub.show_psx_settings ||
-        hub.show_snes_settings;
-    const char* btn_label = in_settings ? "Back to Library" : "Menu";
-    const char* library_label = "Add/Scan Files";
-    const char* updates_label = "Check for Updates";
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.f, 8.f));
-    const float menu_w =
-        std::max(88.f, ImGui::CalcTextSize(btn_label).x + ImGui::GetStyle().FramePadding.x * 2.f);
-    const float library_w =
-        std::max(100.f, ImGui::CalcTextSize(library_label).x + ImGui::GetStyle().FramePadding.x * 2.f);
-    const float updates_w =
-        std::max(120.f, ImGui::CalcTextSize(updates_label).x + ImGui::GetStyle().FramePadding.x * 2.f);
+    const bool in_settings = any_settings_page_open(hub);
     const float btn_y = p0.y + (h - kMenuH) * 0.5f;
-    float btn_x = p0.x + width - 16.f - menu_w;
-    if (!in_settings) {
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.f, 8.f));
+    const float frame_pad_x = ImGui::GetStyle().FramePadding.x;
+
+    if (in_settings) {
+        const char* save_label = "Save";
+        const char* cancel_label = "Cancel";
+        const float save_w =
+            std::max(96.f, ImGui::CalcTextSize(save_label).x + frame_pad_x * 2.f);
+        const float cancel_w =
+            std::max(96.f, ImGui::CalcTextSize(cancel_label).x + frame_pad_x * 2.f);
+        const float cancel_x = p0.x + width - 16.f - cancel_w;
+        const float save_x = cancel_x - kBtnGap - save_w;
+
+        // Say plainly that edits are pending, so Cancel never reads as "done".
+        if (active_settings_dirty(hub)) {
+            const char* warn_text = "unsaved changes";
+            const ImVec2 ws = ImGui::CalcTextSize(warn_text);
+            dl->AddText(ImVec2(save_x - 12.f - ws.x, p0.y + (h - ws.y) * 0.5f),
+                        ImGui::ColorConvertFloat4ToU32(th.warn), warn_text);
+        }
+
+        ImGui::SetCursorScreenPos(ImVec2(save_x, btn_y));
+        // Only leave on a save that landed; a failed write must keep the page
+        // (and the edits) in front of the user.
+        if (accent_button(save_label, th, ImVec2(save_w, kMenuH)) && save_active_settings(hub))
+            close_settings_pages(hub);
+        ImGui::SetCursorScreenPos(ImVec2(cancel_x, btn_y));
+        if (ImGui::Button(cancel_label, ImVec2(cancel_w, kMenuH))) close_settings_pages(hub);
+    } else {
+        const char* btn_label = "Menu";
+        const char* library_label = "Add/Scan Files";
+        const char* updates_label = "Check for Updates";
+        const float menu_w =
+            std::max(88.f, ImGui::CalcTextSize(btn_label).x + frame_pad_x * 2.f);
+        const float library_w =
+            std::max(100.f, ImGui::CalcTextSize(library_label).x + frame_pad_x * 2.f);
+        const float updates_w =
+            std::max(120.f, ImGui::CalcTextSize(updates_label).x + frame_pad_x * 2.f);
+        const float btn_x = p0.x + width - 16.f - menu_w;
         ImGui::SetCursorScreenPos(ImVec2(btn_x - kBtnGap - updates_w - kBtnGap - library_w, btn_y));
         if (ImGui::Button(library_label, ImVec2(library_w, kMenuH)))
             hub.pending_open_library = true;
@@ -1037,25 +1133,8 @@ void draw_marquee(HubModel& hub, const Theme& th, float width) {
         if (ImGui::Button(updates_label, ImVec2(updates_w, kMenuH)))
             hub.start_job(HubJob::CheckUpdates);
         ImGui::EndDisabled();
-    }
-    ImGui::SetCursorScreenPos(ImVec2(btn_x, btn_y));
-    if (ImGui::Button(btn_label, ImVec2(menu_w, kMenuH))) {
-        if (in_settings) {
-            hub.show_settings = false;
-            hub.show_romm_settings = false;
-            hub.show_psx_settings = false;
-            hub.show_snes_settings = false;
-            hub.settings.dirty = false;
-            hub.romm_settings.dirty = false;
-            hub.psx_settings.dirty = false;
-            hub.psx_settings.capturing_hotkey = -1;
-            hub.snes_settings.dirty = false;
-            hub.snes_settings.capturing_hotkey = -1;
-            hub.snes_settings.capturing_player = -1;
-            hub.snes_settings.capturing_bind = -1;
-        } else {
-            hub.pending_open_menu = true;
-        }
+        ImGui::SetCursorScreenPos(ImVec2(btn_x, btn_y));
+        if (ImGui::Button(btn_label, ImVec2(menu_w, kMenuH))) hub.pending_open_menu = true;
     }
     ImGui::PopStyleVar();
 
