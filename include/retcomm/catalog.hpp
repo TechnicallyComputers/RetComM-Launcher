@@ -129,6 +129,11 @@ struct TitleBuildGenerate {
     bool cfg_roots = true;
     // psxrecomp / gbarecomp generate (TOML path)
     std::string config = "game.toml";
+    // Verbatim extra `generate` options the port's own regen script passes
+    // (e.g. --source-root src --profile-manifest profiles/attract_tier2.json).
+    // They change which functions are AOT vs LLE, i.e. the generated C; a
+    // generate run without them does not reproduce the port's own build.
+    std::vector<std::string> extra_args;
 };
 
 struct TitleBuildCmake {

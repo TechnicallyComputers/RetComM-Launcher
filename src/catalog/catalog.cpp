@@ -223,6 +223,13 @@ Title parse_title(const json& j) {
             t.build.generate.funcs_h = g.value("funcs_h", t.build.generate.funcs_h);
             t.build.generate.cfg_roots = g.value("cfg_roots", t.build.generate.cfg_roots);
             t.build.generate.config = g.value("config", t.build.generate.config);
+            if (g.contains("extra_args") && g.at("extra_args").is_array()) {
+                t.build.generate.extra_args.clear();
+                for (const auto& a : g.at("extra_args")) {
+                    if (a.is_string() && !a.get<std::string>().empty())
+                        t.build.generate.extra_args.push_back(a.get<std::string>());
+                }
+            }
         }
         if (b.contains("cmake") && b.at("cmake").is_object()) {
             const auto& c = b.at("cmake");

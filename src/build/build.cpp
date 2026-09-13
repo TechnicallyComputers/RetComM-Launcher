@@ -598,6 +598,45 @@ bool files_content_equal(const fs::path& a, const fs::path& b) {
     }
 }
 
+/* Content-aware copy: skip the write when the bytes already match, so an
+ * unchanged file keeps its mtime (ninja / ccache reuse), but still carry the
+ * mode bits across. Without that a destination that once lost its exec bit
+ * (an extractor dropped it) is never repaired — every later sync sees equal
+ * bytes and walks past it. Returns false only when the copy itself failed;
+ * `copied` reports whether bytes were written. */
+bool copy_file_content_aware(const fs::path& from, const fs::path& to, bool* copied,
+                             std::error_code& ec) {
+    ec.clear();
+    if (copied) *copied = false;
+#if !defined(_WIN32)
+    std::error_code pec;
+    const fs::perms want = fs::status(from, pec).permissions();
+    const bool have_want = !pec;
+#endif
+    if (fs::is_regular_file(to, ec) && files_content_equal(from, to)) {
+        ec.clear();
+#if !defined(_WIN32)
+        if (have_want) {
+            const fs::perms have = fs::status(to, pec).permissions();
+            if (!pec && have != want) fs::permissions(to, want, fs::perm_options::replace, pec);
+        }
+#endif
+        return true;
+    }
+    ec.clear();
+    fs::create_directories(to.parent_path(), ec);
+    ec.clear();
+    fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+    if (ec) return false;
+#if !defined(_WIN32)
+    /* copy_file over an existing target keeps the target's old mode on some
+     * implementations; make the result match the source explicitly. */
+    if (have_want) fs::permissions(to, want, fs::perm_options::replace, pec);
+#endif
+    if (copied) *copied = true;
+    return true;
+}
+
 // Content-aware overlay: copy only changed files (preserve mtimes on identical
 // bytes), delete paths removed upstream, never touch cmake build_rel or local
 // codegen trees (generated/, psxrecomp/generated/, …).
@@ -646,17 +685,15 @@ bool sync_extracted_tree_into(const fs::path& staging, const fs::path& dest,
         if (rel.empty()) continue;
         const fs::path to = dest / fs::path(rel);
         std::error_code tec;
-        if (fs::is_regular_file(to, tec) && files_content_equal(from, to)) {
-            ++kept;
-            continue;
-        }
-        fs::create_directories(to.parent_path(), tec);
-        fs::copy_file(from, to, fs::copy_options::overwrite_existing, tec);
-        if (tec) {
+        bool copied = false;
+        if (!copy_file_content_aware(from, to, &copied, tec)) {
             if (error) *error = "sync copy " + rel + ": " + tec.message();
             return false;
         }
-        ++updated;
+        if (copied)
+            ++updated;
+        else
+            ++kept;
     }
 
     for (const std::string& rel : wanted) {
@@ -730,11 +767,7 @@ bool sync_tree_content_aware(const fs::path& from, const fs::path& to, std::stri
         if (rel.empty()) continue;
         const fs::path dst_file = to / fs::path(rel);
         std::error_code tec;
-        if (fs::is_regular_file(dst_file, tec) && files_content_equal(src_file, dst_file))
-            continue;
-        fs::create_directories(dst_file.parent_path(), tec);
-        fs::copy_file(src_file, dst_file, fs::copy_options::overwrite_existing, tec);
-        if (tec) {
+        if (!copy_file_content_aware(src_file, dst_file, nullptr, tec)) {
             if (error) *error = "sync copy " + rel + ": " + tec.message();
             return false;
         }
@@ -956,12 +989,7 @@ bool copy_rel_file(const fs::path& from_root, const fs::path& to_root, const fs:
     fs::create_directories(to.parent_path(), ec);
     if (ec) return false;
     /* Keep mtime when bytes match (SDK harvest / emitter reuse). */
-    if (fs::is_regular_file(to, ec) && files_content_equal(from, to)) {
-        ec.clear();
-        return true;
-    }
-    fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
-    return !ec;
+    return copy_file_content_aware(from, to, nullptr, ec);
 }
 
 bool copy_rel_tree(const fs::path& from_root, const fs::path& to_root, const fs::path& rel,
@@ -1190,22 +1218,66 @@ bool purge_psx_bios_generated(const fs::path& gen_dir) {
     return removed;
 }
 
+/* The manifest-side generate inputs, as one string: everything that changes
+ * the emitted C besides the ROM/BIOS bytes and the emitter binaries. Without
+ * this in the stamp a corrected manifest (super-metroid-snes: --cfg-roots
+ * dropped, --source-root/--profile-manifest added) still "reuses" the C the
+ * wrong invocation produced. */
+std::string generate_signature(const Title& title, const std::string& engine) {
+    const auto& g = title.build.generate;
+    std::string sig = engine;
+    if (engine == "snesrecomp") {
+        sig += "|cfg_dir=" + g.cfg_dir + "|out_dir=" + g.out_dir + "|funcs_h=" + g.funcs_h +
+               "|cfg_roots=" + (g.cfg_roots ? "1" : "0");
+    } else {
+        sig += "|config=" + g.config;
+        if (engine == "gbarecomp") sig += "|out_dir=" + g.out_dir;
+    }
+    return sig;
+}
+
+std::string generate_extra_signature(const Title& title) {
+    std::string sig;
+    for (const std::string& a : title.build.generate.extra_args) {
+        if (!sig.empty()) sig += '\x1f';
+        sig += a;
+    }
+    return sig;
+}
+
 json make_codegen_meta(const std::string& engine, const std::string& rom_fp,
                        const std::string& bios_fp, const std::string& sdk_tag,
-                       const std::string& tool_fp, const std::string& bios_tool_fp = {}) {
+                       const std::string& tool_fp, const std::string& bios_tool_fp = {},
+                       const std::string& generate_sig = {},
+                       const std::string& generate_extra = {}) {
     return json{{"engine", engine},
                 {"rom", rom_fp},
                 {"bios", bios_fp},
                 {"sdk_tag", sdk_tag},
                 {"tools", tool_fp},
-                {"bios_tool", bios_tool_fp}};
+                {"bios_tool", bios_tool_fp},
+                {"generate", generate_sig},
+                {"generate_extra", generate_extra}};
+}
+
+/* Stamps written before the generate fields existed carried no extras, so a
+ * manifest that now needs extras must regenerate; one that needs none is
+ * taken as matching (its cfg_roots/config could not have changed unnoticed
+ * often enough to justify regenerating every existing install once). */
+bool generate_sig_matches(const json& meta, const json& want) {
+    if (meta.contains("generate")) {
+        return meta.value("generate", "") == want.value("generate", "") &&
+               meta.value("generate_extra", "") == want.value("generate_extra", "");
+    }
+    return want.value("generate_extra", "").empty();
 }
 
 bool codegen_inputs_match(const json& meta, const json& want) {
     return meta.value("engine", "") == want.value("engine", "") &&
            meta.value("rom", "") == want.value("rom", "") &&
            meta.value("bios", "") == want.value("bios", "") &&
-           meta.value("tools", "") == want.value("tools", "");
+           meta.value("tools", "") == want.value("tools", "") &&
+           generate_sig_matches(meta, want);
 }
 
 bool codegen_meta_matches(const json& meta, const json& want) {
@@ -1452,6 +1524,11 @@ PackEnsureResult harvest_embedded_sdk(const Paths& paths, const Title& title,
                                  "psxrecomp-bios.exe"}) {
             copy_rel_file(eng, dest, fs::path("recompiler/build") / name, ec);
         }
+        // psxrecomp_cli.py execs these directly. A zip packed without Unix
+        // attributes (or read by an extractor that ignores them) delivers
+        // them 0644, and generate dies with "Permission denied".
+        make_executable(dest / "recompiler/build/psxrecomp-game");
+        make_executable(dest / "recompiler/build/psxrecomp-bios");
         for (const char* name : {"OpenBIOS.toml", "openbios.bin", "OpenBIOS.LICENSE",
                                  "SCPH1001.toml"}) {
             copy_rel_file(eng, dest, fs::path("bios") / name, ec);
@@ -1466,6 +1543,8 @@ PackEnsureResult harvest_embedded_sdk(const Paths& paths, const Title& title,
             copy_rel_file(eng, dest, name, ec);
             copy_rel_file(eng, dest, fs::path("build") / name, ec);
         }
+        make_executable(dest / "gba_recompile");
+        make_executable(dest / "build/gba_recompile");
         copy_rel_file(eng, dest, "bios/gba_bios.toml", ec);
     }
 
@@ -1927,11 +2006,7 @@ bool sync_engine_tree_into_cache(const fs::path& from, const fs::path& to, std::
         if (rel.empty()) continue;
         const fs::path dst_file = to / fs::path(rel);
         std::error_code tec;
-        if (fs::is_regular_file(dst_file, tec) && files_content_equal(src_file, dst_file))
-            continue;
-        fs::create_directories(dst_file.parent_path(), tec);
-        fs::copy_file(src_file, dst_file, fs::copy_options::overwrite_existing, tec);
-        if (tec) {
+        if (!copy_file_content_aware(src_file, dst_file, nullptr, tec)) {
             if (error) *error = "engine sync copy " + rel + ": " + tec.message();
             return false;
         }
@@ -4011,6 +4086,13 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
         // GitHub asset size, so it would fail identically on every rebuild. Evict
         // it once and pull a clean copy rather than reporting a broken source tree.
         std::string discarded;
+        std::string refetch_err;
+        auto discarded_note = [&]() -> std::string {
+            if (discarded.empty()) return {};
+            std::string note = " (discarded corrupt cached " + discarded;
+            if (!refetch_err.empty()) note += "; re-download failed: " + refetch_err;
+            return note + ")";
+        };
         auto refetch_after_bad_zip = [&](const std::string& why) -> bool {
             if (!zip.from_cache || zip.zip_path.empty()) return false;
             if (!discard_cached_release_zip(zip.zip_path)) return false;
@@ -4019,7 +4101,18 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
                      "Cached " + zip.asset_name + " unusable (" + why + ") — re-downloading…");
             last_pct = -1;
             zip = resolve_title_release_zip(paths, title, iopts, dl_progress);
-            return zip.ok && !zip.zip_path.empty() && !zip.tag.empty() && !zip.from_cache;
+            if (zip.ok && !zip.zip_path.empty() && !zip.tag.empty() && !zip.from_cache)
+                return true;
+            // The user only ever saw the extract error; the reason the clean
+            // copy never arrived (rate limit, stalled transfer) went nowhere.
+            if (!zip.ok)
+                refetch_err = zip.message.empty() ? "resolver failed" : zip.message;
+            else if (zip.from_cache)
+                refetch_err = "resolver returned a cached copy again (" + zip.message + ")";
+            else
+                refetch_err = "resolver returned no file";
+            progress(on_progress, "Re-download of " + discarded + " failed: " + refetch_err);
+            return false;
         };
 
         for (int attempt = 0; attempt < 2; ++attempt) {
@@ -4045,10 +4138,42 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
             if (!extract_archive_to(zip.zip_path, staging, &err)) {
                 if (attempt == 0 && refetch_after_bad_zip("extract failed")) continue;
                 r.message = "release source extract failed: " +
-                            (err.empty() ? zip.message : err);
-                if (!discarded.empty())
-                    r.message += " (discarded corrupt cached " + discarded + ")";
+                            (err.empty() ? zip.message : err) + discarded_note();
                 return r;
+            }
+            // Validate the payload as a source tree *before* it touches the
+            // working tree. Installing first and checking afterwards let a
+            // prebuilt package (Tomba v0.13.0 ships a Linux AppImage: AppRun +
+            // usr/bin/<game> + usr/share/…, no CMakeLists.txt) overlay
+            // src/current, delete every source file the payload lacked, and on
+            // the retry wipe the cmake build dir — and it then read as an
+            // "incomplete" archive, so a good 56 MiB download was discarded
+            // and fetched again for nothing.
+            {
+                const fs::path payload = unwrap_single_subdir(staging);
+                if (!fs::is_regular_file(payload / "CMakeLists.txt", ec)) {
+                    const std::string launch = title.launch_binary_for_host();
+                    const bool prebuilt =
+                        !launch.empty() && !find_named_file(payload, launch).empty();
+                    fs::remove_all(staging, ec);
+                    if (prebuilt) {
+                        r.tag = zip.tag;
+                        r.message =
+                            "release asset " + zip.asset_name + " (" + zip.tag +
+                            ") is a prebuilt package: it contains " + launch +
+                            " but no CMakeLists.txt, so there is no source tree to "
+                            "build from. The installed local build was left untouched. "
+                            "Retro needs a source-bearing release zip for this tag "
+                            "(as v0.12.3-alpha shipped) before it can build it.";
+                        return r;
+                    }
+                    if (attempt == 0 && refetch_after_bad_zip("no source tree in archive"))
+                        continue;
+                    r.message = "release asset " + zip.asset_name +
+                                " has no CMakeLists.txt at its root — not a source tree" +
+                                discarded_note();
+                    return r;
+                }
             }
             if (!install_into_working(staging, &err)) {
                 r.message = "release source install failed: " +
@@ -4070,8 +4195,11 @@ PackEnsureResult ensure_source_tree(const Paths& paths, const Title& title,
             // download before blaming the tree.
             if (attempt == 0 && refetch_after_bad_zip("incomplete source tree")) continue;
             r.message = describe_unbuildable_source(title, dest, zip.asset_name);
-            if (!discarded.empty())
-                r.message += " (already re-downloaded " + discarded + " once)";
+            if (!discarded.empty()) {
+                r.message += refetch_err.empty()
+                                 ? " (already re-downloaded " + discarded + " once)"
+                                 : discarded_note();
+            }
             return r;
         }
 
@@ -4390,7 +4518,7 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
     const json codegen_want = make_codegen_meta(
         engine, rom_fingerprint(paths, opts.rom_path), bios_fingerprint(opts), sdk.tag,
         engine == "psxrecomp" ? tool_fingerprint(psxrecomp_game, psxrecomp_bios) : sdk.tag,
-        bios_emitter_sig);
+        bios_emitter_sig, generate_signature(title, engine), generate_extra_signature(title));
 
     /* BIOS C already on disk (shared engine cache dir, game zip, earlier
      * install) may come from a different psxrecomp-bios than the one this SDK
@@ -4562,6 +4690,8 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
                 gen_args.push_back(sha256);
             }
         }
+        // The port's own generate inputs (its tools/regen.sh), verbatim.
+        for (const std::string& a : title.build.generate.extra_args) gen_args.push_back(a);
 
         std::ostringstream gen_preview;
         for (size_t i = 0; i < gen_args.size(); ++i) {
@@ -4890,6 +5020,52 @@ InstallResult build_title(const Paths& paths_in, const Title& title, const Build
             "cmake build failed (exit " + std::to_string(build_rc) + ")", cmake_log,
             opts.on_output);
         return result;
+    }
+
+    // A manifest can name a target that builds fine yet never produces the
+    // launch binary: super-metroid-snes shipped with cmake.target
+    // "sm_render_capture", a render test tool, so every install compiled seven
+    // objects and died at staging with "launch binary not found". CMake
+    // targets are conventionally named after the executable they produce, so
+    // before giving up build the target carrying the launch binary's name.
+    // The manifest is still wrong — say so in the log so it gets fixed.
+    {
+        const std::string launch = title.launch_binary_for_host();
+        std::string launch_target = launch;
+        if (launch_target.size() > 4) {
+            std::string ext = launch_target.substr(launch_target.size() - 4);
+            for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (ext == ".exe") launch_target.resize(launch_target.size() - 4);
+        }
+        const bool have_binary = !launch.empty() &&
+                                 (!find_named_file(build_dir, launch).empty() ||
+                                  !find_named_file(build_dir / "Release", launch).empty());
+        if (!launch.empty() && !have_binary && launch_target != title.build.cmake.target) {
+            const std::string note = "catalog cmake.target '" + title.build.cmake.target +
+                                     "' built but produced no " + launch +
+                                     " — building target '" + launch_target +
+                                     "' instead (fix the title manifest)";
+            progress(opts.on_progress, "Building " + launch_target + "…", 0.7f);
+            if (opts.on_output) opts.on_output("warning: " + note);
+            std::vector<std::string> retry_args = {"cmake", "--build", build_dir.string(),
+                                                   "--target", launch_target};
+            if (!title.build.cmake.config.empty()) {
+                retry_args.push_back("--config");
+                retry_args.push_back(title.build.cmake.config);
+            }
+            retry_args.push_back("-j");
+            cmake_log.clear();
+            const int retry_rc = run_with_path(retry_args, src.root, path_prefix, &cmake_log,
+                                               stream_cli, tc_cmake_env);
+            if (retry_rc != 0) {
+                result.message = fail_with_log(
+                    "catalog cmake.target '" + title.build.cmake.target +
+                        "' does not produce " + launch + ", and building target '" +
+                        launch_target + "' failed (exit " + std::to_string(retry_rc) + ")",
+                    cmake_log, opts.on_output);
+                return result;
+            }
+        }
     }
 
     progress(opts.on_progress, "Staging install…", 0.9f);

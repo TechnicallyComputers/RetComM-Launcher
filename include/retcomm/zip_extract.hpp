@@ -98,6 +98,29 @@ inline fs::path safe_entry_path(const char* name) {
     return rel;
 }
 
+// Zip has no permission model of its own. Archivers on Unix stash st_mode in
+// the high 16 bits of the external attributes and mark the host in
+// version_made_by; readers that ignore it hand back every file as 0644. That
+// is how a release zip's psxrecomp-game / psxrecomp-bios emitters, tools/*.sh
+// and the game binary itself came out non-executable, and the build died with
+// "Permission denied" the first time psxrecomp_cli.py exec'd one. Only the
+// permission bits are applied — type bits (symlink, device) are not honoured;
+// a symlink entry is still written as a regular file holding its target.
+// Owner-write is always kept so a later overwrite_existing copy cannot fail on
+// a 0444 entry.
+#if !defined(_WIN32)
+inline void apply_unix_mode(const fs::path& target, const mz_zip_archive_file_stat& st) {
+    const unsigned host = (st.m_version_made_by >> 8) & 0xFFu;
+    if (host != 3u /* Unix */ && host != 19u /* OS X (Darwin) */) return;
+    const unsigned mode = (st.m_external_attr >> 16) & 0xFFFFu;
+    const unsigned perm_bits = mode & 0777u;
+    if (perm_bits == 0) return;  // nothing recorded; keep the umask default
+    std::error_code ec;
+    fs::permissions(target, static_cast<fs::perms>(perm_bits | 0200u),
+                    fs::perm_options::replace, ec);
+}
+#endif
+
 inline bool extract_open_archive(mz_zip_archive* za, const fs::path& dest, std::string* err) {
     std::error_code ec;
     fs::create_directories(dest, ec);
@@ -145,6 +168,9 @@ inline bool extract_open_archive(mz_zip_archive* za, const fs::path& dest, std::
             if (err) *err = "failed to write " + target.string() + " (disk full?)";
             return false;
         }
+#if !defined(_WIN32)
+        apply_unix_mode(target, st);
+#endif
     }
     return true;
 }

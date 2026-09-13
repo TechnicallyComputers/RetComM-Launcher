@@ -580,9 +580,22 @@ bool extract_archive(const fs::path& archive, const fs::path& dest, std::string*
         if (run_cmd(cmd, &err) == 0) return true;
     }
     if (tool_on_path_unix("7z")) {
-        const std::string cmd =
-            "7z x -y -o" + shell_quote(dest) + " " + shell_quote(archive) + " >/dev/null";
-        if (run_cmd(cmd, &err) == 0) return true;
+        // In practice this is the AppImage route (bsdtar cannot open the
+        // ELF+SquashFS shape). 7-Zip 25+ refuses to create any symlink whose
+        // target contains "..", prints "Dangerous link path was ignored", and
+        // exits 2 even though every regular file was written. A release that
+        // bundles a Python toolchain (hundreds of terminfo links) or a
+        // usr/bin/assets -> ../share/... link therefore read as a corrupt
+        // archive: the cached download was discarded and the update failed
+        // the same way on every retry. -snld restores the pre-25 behaviour;
+        // the traversal it guards against is moot for a release we are about
+        // to execute anyway. p7zip / older 7z rejects the unknown switch
+        // (exit 7), so fall back to the plain form for them.
+        const std::string tail =
+            " -o" + shell_quote(dest) + " " + shell_quote(archive) + " >/dev/null";
+        std::string err_snld;
+        if (run_cmd("7z x -y -snld" + tail, &err_snld) == 0) return true;
+        if (run_cmd("7z x -y" + tail, &err) == 0) return true;
     }
     if (error) *error = err.empty() ? "no extractor succeeded for " + archive.string() : err;
     return false;

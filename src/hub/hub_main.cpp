@@ -3137,6 +3137,16 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
 
     ImGui::Dummy(ImVec2(0, 10));
     ImGui::Separator();
+    if (ImGui::Checkbox("Hide Unowned Catalog Items", &hub.settings.filter_unsupported_titles))
+        hub.settings.dirty = true;
+    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
+    ImGui::TextWrapped(
+        "Hide catalog titles that do not have a ROM available — neither on your local ROM "
+        "library path nor (when scanned) on RomM. Installed titles stay visible. Save, then "
+        "use Install / RomM sync so remote-only matches appear.");
+    ImGui::PopStyleColor();
+
+    ImGui::Dummy(ImVec2(0, 8));
     if (ImGui::Checkbox("Always Check For Updates On Startup",
                         &hub.settings.check_updates_on_startup))
         hub.settings.dirty = true;
@@ -3221,16 +3231,6 @@ void draw_settings_panel(HubModel& hub, const Theme& th, SDL_Window* window) {
         "do not need a token. Use a classic public_repo token or fine-grained Contents read "
         "if you hit API rate limits during downloads. GITHUB_TOKEN / GH_TOKEN in the "
         "environment still overrides this. Save to apply.");
-    ImGui::PopStyleColor();
-
-    ImGui::Dummy(ImVec2(0, 10));
-    if (ImGui::Checkbox("Hide Unowned Catalog Items", &hub.settings.filter_unsupported_titles))
-        hub.settings.dirty = true;
-    ImGui::PushStyleColor(ImGuiCol_Text, th.text_muted);
-    ImGui::TextWrapped(
-        "Hide catalog titles that do not have a ROM available — neither on your local ROM "
-        "library path nor (when scanned) on RomM. Installed titles stay visible. Save, then "
-        "use Install / RomM sync so remote-only matches appear.");
     ImGui::PopStyleColor();
 
     ImGui::Dummy(ImVec2(0, 8));
